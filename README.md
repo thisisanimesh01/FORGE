@@ -24,10 +24,13 @@ pip install -e ".[dev]"
 ## CLI Usage
 ```bash
 forge doctor
+forge sandbox doctor
 forge inspect <repo-url-or-path>
 forge report <run-id>
-forge runs list
+forge runs
+forge findings list
 forge benchmark
 ```
+
 
 See `docs/specs/phase-1.md` and `docs/phase-1-plan.md` for detailed specifications and milestones.

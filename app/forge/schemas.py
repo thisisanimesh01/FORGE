@@ -139,9 +139,15 @@ class EventType(str, Enum):
     FINDING_STATE_TRANSITIONED = "finding_state_transitioned"
     VERIFICATION_PASSED = "verification_passed"
     VERIFICATION_FAILED = "verification_failed"
+    SANDBOX_EXECUTION_REQUESTED = "sandbox_execution_requested"
+    SANDBOX_EXECUTION_COMPLETED = "sandbox_execution_completed"
+    SANDBOX_EXECUTION_FAILED = "sandbox_execution_failed"
+    SANDBOX_UNAVAILABLE = "sandbox_unavailable"
     REPORT_GENERATED = "report_generated"
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"
+
+
 
 
 class RunEvent(BaseModel):

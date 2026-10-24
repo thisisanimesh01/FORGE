@@ -18,8 +18,10 @@ app = typer.Typer(
 # Sub-command groups
 db_app = typer.Typer(help="Database management commands.")
 findings_app = typer.Typer(help="Finding inspection commands.")
+sandbox_app = typer.Typer(help="Sandbox diagnostics and execution commands.")
 app.add_typer(db_app, name="db")
 app.add_typer(findings_app, name="findings")
+app.add_typer(sandbox_app, name="sandbox")
 
 
 @app.command()
@@ -31,9 +33,14 @@ def version() -> None:
 @app.command()
 def doctor() -> None:
     """Diagnose local environment, dependencies, and sandbox availability."""
+    from forge.sandbox.docker import DockerSandbox
+
     typer.echo("FORGE System Health Diagnostic")
     typer.echo("------------------------------")
     typer.echo(f"Python Version: {sys.version.split()[0]} ({sys.executable})")
+
+    # Static inspection capability
+    typer.echo("  [OK] Static repository inspection: available")
 
     # Git check
     git_path = shutil.which("git")
@@ -42,12 +49,17 @@ def doctor() -> None:
     else:
         typer.echo("  [FAIL] Git executable not found in PATH")
 
-    # Docker sandbox check
-    docker_path = shutil.which("docker")
-    if docker_path:
-        typer.echo(f"  [OK] Docker executable found: {docker_path}")
+    # Sandbox interface check
+    typer.echo("  [OK] Sandbox interface: available (fail-secure policy active)")
+
+    # Docker sandbox runtime check
+    sandbox = DockerSandbox()
+    is_healthy, health_msg = sandbox.check_health()
+    if is_healthy:
+        typer.echo(f"  [OK] Docker runtime: {health_msg}")
     else:
-        typer.echo("  [WARN] Docker not found in PATH: Runtime check sandboxing will fall back to safe skip mode.")
+        typer.echo(f"  [WARN] Docker runtime unavailable: {health_msg}")
+        typer.echo("         Runtime check sandboxing will fall back to safe skip mode (host execution is refused).")
 
     # SQLite check
     settings = get_settings()
@@ -64,6 +76,33 @@ def doctor() -> None:
     test_redact = settings.get_sanitized_dict()
     typer.echo(f"  [OK] Secret redaction active (Provider: {test_redact['llm_provider']})")
     typer.echo("System is ready for Phase 1 operations.")
+
+
+# --- Sandbox commands ---
+
+@sandbox_app.command(name="doctor")
+def sandbox_doctor() -> None:
+    """Diagnose sandbox runtime health, image availability, and isolation boundaries."""
+    from forge.sandbox.docker import DockerSandbox
+    settings = get_settings()
+
+    typer.echo("FORGE Sandbox Diagnostics")
+    typer.echo("-------------------------")
+    typer.echo(f"Configured image: {settings.docker_image}")
+    typer.echo(f"Network policy:   disabled (enforced --network none)")
+    typer.echo(f"Filesystem:       read-only workspace mount with isolated 64MB tmpfs")
+    typer.echo(f"Process user:     1000:1000 (non-root)")
+    typer.echo(f"Privileges:       no-new-privileges, cap-drop ALL")
+
+    sandbox = DockerSandbox()
+    healthy, msg = sandbox.check_health()
+    if healthy:
+        typer.secho(f"Runtime Status:   [AVAILABLE] {msg}", fg=typer.colors.GREEN)
+    else:
+        typer.secho(f"Runtime Status:   [UNAVAILABLE] {msg}", fg=typer.colors.YELLOW)
+        typer.echo("Actionable guidance: To enable isolated test/benchmark execution, start Docker.")
+        typer.echo("Security notice:     FORGE strictly refuses to run repository code directly on host.")
+
 
 
 @app.command()
