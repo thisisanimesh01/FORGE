@@ -59,12 +59,48 @@ def inspect(
     no_llm: bool = typer.Option(False, "--no-llm", help="Run in offline static inspection mode only"),
 ) -> None:
     """Safely acquire and audit a target repository."""
-    typer.echo(f"Initiating inspection on target: {target}")
-    if branch:
-        typer.echo(f"Target branch: {branch}")
-    if no_llm:
-        typer.echo("LLM investigation disabled (static-only audit).")
-    typer.echo("Note: Full inspection orchestration will be enabled across Milestones 2-6.")
+    from forge.repository import (
+        acquire_repository,
+        cleanup_repository,
+        detect_repository,
+        build_symbol_index,
+        load_instruction_files,
+        RepositoryMap,
+        SecurityError,
+        AcquisitionError,
+    )
+
+    typer.echo(f"Validating and acquiring target: {target}")
+    try:
+        acquired = acquire_repository(target, branch=branch)
+    except (SecurityError, AcquisitionError) as e:
+        typer.secho(f"Acquisition aborted: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        typer.echo(f"Inspecting repository structure at: {acquired.workspace_path}")
+        intel = detect_repository(acquired.workspace_path)
+        symbols = build_symbol_index(acquired.workspace_path)
+        instructions = load_instruction_files(acquired.workspace_path)
+
+        repo_map = RepositoryMap(
+            target=target,
+            resolved_commit_sha=acquired.resolved_commit_sha,
+            target_branch=acquired.target_branch,
+            intelligence=intel,
+            symbol_index=symbols,
+            instructions=instructions,
+        )
+
+        typer.echo("")
+        typer.echo(repo_map.render_markdown_summary())
+        typer.echo("")
+        if no_llm:
+            typer.echo("[Audit Mode] Static inspection complete (LLM disabled).")
+        else:
+            typer.echo("[Audit Mode] Static inspection complete. (LLM orchestration enabled in Milestone 5)")
+    finally:
+        cleanup_repository(acquired)
 
 
 @app.command()
