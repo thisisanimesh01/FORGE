@@ -32,12 +32,23 @@ class FindingLifecycleState(str, Enum):
 
 
 class EvidenceType(str, Enum):
-    SOURCE_LOCATION = "source_location"
-    STATIC_CHECK = "static_check"
-    COMMAND_OUTPUT = "command_output"
-    STACK_TRACE = "stack_trace"
+    # New Milestone 3 Canonical Types
+    SOURCE_EXCERPT = "source_excerpt"
+    SYMBOL_REFERENCE = "symbol_reference"
+    STATIC_ANALYSIS = "static_analysis"
     TEST_RESULT = "test_result"
-    REPOSITORY_METADATA = "repository_metadata"
+    COMMAND_RESULT = "command_result"
+    REPRODUCTION_RESULT = "reproduction_result"
+    ROOT_CAUSE_ANALYSIS = "root_cause_analysis"
+    PATCH_REFERENCE = "patch_reference"
+    VERIFICATION_RESULT = "verification_result"
+
+    # Backward compatibility aliases for Milestone 1/2
+    SOURCE_LOCATION = "source_excerpt"
+    STATIC_CHECK = "static_analysis"
+    COMMAND_OUTPUT = "command_result"
+    STACK_TRACE = "command_result"
+    REPOSITORY_METADATA = "static_analysis"
 
 
 class EvidenceRecord(BaseModel):
@@ -45,19 +56,25 @@ class EvidenceRecord(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     evidence_id: str = Field(description="Unique identifier for the evidence")
+    run_id: str = Field(default="run_default", description="Associated run ID")
+    finding_id: Optional[str] = Field(default=None, description="Associated finding ID if linked")
     evidence_type: EvidenceType = Field(description="Type of evidence recorded")
     description: str = Field(description="Human-readable description of what this evidence shows")
     file_path: Optional[str] = Field(default=None, description="Path relative to repository root")
     start_line: Optional[int] = Field(default=None, description="Starting line number")
     end_line: Optional[int] = Field(default=None, description="Ending line number")
     content: str = Field(description="Observed output, snippet, or trace")
+    details: Dict[str, Any] = Field(default_factory=dict, description="Structured metadata")
+    provenance: str = Field(default="forge:system", description="Originating tool or analyzer")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class Finding(BaseModel):
     """A structured finding discovered during audit or investigation."""
     finding_id: str = Field(description="Unique finding identifier")
+    run_id: Optional[str] = Field(default=None, description="Associated run ID")
     title: str = Field(description="Summary title of the finding")
+
     description: str = Field(description="Detailed explanation of the issue")
     severity: FindingSeverity = Field(default=FindingSeverity.MEDIUM)
     confidence: FindingConfidence = Field(default=FindingConfidence.MEDIUM)
@@ -119,6 +136,9 @@ class EventType(str, Enum):
     TOOL_CALL_COMPLETED = "tool_call_completed"
     EVIDENCE_RECORDED = "evidence_recorded"
     FINDING_CREATED = "finding_created"
+    FINDING_STATE_TRANSITIONED = "finding_state_transitioned"
+    VERIFICATION_PASSED = "verification_passed"
+    VERIFICATION_FAILED = "verification_failed"
     REPORT_GENERATED = "report_generated"
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"
