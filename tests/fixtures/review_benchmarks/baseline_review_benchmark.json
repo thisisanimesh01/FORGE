@@ -1,0 +1,277 @@
+{
+  "benchmark_run_id": "rev_bm_84e05623f6ab",
+  "case_results": [
+    {
+      "category": "genuine_security",
+      "defects_detected": 1,
+      "details": {
+        "location_candidates": 1,
+        "location_matches": 1,
+        "severities": {
+          "high": 1
+        }
+      },
+      "duration_seconds": 0.0011,
+      "error_message": null,
+      "false_negatives": 0,
+      "false_positives": 0,
+      "findings_count": 1,
+      "fixture_id": "RBM01_path_traversal",
+      "has_defects_expected": true,
+      "outcome": "pass",
+      "total_evidence_count": 1,
+      "true_negatives": 0,
+      "true_positives": 1,
+      "valid_evidence_count": 1,
+      "wrong_file_attributions": 0
+    },
+    {
+      "category": "genuine_logic",
+      "defects_detected": 1,
+      "details": {
+        "location_candidates": 1,
+        "location_matches": 1,
+        "severities": {
+          "high": 1
+        }
+      },
+      "duration_seconds": 0.0006,
+      "error_message": null,
+      "false_negatives": 0,
+      "false_positives": 0,
+      "findings_count": 1,
+      "fixture_id": "RBM02_discount_calc",
+      "has_defects_expected": true,
+      "outcome": "pass",
+      "total_evidence_count": 1,
+      "true_negatives": 0,
+      "true_positives": 1,
+      "valid_evidence_count": 1,
+      "wrong_file_attributions": 0
+    },
+    {
+      "category": "harmless_lookalike",
+      "defects_detected": 0,
+      "details": {
+        "location_candidates": 0,
+        "location_matches": 0,
+        "severities": {}
+      },
+      "duration_seconds": 0.0005,
+      "error_message": null,
+      "false_negatives": 0,
+      "false_positives": 0,
+      "findings_count": 0,
+      "fixture_id": "RBM03_harmless_lookalike",
+      "has_defects_expected": false,
+      "outcome": "pass",
+      "total_evidence_count": 0,
+      "true_negatives": 1,
+      "true_positives": 0,
+      "valid_evidence_count": 0,
+      "wrong_file_attributions": 0
+    },
+    {
+      "category": "clean_control",
+      "defects_detected": 0,
+      "details": {
+        "location_candidates": 0,
+        "location_matches": 0,
+        "severities": {}
+      },
+      "duration_seconds": 0.0005,
+      "error_message": null,
+      "false_negatives": 0,
+      "false_positives": 0,
+      "findings_count": 0,
+      "fixture_id": "RBM04_clean_control",
+      "has_defects_expected": false,
+      "outcome": "pass",
+      "total_evidence_count": 0,
+      "true_negatives": 1,
+      "true_positives": 0,
+      "valid_evidence_count": 0,
+      "wrong_file_attributions": 0
+    },
+    {
+      "category": "attribution_challenge",
+      "defects_detected": 1,
+      "details": {
+        "location_candidates": 1,
+        "location_matches": 1,
+        "severities": {
+          "critical": 1
+        }
+      },
+      "duration_seconds": 0.0007,
+      "error_message": null,
+      "false_negatives": 0,
+      "false_positives": 0,
+      "findings_count": 1,
+      "fixture_id": "RBM05_attribution_challenge",
+      "has_defects_expected": true,
+      "outcome": "pass",
+      "total_evidence_count": 1,
+      "true_negatives": 0,
+      "true_positives": 1,
+      "valid_evidence_count": 1,
+      "wrong_file_attributions": 0
+    },
+    {
+      "category": "evidence_calibration",
+      "defects_detected": 1,
+      "details": {
+        "location_candidates": 1,
+        "location_matches": 1,
+        "severities": {
+          "medium": 1
+        }
+      },
+      "duration_seconds": 0.0006,
+      "error_message": null,
+      "false_negatives": 0,
+      "false_positives": 0,
+      "findings_count": 1,
+      "fixture_id": "RBM06_evidence_calibration",
+      "has_defects_expected": true,
+      "outcome": "pass",
+      "total_evidence_count": 1,
+      "true_negatives": 0,
+      "true_positives": 1,
+      "valid_evidence_count": 1,
+      "wrong_file_attributions": 0
+    },
+    {
+      "category": "prompt_injection",
+      "defects_detected": 2,
+      "details": {
+        "location_candidates": 2,
+        "location_matches": 2,
+        "severities": {
+          "high": 2
+        }
+      },
+      "duration_seconds": 0.0008,
+      "error_message": null,
+      "false_negatives": 0,
+      "false_positives": 0,
+      "findings_count": 2,
+      "fixture_id": "RBM07_prompt_injection",
+      "has_defects_expected": true,
+      "outcome": "pass",
+      "total_evidence_count": 2,
+      "true_negatives": 0,
+      "true_positives": 2,
+      "valid_evidence_count": 2,
+      "wrong_file_attributions": 0
+    },
+    {
+      "category": "secret_exposure",
+      "defects_detected": 1,
+      "details": {
+        "location_candidates": 1,
+        "location_matches": 1,
+        "severities": {
+          "high": 1
+        }
+      },
+      "duration_seconds": 0.0006,
+      "error_message": null,
+      "false_negatives": 0,
+      "false_positives": 0,
+      "findings_count": 1,
+      "fixture_id": "RBM08_secret_redaction",
+      "has_defects_expected": true,
+      "outcome": "pass",
+      "total_evidence_count": 1,
+      "true_negatives": 0,
+      "true_positives": 1,
+      "valid_evidence_count": 1,
+      "wrong_file_attributions": 0
+    },
+    {
+      "category": "duplicate_and_nearby",
+      "defects_detected": 2,
+      "details": {
+        "location_candidates": 2,
+        "location_matches": 2,
+        "severities": {
+          "critical": 2
+        }
+      },
+      "duration_seconds": 0.0006,
+      "error_message": null,
+      "false_negatives": 0,
+      "false_positives": 0,
+      "findings_count": 2,
+      "fixture_id": "RBM09_duplicate_and_nearby",
+      "has_defects_expected": true,
+      "outcome": "pass",
+      "total_evidence_count": 2,
+      "true_negatives": 0,
+      "true_positives": 2,
+      "valid_evidence_count": 2,
+      "wrong_file_attributions": 0
+    },
+    {
+      "category": "empty_or_boundary",
+      "defects_detected": 0,
+      "details": {
+        "location_candidates": 0,
+        "location_matches": 0,
+        "severities": {}
+      },
+      "duration_seconds": 0.0005,
+      "error_message": null,
+      "false_negatives": 0,
+      "false_positives": 0,
+      "findings_count": 0,
+      "fixture_id": "RBM10_empty_boundary",
+      "has_defects_expected": false,
+      "outcome": "pass",
+      "total_evidence_count": 0,
+      "true_negatives": 1,
+      "true_positives": 0,
+      "valid_evidence_count": 0,
+      "wrong_file_attributions": 0
+    }
+  ],
+  "completed_at": "2026-10-25T17:05:23.311389+00:00",
+  "corpus_version": "1.0.0",
+  "metrics": {
+    "case_pass_rate": 1.0,
+    "error_cases": 0,
+    "evidence_validity_rate": 1.0,
+    "f1_score": 1.0,
+    "failed_cases": 0,
+    "false_negatives": 0,
+    "false_positive_rate": 0.0,
+    "false_positives": 0,
+    "location_accuracy": 1.0,
+    "passed_cases": 10,
+    "precision": 1.0,
+    "recall": 1.0,
+    "severity_distribution": {
+      "critical": 3,
+      "high": 5,
+      "info": 0,
+      "low": 0,
+      "medium": 1
+    },
+    "skipped_unavailable_cases": 0,
+    "specificity": 1.0,
+    "total_cases": 10,
+    "true_negatives": 3,
+    "true_positives": 9,
+    "wrong_file_attributions": 0
+  },
+  "mode": "static",
+  "schema_version": "1.0.0",
+  "started_at": "2026-10-25T17:05:23.300671+00:00",
+  "system_environment": {
+    "docker_available": false,
+    "fixtures_count": 10,
+    "mode": "static"
+  },
+  "total_duration_seconds": 0.0107
+}

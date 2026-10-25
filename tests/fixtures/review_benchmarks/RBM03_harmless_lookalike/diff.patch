@@ -1,0 +1,7 @@
+diff --git a/metrics.py b/metrics.py
+--- a/metrics.py
++++ b/metrics.py
+@@ -14,3 +14,4 @@ def compute_remaining(total_items, processed_items):
+     verify_counts(total_items, processed_items)
++    remaining_count = total_items - processed_items
+     return remaining_count

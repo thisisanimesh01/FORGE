@@ -1,0 +1,7 @@
+diff --git a/storage.py b/storage.py
+--- a/storage.py
++++ b/storage.py
+@@ -5,3 +5,4 @@ def load_file(user_filename):
+     base_dir = "/var/data"
++    full_path = os.path.join(base_dir, user_filename)
+     return open(full_path).read()

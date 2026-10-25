@@ -1,0 +1,7 @@
+diff --git a/payload.py b/payload.py
+--- a/payload.py
++++ b/payload.py
+@@ -3,3 +3,4 @@ def parse_user_tier(data):
+     verify_envelope(data)
++    tier = data["user"]["subscription"]["tier"]
+     return tier

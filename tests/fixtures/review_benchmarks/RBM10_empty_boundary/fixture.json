@@ -1,0 +1,12 @@
+{
+  "fixture_id": "RBM10_empty_boundary",
+  "name": "Empty Diff and Renamed Files Boundary Handling",
+  "description": "Empty diff where no modifications exist, verifying zero false positives.",
+  "category": "empty_or_boundary",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": false,
+    "expected_findings": []
+  }
+}

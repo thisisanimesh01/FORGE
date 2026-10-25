@@ -1,0 +1,21 @@
+{
+  "fixture_id": "RBM08_secret_redaction",
+  "name": "Secret Exposure in Diff and Redaction Verification",
+  "description": "Introduces hardcoded API key that must be detected and never leaked in plain text.",
+  "category": "secret_exposure",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_SEC_HARDCODED_SECRET",
+        "category": "secret_exposure",
+        "file_path": "client.py",
+        "line_number": 4,
+        "severity": "high",
+        "description": "Hardcoded credential or token detected in diff"
+      }
+    ]
+  }
+}

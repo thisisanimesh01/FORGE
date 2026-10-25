@@ -1,0 +1,14 @@
+diff --git a/helpers.py b/helpers.py
+--- a/helpers.py
++++ b/helpers.py
+@@ -1,3 +1,4 @@
+ def format_name(first, last):
++    first = first.strip()
+     return f"{first} {last}"
+diff --git a/core.py b/core.py
+--- a/core.py
++++ b/core.py
+@@ -4,3 +4,4 @@ def dispatch_job(cmd):
+     validate_cmd(cmd)
++    subprocess.run(cmd, shell=True)
+     return True

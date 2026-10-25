@@ -1,0 +1,12 @@
+{
+  "fixture_id": "RBM04_clean_control",
+  "name": "Clean Control Repository Changes",
+  "description": "Standard documentation and comment updates without any defective code patterns.",
+  "category": "clean_control",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": false,
+    "expected_findings": []
+  }
+}

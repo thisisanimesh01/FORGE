@@ -1,0 +1,21 @@
+{
+  "fixture_id": "RBM05_attribution_challenge",
+  "name": "Attribution Challenge Multi-File Diff",
+  "description": "Diff modifies helpers.py safely and modifies core.py with insecure shell execution.",
+  "category": "attribution_challenge",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_SEC_SHELL_EXECUTION",
+        "category": "security",
+        "file_path": "core.py",
+        "line_number": 6,
+        "severity": "critical",
+        "description": "Insecure shell execution with shell=True"
+      }
+    ]
+  }
+}

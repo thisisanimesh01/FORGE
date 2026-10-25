@@ -1,0 +1,22 @@
+{
+  "fixture_id": "RBM01_path_traversal",
+  "name": "Genuine Path Traversal Defect",
+  "description": "Introduces uncontained os.path.join with external parameter into filesystem operation.",
+  "category": "genuine_security",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_SEC_PATH_TRAVERSAL",
+        "category": "security",
+        "file_path": "storage.py",
+        "line_number": 8,
+        "severity": "high",
+        "description": "Path assembled using os.path.join with external input without visible containment check."
+      }
+    ],
+    "evidence_status_expected": "verified"
+  }
+}

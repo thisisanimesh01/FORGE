@@ -521,7 +521,57 @@ def benchmark_run(
         typer.secho(f"\nBenchmark results saved to: {out_p}", fg=typer.colors.GREEN)
 
 
+@benchmark_app.command(name="review")
+def benchmark_review(
+    mode: str = typer.Option("static", "--mode", "-m", help="Evaluation mode: static or llm"),
+    fixture_filter: Optional[str] = typer.Option(None, "--fixture", "-f", help="Filter for specific fixture ID"),
+    output_format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+    output_path: Optional[str] = typer.Option(None, "--output", "-o", help="Optional file path to export benchmark results"),
+) -> None:
+    """Execute review quality benchmarks evaluating precision, recall, and evidence calibration."""
+    from forge.benchmarks.review_runner import ReviewBenchmarkRunner
+    from forge.benchmarks.review_reporting import (
+        review_benchmark_to_json,
+        review_benchmark_to_markdown,
+    )
+    from forge.llm.fake import FakeLLMProvider
+
+    m = mode.lower()
+    if m not in {"static", "llm"}:
+        typer.secho(f"Invalid mode '{mode}'. Choose 'static' or 'llm'.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    provider = FakeLLMProvider() if m == "llm" else None
+    runner = ReviewBenchmarkRunner()
+    result = runner.run_suite(mode=m, fixture_filter=fixture_filter, provider=provider)
+
+    is_json = output_format.lower() == "json"
+    if is_json:
+        rendered = review_benchmark_to_json(result)
+    else:
+        rendered = review_benchmark_to_markdown(result)
+
+    if output_path:
+        out_p = Path(output_path).resolve()
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(rendered, encoding="utf-8")
+        if not is_json:
+            typer.echo(rendered)
+            typer.secho(f"\nReview benchmark results exported to: {out_p}", fg=typer.colors.GREEN)
+        else:
+            typer.echo(rendered)
+    else:
+        typer.echo(rendered)
+
+    # Fail closed if benchmark integrity failed (errors or failures)
+    if result.metrics.error_cases > 0:
+        raise typer.Exit(code=2)
+    elif result.metrics.failed_cases > 0:
+        raise typer.Exit(code=1)
+
+
 # --- Code Review Command ---
+
 
 @app.command(name="review")
 def review(

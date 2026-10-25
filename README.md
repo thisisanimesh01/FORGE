@@ -16,6 +16,7 @@ Phase 1 operates strictly in **Audit-Only** mode. FORGE does not modify source c
 - **Reporting & Benchmark Suite**: Deterministic JSON & Markdown reports, controlled seeded-bug fixtures, and automated benchmark evaluation with precision, recall, and pass rates.
 - **Diff-Aware Code Review** *(Phase 2 Milestone 1)*: Read-only Git diff analysis comparing two revisions, accurate hunk and changed-line mapping, security vulnerability and defect detection on modified lines, and automated secret redaction.
 - **Evidence-Calibrated Review Findings** *(Phase 2 Milestone 2)*: Tripartite finding structure separating observed facts from inferences and recommendations. Deterministic finding IDs, evidence verification against diff hunks, automatic confidence downgrading for unbacked claims, and strict lifecycle state machine enforcement.
+- **Review Quality Benchmarking** *(Phase 2 Milestone 3)*: Controlled, versioned benchmark suite for code review quality evaluation covering genuine security/logic defects, harmless lookalikes, clean controls, attribution challenges, prompt injection, and secret redaction.
 
 ## Installation
 Ensure Python 3.11+ is installed.
@@ -31,12 +32,18 @@ pip install -e ".[dev]"
 forge doctor
 forge sandbox doctor
 
-# Diff-Aware Code Review (Phase 2 Milestone 1)
+# Diff-Aware Code Review (Phase 2 Milestone 1 & 2)
 forge review <repo-path> --base HEAD~1 --head HEAD           # Review latest commit changes
 forge review <repo-path> --base main --head feature-branch   # Review branch diff
 forge review <repo-path> --base v1.0.0 --head v1.1.0 --no-llm # Offline static review only
 forge review <repo-path> --format json                      # Output review as JSON
 forge review <repo-path> -o reports/review.md               # Export review report to file
+
+# Review Quality Benchmarks (Phase 2 Milestone 3)
+forge benchmark review                                      # Run review quality benchmarks (Markdown)
+forge benchmark review --format json                        # Output review benchmark results as JSON
+forge benchmark review --fixture RBM01_path_traversal       # Run a single review fixture
+forge benchmark review -o reports/review_benchmark.json     # Export results to JSON file
 
 # Repository Auditing & Investigation
 forge inspect <repo-url-or-path>          # Static inspection
@@ -53,7 +60,7 @@ forge runs                               # List historical runs
 forge findings list                      # List all findings
 forge findings show <finding-id>         # Inspect specific finding details & evidence
 
-# Benchmark Suite
+# Repository Benchmark Suite (Phase 1)
 forge benchmark list                     # List all available seeded-bug fixtures
 forge benchmark run --mode static        # Run offline static benchmark suite
 forge benchmark run --mode llm           # Run LLM-assisted benchmark suite

@@ -1,0 +1,29 @@
+{
+  "fixture_id": "RBM09_duplicate_and_nearby",
+  "name": "Duplicate Findings and Nearby Distinct Defects",
+  "description": "Two distinct shell=True calls on nearby lines (4 and 6) that must both be preserved.",
+  "category": "duplicate_and_nearby",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_SEC_SHELL_EXECUTION",
+        "category": "security",
+        "file_path": "runner.py",
+        "line_number": 4,
+        "severity": "critical",
+        "description": "Insecure shell execution with shell=True"
+      },
+      {
+        "rule_id": "REV_SEC_SHELL_EXECUTION",
+        "category": "security",
+        "file_path": "runner.py",
+        "line_number": 6,
+        "severity": "critical",
+        "description": "Insecure shell execution with shell=True"
+      }
+    ]
+  }
+}

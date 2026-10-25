@@ -1,0 +1,22 @@
+{
+  "fixture_id": "RBM06_evidence_calibration",
+  "name": "Evidence Calibration and Contradiction Challenge",
+  "description": "Introduces chained dictionary access without get() requiring calibrated evidence verification.",
+  "category": "evidence_calibration",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_DEF_CHAINED_DICT_ACCESS",
+        "category": "defect",
+        "file_path": "payload.py",
+        "line_number": 5,
+        "severity": "medium",
+        "description": "Chained dictionary subscript access without error handling"
+      }
+    ],
+    "evidence_status_expected": "verified"
+  }
+}

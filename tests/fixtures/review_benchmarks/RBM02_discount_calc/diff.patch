@@ -1,0 +1,7 @@
+diff --git a/pricing.py b/pricing.py
+--- a/pricing.py
++++ b/pricing.py
+@@ -10,3 +10,4 @@ def apply_promo(base_price, discount_percent):
+     log_promo_applied()
++    final_price = base_price - discount_percent
+     return final_price

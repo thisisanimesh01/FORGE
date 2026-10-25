@@ -1,0 +1,13 @@
+{
+  "fixture_id": "RBM03_harmless_lookalike",
+  "name": "Harmless Lookalike Safe Arithmetic",
+  "description": "Calculates offset = total - count, which does not use percent or discount terms and is safe.",
+  "category": "harmless_lookalike",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": false,
+    "expected_findings": [],
+    "allow_benign_clean": true
+  }
+}

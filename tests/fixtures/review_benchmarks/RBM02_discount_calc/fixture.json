@@ -1,0 +1,22 @@
+{
+  "fixture_id": "RBM02_discount_calc",
+  "name": "Direct Percentage Subtraction Logic Defect",
+  "description": "Subtracts raw discount percent from base price rather than computing fractional reduction.",
+  "category": "genuine_logic",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_DEF_DIRECT_PERCENT_SUB",
+        "category": "defect",
+        "file_path": "pricing.py",
+        "line_number": 12,
+        "severity": "high",
+        "description": "Direct percentage subtraction defect"
+      }
+    ],
+    "evidence_status_expected": "verified"
+  }
+}
