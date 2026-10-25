@@ -1,0 +1,9 @@
+diff --git a/files.py b/files.py
+--- a/files.py
++++ b/files.py
+@@ -1,4 +1,6 @@
+ def retrieve_doc(user_file):
+     root = "/data/docs"
+-    return None
++    target_path = os.path.join(root, user_file)
++    return open(target_path, "r").read()

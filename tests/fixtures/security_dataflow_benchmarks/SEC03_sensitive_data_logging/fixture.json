@@ -1,0 +1,29 @@
+{
+  "fixture_id": "SEC03_sensitive_data_logging",
+  "name": "Sensitive Dataflow Leaked into Logging Sink",
+  "description": "Sensitive api_key assigned and logged directly into logger.info.",
+  "category": "secret_exposure",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_SEC_HARDCODED_SECRET",
+        "category": "secret_exposure",
+        "file_path": "telemetry.py",
+        "line_number": 3,
+        "severity": "high",
+        "description": "Hardcoded credential or token detected in diff"
+      },
+      {
+        "rule_id": "REV_SEC_SECRET_EXPOSURE_LOG",
+        "category": "secret_exposure",
+        "file_path": "telemetry.py",
+        "line_number": 4,
+        "severity": "high",
+        "description": "Sensitive credential exposure in logging or output sink"
+      }
+    ]
+  }
+}

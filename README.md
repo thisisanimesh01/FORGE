@@ -18,6 +18,7 @@ Phase 1 operates strictly in **Audit-Only** mode. FORGE does not modify source c
 - **Evidence-Calibrated Review Findings** *(Phase 2 Milestone 2)*: Tripartite finding structure separating observed facts from inferences and recommendations. Deterministic finding IDs, evidence verification against diff hunks, automatic confidence downgrading for unbacked claims, and strict lifecycle state machine enforcement.
 - **Review Quality Benchmarking** *(Phase 2 Milestone 3)*: Controlled, versioned benchmark suite for code review quality evaluation covering genuine security/logic defects, harmless lookalikes, clean controls, attribution challenges, prompt injection, and secret redaction.
 - **Adversarial Review Validation & Generalization** *(Phase 2 Milestone 4)*: Genuinely held-out adversarial fixture corpus, resolution of case-level vs finding-level counting units, evaluator self-tests, and defensible regression thresholds.
+- **Security-Sensitive Dataflow & Secret-Exposure Detection** *(Phase 2 Milestone 5)*: Dedicated AST-based security analysis and bounded dataflow tracking module. Detects hardcoded credentials in nested dictionaries and Authorization headers, formatted token assembly via string interpolation, and sensitive values leaking into logging, print, or HTTP sinks. Enhanced secret redaction boundary and a dedicated security benchmark corpus (`--corpus security`).
 
 ## Installation
 Ensure Python 3.11+ is installed.
@@ -33,18 +34,19 @@ pip install -e ".[dev]"
 forge doctor
 forge sandbox doctor
 
-# Diff-Aware Code Review (Phase 2 Milestone 1 & 2)
+# Diff-Aware Code Review (Phase 2 Milestones 1, 2, & 5)
 forge review <repo-path> --base HEAD~1 --head HEAD           # Review latest commit changes
 forge review <repo-path> --base main --head feature-branch   # Review branch diff
 forge review <repo-path> --base v1.0.0 --head v1.1.0 --no-llm # Offline static review only
 forge review <repo-path> --format json                      # Output review as JSON
 forge review <repo-path> -o reports/review.md               # Export review report to file
 
-# Review Quality Benchmarks (Phase 2 Milestone 3 & 4)
+# Review Quality & Security Benchmarks (Phase 2 Milestones 3, 4, & 5)
 forge benchmark review                                      # Run standard review quality benchmarks
 forge benchmark review --corpus heldout                     # Run held-out adversarial benchmark corpus
+forge benchmark review --corpus security                    # Run security dataflow benchmark corpus
 forge benchmark review --format json                        # Output benchmark results as JSON
-forge benchmark review --fixture ADV01_novel_shell_subproc  # Run a specific adversarial fixture
+forge benchmark review --fixture SEC01_nested_dict_credential # Run a specific security fixture
 forge benchmark review -o reports/review_benchmark.json     # Export results to JSON file
 
 # Repository Auditing & Investigation

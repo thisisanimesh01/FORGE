@@ -1,0 +1,21 @@
+{
+  "fixture_id": "SEC02_formatted_token_assembly",
+  "name": "Formatted Security Credential Assembly",
+  "description": "Constructs authorization token via dynamic string formatting.",
+  "category": "genuine_security",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_SEC_FORMATTED_TOKEN",
+        "category": "security",
+        "file_path": "auth.py",
+        "line_number": 2,
+        "severity": "high",
+        "description": "Security credential assembled via string formatting"
+      }
+    ]
+  }
+}

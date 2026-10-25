@@ -10,10 +10,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SECRET_PATTERNS = [
     re.compile(r"(?i)(api[_-]?key|secret|token|password|auth|bearer)\s*[:=]\s*['\"]?([a-zA-Z0-9_\-\.]{8,})['\"]?"),
+    re.compile(r"(?i)(bearer\s+)([a-zA-Z0-9_\-\.]{12,})"),
     re.compile(r"ghp_[a-zA-Z0-9]{36}"),
     re.compile(r"github_pat_[a-zA-Z0-9_]{82}"),
     re.compile(r"sk-[a-zA-Z0-9]{20,48}"),
     re.compile(r"xox[baprs]-[a-zA-Z0-9]{10,48}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
 ]
 
 

@@ -1,0 +1,10 @@
+diff --git a/runner.py b/runner.py
+--- a/runner.py
++++ b/runner.py
+@@ -1,4 +1,6 @@
+ def launch_worker(user_script):
+     env = {"ENV": "prod"}
+-    return True
++    cmd = f"python {user_script}"
++    subprocess.Popen(cmd, shell=True)
++    return True

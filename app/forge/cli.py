@@ -534,6 +534,7 @@ def benchmark_review(
         ReviewCorpusLoader,
         DEFAULT_REVIEW_FIXTURES_DIR,
         DEFAULT_ADVERSARIAL_FIXTURES_DIR,
+        DEFAULT_SECURITY_FIXTURES_DIR,
     )
     from forge.benchmarks.review_runner import ReviewBenchmarkRunner
     from forge.benchmarks.review_reporting import (
@@ -550,10 +551,12 @@ def benchmark_review(
     c_choice = corpus.lower()
     if c_choice in {"heldout", "adversarial"}:
         loader = ReviewCorpusLoader(fixtures_dir=DEFAULT_ADVERSARIAL_FIXTURES_DIR)
+    elif c_choice in {"security", "dataflow"}:
+        loader = ReviewCorpusLoader(fixtures_dir=DEFAULT_SECURITY_FIXTURES_DIR)
     elif c_choice in {"standard", "default"}:
         loader = ReviewCorpusLoader(fixtures_dir=DEFAULT_REVIEW_FIXTURES_DIR)
     else:
-        typer.secho(f"Invalid corpus '{corpus}'. Choose 'standard' or 'heldout'.", fg=typer.colors.RED, err=True)
+        typer.secho(f"Invalid corpus '{corpus}'. Choose 'standard', 'heldout', or 'security'.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     provider = FakeLLMProvider() if m == "llm" else None

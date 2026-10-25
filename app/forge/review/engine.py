@@ -17,6 +17,7 @@ from forge.review.evidence import (
     EvidenceCalibrationStatus,
     create_calibrated_evidence,
 )
+from forge.review.security_analyzer import SecurityASTAnalyzer
 from forge.review.models import (
     DiffBundle,
     DiffFile,
@@ -231,6 +232,67 @@ class ReviewEngine:
                                 evidence_status=EvidenceCalibrationStatus.VERIFIED,
                             )
                             raw_findings.append(finding)
+
+            # 2b. Run AST-based security and bounded dataflow analysis for Python files
+            if file.path.endswith(".py"):
+                # Collect all lines from file if on disk, or reconstruct lines from hunks
+                file_full_path = target_path / file.path if target_path else None
+                file_source = ""
+                if file_full_path and file_full_path.is_file():
+                    try:
+                        file_source = file_full_path.read_text(encoding="utf-8")
+                    except Exception:
+                        file_source = ""
+
+                if not file_source:
+                    # Reconstruct changed file content from diff hunks for isolated patch analysis
+                    file_source = "\n".join(
+                        l.content for h in file.hunks for l in h.lines if l.origin in ("+", " ")
+                    )
+
+                if file_source:
+                    changed_linenos = set(file.changed_line_numbers)
+                    sec_analyzer = SecurityASTAnalyzer(
+                        file_path=file.path,
+                        source_code=file_source,
+                        changed_lines=changed_linenos,
+                    )
+                    sec_findings = sec_analyzer.analyze()
+                    for sf in sec_findings:
+                        fid = generate_finding_id(sf.rule_id, sf.file_path, sf.line_number, sf.code_snippet)
+                        ev = create_calibrated_evidence(
+                            evidence_type=EvidenceType.STATIC_ANALYSIS,
+                            description=f"AST analysis verified hazard {sf.hazard_type.value}: {sf.observed_evidence}",
+                            content=sf.code_snippet,
+                            provenance="forge:review:ast_security",
+                            file_path=sf.file_path,
+                            start_line=sf.line_number,
+                            end_line=sf.end_line_number or sf.line_number,
+                            details=sf.details,
+                        )
+                        raw_findings.append(
+                            ReviewFinding(
+                                finding_id=fid,
+                                category=sf.category,
+                                severity=sf.severity,
+                                confidence=sf.confidence,
+                                lifecycle_state=FindingLifecycleState.SUSPECTED,
+                                title=f"{sf.title} at {sf.file_path}:{sf.line_number}",
+                                explanation=f"{sf.observed_evidence} {sf.inference}",
+                                observed_evidence=sf.observed_evidence,
+                                inference=sf.inference,
+                                recommendation=sf.recommendation,
+                                file_path=sf.file_path,
+                                line_number=sf.line_number,
+                                end_line_number=sf.end_line_number or sf.line_number,
+                                rule_id=sf.rule_id,
+                                code_snippet=sf.code_snippet,
+                                calibrated_evidence=[ev],
+                                evidence_references=[ev.evidence_id],
+                                evidence_status=EvidenceCalibrationStatus.VERIFIED,
+                                dataflow_path=sf.dataflow_path.model_dump() if sf.dataflow_path else None,
+                            )
+                        )
 
         # 3. Deduplicate findings deterministically
         deduped = deduplicate_findings(raw_findings)

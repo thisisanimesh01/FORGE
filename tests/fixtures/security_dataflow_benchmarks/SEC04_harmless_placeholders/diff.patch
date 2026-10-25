@@ -1,0 +1,10 @@
+diff --git a/config_sample.py b/config_sample.py
+--- a/config_sample.py
++++ b/config_sample.py
+@@ -1,3 +1,6 @@
+ def get_sample_config():
+-    return {}
++    api_key = "<your_api_key_here>"
++    token = "placeholder"
++    headers = {"Authorization": "Bearer test_token"}
++    return {"key": api_key, "token": token, "headers": headers}

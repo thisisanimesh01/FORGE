@@ -134,6 +134,7 @@ class ReviewFinding(BaseModel):
     # Uncertainty and limitation handling
     evidence_status: EvidenceCalibrationStatus = EvidenceCalibrationStatus.VERIFIED
     uncertainty_note: Optional[str] = None
+    dataflow_path: Optional[Dict[str, Any]] = None
 
 
 class ReviewReport(BaseModel):

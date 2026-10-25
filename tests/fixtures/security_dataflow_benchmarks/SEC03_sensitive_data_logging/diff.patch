@@ -1,0 +1,10 @@
+diff --git a/telemetry.py b/telemetry.py
+--- a/telemetry.py
++++ b/telemetry.py
+@@ -1,4 +1,6 @@
+ def record_login():
+     username = "alice"
+-    return True
++    api_key = "sk-telemetry1234567890abcdef1234"
++    logger.info("User logged in with key: %s", api_key)
++    return True

@@ -1,0 +1,12 @@
+{
+  "fixture_id": "SEC04_harmless_placeholders",
+  "name": "Benign Documentation Placeholders",
+  "description": "Introduces harmless placeholder strings and sample tokens in config examples.",
+  "category": "harmless_lookalike",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": false,
+    "expected_findings": []
+  }
+}

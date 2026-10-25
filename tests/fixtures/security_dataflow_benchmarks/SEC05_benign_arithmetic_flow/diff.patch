@@ -1,0 +1,9 @@
+diff --git a/metrics.py b/metrics.py
+--- a/metrics.py
++++ b/metrics.py
+@@ -1,3 +1,5 @@
+ def compute_variance(actual, baseline):
+-    return 0
++    difference = actual - baseline
++    rate_of_change = difference / baseline if baseline else 0
++    return {"diff": difference, "rate": rate_of_change}

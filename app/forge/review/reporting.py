@@ -88,6 +88,13 @@ def review_report_to_markdown(report: ReviewReport) -> str:
                     "```",
                 ])
 
+            if f.dataflow_path:
+                lines.extend([
+                    "",
+                    f"> **Dataflow Path:** `{f.dataflow_path.get('source_kind', 'source')}:{f.dataflow_path.get('source_name', '')}` (line {f.dataflow_path.get('source_line')}) ➔ `{f.dataflow_path.get('sink_kind', 'sink')}:{f.dataflow_path.get('sink_name', '')}` (line {f.dataflow_path.get('sink_line')})",
+                    f"> {f.dataflow_path.get('description', '')}",
+                ])
+
             if f.calibrated_evidence:
                 lines.extend([
                     "",

@@ -1,0 +1,12 @@
+{
+  "fixture_id": "SEC05_benign_arithmetic_flow",
+  "name": "Benign Arithmetic Flow Lookalike",
+  "description": "Performs normal numerical subtraction without any security or calculation defect.",
+  "category": "harmless_lookalike",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": false,
+    "expected_findings": []
+  }
+}

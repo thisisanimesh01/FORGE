@@ -1,0 +1,21 @@
+{
+  "fixture_id": "SEC06_http_client_sink_transmission",
+  "name": "Sensitive Credential Passed into HTTP Client Sink",
+  "description": "Hardcoded api_key passed into requests.post call.",
+  "category": "secret_exposure",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_SEC_HARDCODED_SECRET",
+        "category": "secret_exposure",
+        "file_path": "client_sync.py",
+        "line_number": 3,
+        "severity": "high",
+        "description": "Hardcoded credential or token detected in diff"
+      }
+    ]
+  }
+}

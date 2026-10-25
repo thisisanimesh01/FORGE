@@ -1,0 +1,21 @@
+{
+  "fixture_id": "SEC07_command_shell_hazard",
+  "name": "Command Shell Execution Hazard",
+  "description": "Constructs command string and executes via subprocess.Popen(..., shell=True).",
+  "category": "genuine_security",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_SEC_SHELL_EXECUTION",
+        "category": "security",
+        "file_path": "runner.py",
+        "line_number": 4,
+        "severity": "critical",
+        "description": "Insecure shell execution with shell=True"
+      }
+    ]
+  }
+}

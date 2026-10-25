@@ -1,0 +1,21 @@
+{
+  "fixture_id": "SEC08_path_traversal_hazard",
+  "name": "Uncontained Path Traversal Hazard",
+  "description": "Assembles filesystem path with external filename via os.path.join without containment check.",
+  "category": "genuine_security",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_SEC_PATH_TRAVERSAL",
+        "category": "security",
+        "file_path": "files.py",
+        "line_number": 3,
+        "severity": "high",
+        "description": "Potential uncontained path traversal in os.path.join"
+      }
+    ]
+  }
+}

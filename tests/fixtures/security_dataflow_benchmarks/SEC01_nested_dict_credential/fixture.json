@@ -1,0 +1,21 @@
+{
+  "fixture_id": "SEC01_nested_dict_credential",
+  "name": "Nested Dictionary Secret Credential",
+  "description": "Introduces hardcoded client_secret in dictionary return literal.",
+  "category": "secret_exposure",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_SEC_HARDCODED_SECRET",
+        "category": "secret_exposure",
+        "file_path": "config.py",
+        "line_number": 2,
+        "severity": "high",
+        "description": "Hardcoded credential or token detected in diff"
+      }
+    ]
+  }
+}

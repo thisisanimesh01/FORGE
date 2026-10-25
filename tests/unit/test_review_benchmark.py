@@ -337,13 +337,12 @@ class TestReviewBenchmarkCLI:
 
     def test_cli_benchmark_review_heldout_corpus(self):
         result = runner.invoke(app, ["benchmark", "review", "--corpus", "heldout", "--format", "json"])
-        # ADV07 is a known defect not matched by static pattern -> exits 1
-        assert result.exit_code in {0, 1}
+        assert result.exit_code == 0
         parsed = json.loads(result.output)
         assert parsed["metrics"]["total_cases"] == 8
-        assert parsed["metrics"]["case_true_positives"] == 5
+        assert parsed["metrics"]["case_true_positives"] == 6
         assert parsed["metrics"]["case_true_negatives"] == 2
-        assert parsed["metrics"]["case_false_negatives"] == 1
+        assert parsed["metrics"]["case_false_negatives"] == 0
 
 
 class TestAdversarialHeldoutBenchmark:

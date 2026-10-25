@@ -1,0 +1,10 @@
+diff --git a/client_sync.py b/client_sync.py
+--- a/client_sync.py
++++ b/client_sync.py
+@@ -1,4 +1,6 @@
+ def sync_remote_data():
+     target_url = "https://internal.service.local/sync"
+-    return True
++    api_key = "sk-remoteapi999888777666555444333222"
++    requests.post(target_url, json={"data": 123}, headers={"X-Key": api_key})
++    return True
