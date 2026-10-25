@@ -22,11 +22,15 @@ class ReproductionOutcome(str, Enum):
     """Categorized outcome of a reproduction execution."""
     REPRODUCED = "reproduced"              # Defect manifested as expected (e.g., expected exit code/pattern matched)
     NOT_REPRODUCED = "not_reproduced"      # Defect did not manifest (e.g. command passed unexpectedly)
+    UNRELATED_FAILURE = "unrelated_failure" # Execution failed due to reasons unrelated to defect (e.g. harness/syntax/deps)
+    ENVIRONMENT_BLOCKED = "environment_blocked" # Execution blocked by sandbox, isolation, or Docker unavailability
+    TIMEOUT = "timeout"                    # Execution exceeded allocated duration quota
+    FLAKY = "flaky"                        # Inconsistent outcomes across retries on the same pinned revision
+    INVALID_PLAN = "invalid_plan"          # Plan validation failed or stale revision mismatch
+    INCONCLUSIVE = "inconclusive"          # Partial run or unexpected output where defect presence cannot be determined
     PASSED = "passed"                      # Clean control test passed as expected
     FAILED = "failed"                      # Execution failed with an unexpected error
-    INCONCLUSIVE = "inconclusive"          # Partial run or unexpected output where defect presence cannot be determined
     BLOCKED = "blocked"                    # Execution blocked by environment or sandbox unavailability
-    TIMEOUT = "timeout"                    # Execution exceeded allocated duration quota
     RESOURCE_EXHAUSTED = "resource_exhausted" # Container exceeded memory, CPU, or PID limit
     SKIPPED_SANDBOX_UNAVAILABLE = "skipped_sandbox_unavailable" # Docker unavailable; fail-closed
     ERROR = "error"                        # Malformed contract or initialization failure

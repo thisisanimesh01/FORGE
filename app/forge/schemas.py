@@ -148,6 +148,8 @@ class EventType(str, Enum):
     REPRODUCTION_ATTEMPT_COMPLETED = "reproduction_attempt_completed"
     REPRODUCTION_ATTEMPT_FAILED = "reproduction_attempt_failed"
     REPRODUCTION_CASE_RESUMED = "reproduction_case_resumed"
+    REPRODUCTION_OUTCOME_CLASSIFIED = "reproduction_outcome_classified"
+    REPRODUCTION_EVIDENCE_VALIDATED = "reproduction_evidence_validated"
     REPORT_GENERATED = "report_generated"
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"

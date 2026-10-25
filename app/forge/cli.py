@@ -293,10 +293,13 @@ def repro_show(
 
     attempts = manager.list_attempts(case_id)
 
+    classification = manager.get_classification(case_id)
+
     if format.lower() == "json":
         data = {
             "case": case.model_dump(mode="json"),
             "attempts": [a.model_dump(mode="json") for a in attempts],
+            "classification": classification.model_dump(mode="json") if classification else None,
         }
         typer.echo(json.dumps(data, indent=2))
         return
@@ -308,6 +311,14 @@ def repro_show(
     typer.echo(f"  Commit SHA:    {case.target_commit_sha}")
     typer.echo(f"  Attempts:      {case.attempts_count} (Max Retries: {case.max_retries})")
     typer.echo(f"  Created At:    {case.created_at.isoformat()}")
+
+    if classification:
+        typer.echo(f"\nClassification (v{classification.classifier_version}):")
+        typer.echo(f"  Outcome:       {classification.outcome.value.upper()}")
+        typer.echo(f"  Reason Code:   {classification.reason_code.value}")
+        typer.echo(f"  Explanation:   {classification.explanation}")
+        typer.echo(f"  Reproduced:    {'YES' if classification.is_reproduced else 'NO'}")
+        typer.echo(f"  Oracle Proven: {'YES' if classification.oracle_verified else 'NO'}")
 
     if attempts:
         typer.echo("\nAttempts History:")
@@ -323,6 +334,58 @@ def repro_show(
                 typer.echo(f"    Evidence ID:  {a.evidence_id}")
     else:
         typer.echo("\nAttempts: none executed yet")
+
+
+@repro_app.command(name="classify")
+def repro_classify(
+    case_id: str = typer.Argument(..., help="Reproduction case ID to classify"),
+    format: str = typer.Option("text", "--format", "-f", help="Output format: text or json"),
+) -> None:
+    """Classify the reproduction outcome of a case using deterministic precedence rules.
+
+    Exit codes:
+      0 = REPRODUCED (defect confirmed by independent oracle)
+      1 = NOT_REPRODUCED or UNRELATED_FAILURE
+      2 = INVALID_PLAN (plan policy violation or stale revision)
+      3 = ENVIRONMENT_BLOCKED (Docker or sandbox unavailable)
+      4 = INCONCLUSIVE, FLAKY, or TIMEOUT
+    """
+    from forge.reproduction import ReproductionCaseManager, ClassificationOutcome
+
+    manager = ReproductionCaseManager()
+    case = manager.get_case(case_id)
+    if not case:
+        typer.secho(f"Reproduction case '{case_id}' not found.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    classification = manager.classify_case(case_id)
+
+    if format.lower() == "json":
+        typer.echo(json.dumps(classification.model_dump(mode="json"), indent=2))
+    else:
+        typer.echo(f"Case Classification: {classification.case_id}")
+        typer.echo(f"  Outcome:       {classification.outcome.value.upper()}")
+        typer.echo(f"  Reason Code:   {classification.reason_code.value}")
+        typer.echo(f"  Explanation:   {classification.explanation}")
+        typer.echo(f"  Reproduced:    {'YES' if classification.is_reproduced else 'NO'}")
+        typer.echo(f"  Oracle Proven: {'YES' if classification.oracle_verified else 'NO'}")
+        typer.echo(f"  Classifier Ver:{classification.classifier_version}")
+        if classification.evidence_id:
+            typer.echo(f"  Evidence ID:   {classification.evidence_id}")
+
+    if classification.outcome == ClassificationOutcome.REPRODUCED:
+        raise typer.Exit(code=0)
+    elif classification.outcome in {ClassificationOutcome.NOT_REPRODUCED, ClassificationOutcome.UNRELATED_FAILURE}:
+        raise typer.Exit(code=1)
+    elif classification.outcome == ClassificationOutcome.INVALID_PLAN:
+        raise typer.Exit(code=2)
+    elif classification.outcome == ClassificationOutcome.ENVIRONMENT_BLOCKED:
+        raise typer.Exit(code=3)
+    elif classification.outcome in {ClassificationOutcome.INCONCLUSIVE, ClassificationOutcome.FLAKY, ClassificationOutcome.TIMEOUT}:
+        raise typer.Exit(code=4)
+    else:
+        raise typer.Exit(code=1)
+
 
 
 @repro_app.command(name="run")
@@ -1277,24 +1340,121 @@ def plan_run(
 
     res = harness.execute(request, ws_path)
 
-    typer.echo(f"\nOutcome: {res.outcome.value.upper()}")
-    if res.diagnostic_message:
-        typer.echo(f"Diagnostic: {res.diagnostic_message}")
-    if res.exit_code is not None:
-        typer.echo(f"Exit Code: {res.exit_code}")
+    # 4. Deterministically classify the execution outcome
+    from forge.reproduction.classifier import ReproductionOutcomeClassifier, ClassificationOutcome
+    from forge.reproduction.models import ReproductionAttempt, FieldProvenance
 
-    # 4. Map outcome to exit code
-    if res.outcome == ReproductionOutcome.REPRODUCED:
+    temp_attempt = ReproductionAttempt(
+        attempt_id=f"att_cli_{_uuid.uuid4().hex[:8]}",
+        case_id=f"case_{plan.finding_id}",
+        attempt_number=1,
+        run_id=run_id or "run_cli",
+        outcome=res.outcome,
+        exit_code=res.exit_code,
+        duration_ms=res.duration_ms,
+        stdout_excerpt=res.stdout[:5000],
+        stderr_excerpt=res.stderr[:5000],
+        matched_patterns=res.matched_patterns,
+        isolation_details=res.isolation_details,
+        diagnostic_message=res.diagnostic_message,
+        cleanup_status="cleaned",
+    )
+    classifier = ReproductionOutcomeClassifier()
+    classification = classifier.classify_attempt(temp_attempt, plan=plan)
+
+    typer.echo(f"\nClassified Outcome: {classification.outcome.value.upper()}")
+    typer.echo(f"Reason Code:        {classification.reason_code.value}")
+    typer.echo(f"Explanation:        {classification.explanation}")
+    if res.exit_code is not None:
+        typer.echo(f"Exit Code:          {res.exit_code}")
+
+    # 5. Map classified outcome to exit code
+    if classification.outcome == ClassificationOutcome.REPRODUCED:
         raise typer.Exit(code=0)
-    elif res.outcome in {ReproductionOutcome.NOT_REPRODUCED, ReproductionOutcome.PASSED, ReproductionOutcome.FAILED}:
+    elif classification.outcome in {ClassificationOutcome.NOT_REPRODUCED, ClassificationOutcome.UNRELATED_FAILURE}:
         raise typer.Exit(code=1)
-    elif res.outcome in {ReproductionOutcome.BLOCKED, ReproductionOutcome.SKIPPED_SANDBOX_UNAVAILABLE}:
+    elif classification.outcome == ClassificationOutcome.INVALID_PLAN:
+        raise typer.Exit(code=2)
+    elif classification.outcome == ClassificationOutcome.ENVIRONMENT_BLOCKED:
         typer.secho("Sandbox unavailable — execution blocked (Docker not found).", fg=typer.colors.YELLOW, err=True)
         raise typer.Exit(code=3)
-    elif res.outcome == ReproductionOutcome.INCONCLUSIVE:
+    elif classification.outcome in {ClassificationOutcome.INCONCLUSIVE, ClassificationOutcome.FLAKY, ClassificationOutcome.TIMEOUT}:
         raise typer.Exit(code=4)
     else:
         raise typer.Exit(code=1)
+
+
+@plan_app.command(name="classify")
+def plan_classify(
+    plan_file: str = typer.Argument(..., help="Path to plan JSON file to classify"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace root path for symlink-escape check"),
+    format: str = typer.Option("text", "--format", "-f", help="Output format: text or json"),
+) -> None:
+    """Classify a plan's execution viability and oracle provenance.
+
+    Exit codes:
+      0 = valid plan with trusted oracle
+      2 = invalid plan or untrusted oracle (INSUFFICIENT_INFORMATION)
+    """
+    from forge.reproduction.planner import ReproductionPlan, ReproductionStrategy
+    from forge.reproduction.validator import ReproductionPlanValidator
+    from forge.reproduction.classifier import ReproductionOutcomeClassifier, ClassificationOutcome, ClassificationReasonCode
+
+    plan_path = Path(plan_file).resolve()
+    if not plan_path.exists():
+        typer.secho(f"Plan file not found: {plan_file}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        raw = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan = ReproductionPlan.model_validate(raw)
+    except Exception as exc:
+        typer.secho(f"Failed to load plan: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    ws_path = Path(workspace).resolve() if workspace else None
+    validator = ReproductionPlanValidator()
+    val_res = validator.validate(plan, workspace_path=ws_path)
+
+    classifier = ReproductionOutcomeClassifier()
+    is_trusted = classifier._is_trusted_oracle(plan.provenance.expected_behavior_source)
+
+    if not val_res.is_valid:
+        outcome = ClassificationOutcome.INVALID_PLAN
+        reason = ClassificationReasonCode.PLAN_POLICY_VIOLATION
+        explanation = f"Plan validation failed: {'; '.join(val_res.violations)}"
+    elif plan.strategy == ReproductionStrategy.INSUFFICIENT_INFORMATION or not is_trusted:
+        outcome = ClassificationOutcome.INVALID_PLAN
+        reason = ClassificationReasonCode.ORACLE_ABSENT_OR_UNTRUSTED
+        explanation = "Plan lacks an independently sourced trusted oracle; cannot confirm defect reproduction."
+    else:
+        outcome = ClassificationOutcome.NOT_REPRODUCED
+        reason = ClassificationReasonCode.ORACLE_OBSERVED_NO_VIOLATION
+        explanation = f"Plan is valid and backed by trusted oracle ({plan.provenance.expected_behavior_source.value})."
+
+    res_data = {
+        "plan_id": plan.plan_id,
+        "outcome": outcome.value,
+        "reason_code": reason.value,
+        "explanation": explanation,
+        "is_valid": val_res.is_valid,
+        "oracle_trusted": is_trusted,
+        "violations": val_res.violations,
+    }
+
+    if format.lower() == "json":
+        typer.echo(json.dumps(res_data, indent=2))
+    else:
+        typer.echo(f"Plan Classification: {plan.plan_id}")
+        typer.echo(f"  Outcome:       {outcome.value.upper()}")
+        typer.echo(f"  Reason Code:   {reason.value}")
+        typer.echo(f"  Explanation:   {explanation}")
+        typer.echo(f"  Valid:         {'YES' if val_res.is_valid else 'NO'}")
+        typer.echo(f"  Oracle Proven: {'YES' if is_trusted else 'NO'}")
+
+    if outcome == ClassificationOutcome.INVALID_PLAN:
+        raise typer.Exit(code=2)
+
 
 
 def main() -> None:

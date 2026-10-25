@@ -23,6 +23,14 @@ from forge.reproduction.planner import (
     generate_plan_id,
 )
 from forge.reproduction.validator import ReproductionPlanValidator
+from forge.reproduction.classifier import (
+    ClassificationOutcome,
+    ClassificationReasonCode,
+    ReproductionClassification,
+    ReproductionOutcomeClassifier,
+    CLASSIFIER_VERSION,
+    generate_classification_id,
+)
 
 __all__ = [
     "CaseStatus",
@@ -44,4 +52,11 @@ __all__ = [
     "generate_plan_id",
     # Validator
     "ReproductionPlanValidator",
+    # Classifier
+    "ClassificationOutcome",
+    "ClassificationReasonCode",
+    "ReproductionClassification",
+    "ReproductionOutcomeClassifier",
+    "CLASSIFIER_VERSION",
+    "generate_classification_id",
 ]

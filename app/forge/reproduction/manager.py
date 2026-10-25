@@ -29,6 +29,13 @@ from forge.reproduction.models import (
     RetryPolicy,
     generate_case_id,
 )
+from forge.reproduction.classifier import (
+    ClassificationOutcome,
+    ClassificationReasonCode,
+    ReproductionClassification,
+    ReproductionOutcomeClassifier,
+)
+from forge.reproduction.planner import ReproductionPlan
 from forge.sandbox.contracts import (
     ReproductionCommand,
     ReproductionOutcome,
@@ -70,9 +77,12 @@ class ReproductionCaseManager:
         store: Optional[ForgeStore] = None,
         db_path: Optional[Path] = None,
         harness: Optional[ReproductionHarness] = None,
+        classifier: Optional[ReproductionOutcomeClassifier] = None,
     ):
         self.store = store or ForgeStore(db_path=db_path)
         self.harness = harness or ReproductionHarness()
+        self.classifier = classifier or ReproductionOutcomeClassifier()
+
 
     def _conn(self):
         return get_db_connection(self.store.db_path)
@@ -115,6 +125,8 @@ class ReproductionCaseManager:
             "target_commit_sha": FieldProvenance.USER_INPUT,
             "command": FieldProvenance.UNTRUSTED_REPOSITORY,
             "environment": FieldProvenance.SYSTEM_POLICY,
+            "hypothesis": FieldProvenance.STATIC_ANALYSIS,
+            "expected_behavior": FieldProvenance.STATIC_ANALYSIS,
         }
 
         case = ReproductionCase(
@@ -213,9 +225,17 @@ class ReproductionCaseManager:
                 attempts_count=row["attempts_count"],
                 max_retries=row["max_retries"],
                 retry_policy=retry_policy,
+                provenance_map={
+                    "finding_id": FieldProvenance.STATIC_ANALYSIS,
+                    "hypothesis": FieldProvenance.STATIC_ANALYSIS,
+                    "expected_behavior": FieldProvenance.STATIC_ANALYSIS,
+                    "command": FieldProvenance.UNTRUSTED_REPOSITORY,
+                    "environment": FieldProvenance.SYSTEM_POLICY,
+                },
                 created_at=datetime.fromisoformat(row["created_at"]),
                 updated_at=datetime.fromisoformat(row["updated_at"]),
             )
+
         finally:
             conn.close()
 
@@ -369,8 +389,46 @@ class ReproductionCaseManager:
         stdout_clean = redact_secrets(res.stdout[:max_excerpt])
         stderr_clean = redact_secrets(res.stderr[:max_excerpt])
 
-        # Map to CaseStatus
-        if res.outcome == ReproductionOutcome.REPRODUCED:
+        # Construct attempt representation for classification
+        temp_attempt = ReproductionAttempt(
+            attempt_id=attempt_id,
+            case_id=case.case_id,
+            attempt_number=attempt_number,
+            run_id=case.run_id,
+            outcome=res.outcome,
+            exit_code=res.exit_code,
+            duration_ms=res.duration_ms,
+            stdout_digest=stdout_digest,
+            stderr_digest=stderr_digest,
+            stdout_excerpt=stdout_clean,
+            stderr_excerpt=stderr_clean,
+            stdout_truncated=stdout_truncated,
+            stderr_truncated=stderr_truncated,
+            matched_patterns=res.matched_patterns,
+            evidence_id=None,
+            isolation_details=res.isolation_details,
+            provenance={k: FieldProvenance(v) for k, v in {
+                "command": FieldProvenance.UNTRUSTED_REPOSITORY.value,
+                "execution": FieldProvenance.SANDBOX_EXECUTION.value if res.sandbox_available else FieldProvenance.SYSTEM_POLICY.value,
+                "hypothesis": FieldProvenance.STATIC_ANALYSIS.value,
+            }.items()},
+            diagnostic_message=res.diagnostic_message,
+            cleanup_status=cleanup_status,
+            started_at=started_at,
+            completed_at=completed_at,
+        )
+
+        # 1. Deterministically classify current attempt
+        attempt_classification = self.classifier.classify_attempt(temp_attempt, case=case)
+
+        # 2. Evaluate multi-attempt history for consistency and FLAKY behavior
+        all_attempts = attempts + [temp_attempt]
+        history_classification = self.classifier.classify_case_history(case, all_attempts)
+
+        # Map to CaseStatus with FLAKY detection
+        if history_classification.outcome == ClassificationOutcome.FLAKY:
+            new_case_status = CaseStatus.FLAKY
+        elif res.outcome == ReproductionOutcome.REPRODUCED:
             new_case_status = CaseStatus.REPRODUCED
         elif res.outcome == ReproductionOutcome.NOT_REPRODUCED:
             new_case_status = CaseStatus.NOT_REPRODUCED
@@ -379,7 +437,6 @@ class ReproductionCaseManager:
         elif res.outcome in [ReproductionOutcome.BLOCKED, ReproductionOutcome.SKIPPED_SANDBOX_UNAVAILABLE]:
             new_case_status = CaseStatus.BLOCKED
         elif res.outcome == ReproductionOutcome.PASSED:
-            # Clean test passed -> defect did not reproduce
             new_case_status = CaseStatus.NOT_REPRODUCED
         else:
             new_case_status = CaseStatus.FAILED
@@ -389,6 +446,9 @@ class ReproductionCaseManager:
         evidence_content = (
             f"Reproduction Command: {' '.join(case.contract.command.args)}\n"
             f"Observed Exit Code: {res.exit_code}\n"
+            f"Classified Outcome: {attempt_classification.outcome.value}\n"
+            f"Reason Code: {attempt_classification.reason_code.value}\n"
+            f"Explanation: {attempt_classification.explanation}\n"
             f"Matched Patterns: {res.matched_patterns}\n"
             f"Diagnostic: {res.diagnostic_message}\n\n"
             f"--- STDOUT ---\n{stdout_clean}\n\n"
@@ -399,9 +459,10 @@ class ReproductionCaseManager:
             "command": FieldProvenance.UNTRUSTED_REPOSITORY.value,
             "execution": FieldProvenance.SANDBOX_EXECUTION.value if res.sandbox_available else FieldProvenance.SYSTEM_POLICY.value,
             "hypothesis": FieldProvenance.STATIC_ANALYSIS.value,
+            "classification": FieldProvenance.SYSTEM_POLICY.value,
         }
 
-        # Transactionally record attempt, evidence, update case, and advance lifecycle if verified
+        # Transactionally record attempt, evidence, classification, update case, and advance lifecycle if verified
         conn = self._conn()
         try:
             with conn:
@@ -409,15 +470,16 @@ class ReproductionCaseManager:
                 evidence = create_evidence(
                     run_id=case.run_id,
                     evidence_type=EvidenceType.REPRODUCTION_RESULT,
-                    description=f"Reproduction attempt #{attempt_number} for finding '{case.finding_id}' ({res.outcome.value})",
+                    description=f"Reproduction attempt #{attempt_number} for finding '{case.finding_id}' ({attempt_classification.outcome.value})",
                     content=evidence_content,
                     finding_id=case.finding_id,
                     details={
                         "case_id": case.case_id,
                         "attempt_id": attempt_id,
                         "attempt_number": attempt_number,
-                        "outcome": res.outcome.value,
-                        "status": "reproduced" if res.outcome == ReproductionOutcome.REPRODUCED else res.outcome.value,
+                        "outcome": attempt_classification.outcome.value,
+                        "status": "reproduced" if attempt_classification.outcome == ClassificationOutcome.REPRODUCED else attempt_classification.outcome.value,
+                        "reason_code": attempt_classification.reason_code.value,
                         "exit_code": res.exit_code,
                         "matched_patterns": res.matched_patterns,
                         "stdout_digest": stdout_digest,
@@ -451,6 +513,8 @@ class ReproductionCaseManager:
                 )
 
                 # 2. Persist ReproductionAttempt
+                attempt_outcome_enum = res.outcome
+
                 conn.execute(
                     """
                     INSERT INTO reproduction_attempts (
@@ -466,7 +530,7 @@ class ReproductionCaseManager:
                         case.case_id,
                         attempt_number,
                         case.run_id,
-                        res.outcome.value,
+                        attempt_outcome_enum.value,
                         res.exit_code,
                         res.duration_ms,
                         stdout_digest,
@@ -479,7 +543,7 @@ class ReproductionCaseManager:
                         evidence_id,
                         json.dumps(res.isolation_details),
                         json.dumps(provenance_dict),
-                        res.diagnostic_message,
+                        attempt_classification.explanation,
                         cleanup_status,
                         started_at.isoformat(),
                         completed_at.isoformat(),
@@ -496,10 +560,36 @@ class ReproductionCaseManager:
                     (new_case_status.value, attempt_number, completed_at.isoformat(), case.case_id),
                 )
 
-                # 4. Append audit event
+                # 4. Persist Classification Record in SQLite
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO reproduction_classifications (
+                        classification_id, case_id, attempt_id, outcome, reason_code,
+                        explanation, classifier_version, is_reproduced, oracle_present,
+                        oracle_verified, provenance_json, details_json, classified_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        history_classification.classification_id,
+                        case.case_id,
+                        attempt_id,
+                        history_classification.outcome.value,
+                        history_classification.reason_code.value,
+                        history_classification.explanation,
+                        history_classification.classifier_version,
+                        1 if history_classification.is_reproduced else 0,
+                        1 if history_classification.oracle_present else 0,
+                        1 if history_classification.oracle_verified else 0,
+                        json.dumps({k: v.value for k, v in history_classification.provenance.items()}),
+                        json.dumps(history_classification.details),
+                        completed_at.isoformat(),
+                    ),
+                )
+
+                # 5. Append audit events
                 event_type = (
                     EventType.REPRODUCTION_ATTEMPT_COMPLETED
-                    if res.outcome == ReproductionOutcome.REPRODUCED
+                    if attempt_classification.outcome == ClassificationOutcome.REPRODUCED
                     else EventType.REPRODUCTION_ATTEMPT_FAILED
                 )
                 self.store._append_event_locked(
@@ -510,17 +600,32 @@ class ReproductionCaseManager:
                         "case_id": case.case_id,
                         "attempt_id": attempt_id,
                         "attempt_number": attempt_number,
-                        "outcome": res.outcome.value,
+                        "outcome": attempt_classification.outcome.value,
                         "exit_code": res.exit_code,
                         "evidence_id": evidence_id,
                     },
                 )
+                self.store._append_event_locked(
+                    conn,
+                    case.run_id,
+                    EventType.REPRODUCTION_OUTCOME_CLASSIFIED,
+                    {
+                        "case_id": case.case_id,
+                        "attempt_id": attempt_id,
+                        "attempt_number": attempt_number,
+                        "outcome": history_classification.outcome.value,
+                        "reason_code": history_classification.reason_code.value,
+                        "is_reproduced": history_classification.is_reproduced,
+                        "explanation": history_classification.explanation,
+                        "classifier_version": history_classification.classifier_version,
+                    },
+                )
 
-                # 5. Lifecycle Transition Enforcement:
-                # If defect was successfully reproduced in sandbox and evidence is verified,
-                # transition finding to REPRODUCED state atomically.
+                # 6. Lifecycle Transition Enforcement:
+                # Transition finding to REPRODUCED state atomically ONLY IF
+                # aggregate classification confirms reproduction and is not FLAKY.
                 finding = self.store.get_finding(case.finding_id)
-                if finding and res.outcome == ReproductionOutcome.REPRODUCED:
+                if finding and history_classification.outcome == ClassificationOutcome.REPRODUCED:
                     if finding.lifecycle_state == FindingLifecycleState.SUSPECTED:
                         try:
                             validate_transition(finding, FindingLifecycleState.REPRODUCED, evidence)
@@ -541,7 +646,7 @@ class ReproductionCaseManager:
                                     from_state,
                                     FindingLifecycleState.REPRODUCED.value,
                                     evidence_id,
-                                    f"Automated reproduction attempt #{attempt_number} confirmed defect",
+                                    f"Automated reproduction attempt #{attempt_number} confirmed defect: {history_classification.reason_code.value}",
                                     completed_at.isoformat(),
                                 ),
                             )
@@ -567,7 +672,7 @@ class ReproductionCaseManager:
             case_id=case.case_id,
             attempt_number=attempt_number,
             run_id=case.run_id,
-            outcome=res.outcome,
+            outcome=attempt_outcome_enum,
             exit_code=res.exit_code,
             duration_ms=res.duration_ms,
             stdout_digest=stdout_digest,
@@ -579,9 +684,97 @@ class ReproductionCaseManager:
             matched_patterns=res.matched_patterns,
             evidence_id=evidence_id,
             isolation_details=res.isolation_details,
-            provenance={k: FieldProvenance(v) for k, v in provenance_dict.items()},
-            diagnostic_message=res.diagnostic_message,
+            provenance={k: FieldProvenance(v) for k, v in provenance_dict.items() if k in FieldProvenance._value2member_map_},
+            diagnostic_message=attempt_classification.explanation,
             cleanup_status=cleanup_status,
             started_at=started_at,
             completed_at=completed_at,
         )
+
+    def classify_case(
+        self,
+        case_id: str,
+        plan: Optional[ReproductionPlan] = None,
+    ) -> ReproductionClassification:
+        """Classify a case and its attempt history, persisting the classification record."""
+        case = self.get_case(case_id)
+        if not case:
+            raise StoreError(f"Reproduction case '{case_id}' not found")
+
+        attempts = self.list_attempts(case_id)
+        classification = self.classifier.classify_case_history(case, attempts, plan=plan)
+
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO reproduction_classifications (
+                        classification_id, case_id, attempt_id, outcome, reason_code,
+                        explanation, classifier_version, is_reproduced, oracle_present,
+                        oracle_verified, provenance_json, details_json, classified_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        classification.classification_id,
+                        case.case_id,
+                        classification.attempt_id,
+                        classification.outcome.value,
+                        classification.reason_code.value,
+                        classification.explanation,
+                        classification.classifier_version,
+                        1 if classification.is_reproduced else 0,
+                        1 if classification.oracle_present else 0,
+                        1 if classification.oracle_verified else 0,
+                        json.dumps({k: v.value for k, v in classification.provenance.items()}),
+                        json.dumps(classification.details),
+                        classification.classified_at.isoformat(),
+                    ),
+                )
+        finally:
+            conn.close()
+
+        return classification
+
+    def get_classification(self, case_id: str) -> Optional[ReproductionClassification]:
+        """Fetch the latest classification record for a case."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM reproduction_classifications WHERE case_id = ? ORDER BY classified_at DESC LIMIT 1",
+                (case_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+
+            provenance_dict = {}
+            try:
+                raw_prov = json.loads(row["provenance_json"])
+                provenance_dict = {k: FieldProvenance(v) for k, v in raw_prov.items()}
+            except Exception:
+                pass
+
+            details_dict = {}
+            try:
+                details_dict = json.loads(row["details_json"])
+            except Exception:
+                pass
+
+            return ReproductionClassification(
+                classification_id=row["classification_id"],
+                outcome=ClassificationOutcome(row["outcome"]),
+                reason_code=ClassificationReasonCode(row["reason_code"]),
+                explanation=row["explanation"],
+                classifier_version=row["classifier_version"],
+                case_id=row["case_id"],
+                attempt_id=row["attempt_id"],
+                is_reproduced=bool(row["is_reproduced"]),
+                oracle_present=bool(row["oracle_present"]),
+                oracle_verified=bool(row["oracle_verified"]),
+                provenance=provenance_dict,
+                details=details_dict,
+                classified_at=datetime.fromisoformat(row["classified_at"]),
+            )
+        finally:
+            conn.close()

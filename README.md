@@ -19,7 +19,7 @@ FORGE is an enterprise-grade autonomous software engineering intelligence platfo
 ```
 Phase 1: Secure Repository Intelligence  ── [COMPLETED] (Milestones 1–7)
 Phase 2: Diff-Aware Intelligent Review   ── [COMPLETED] (Milestones 1–6)
-Phase 3: Defect Reproduction & Verification ── [IN PROGRESS] (Milestones 1–3 Implemented; 4–6 Planned)
+Phase 3: Defect Reproduction & Verification ── [IN PROGRESS] (Milestones 1–4 Implemented; 5–6 Planned)
 Phase 4: Targeted Autonomous Repair     ── [PLANNED]
 Phase 5: Regression & Safety Verification ── [PLANNED]
 ```
@@ -45,7 +45,8 @@ Phase 5: Regression & Safety Verification ── [PLANNED]
 - **M1 — Sandbox Execution Contracts (Implemented)**: Typed execution contracts (`ReproductionRequest`, `ReproductionCommand`, `ExecutionEnvironmentSpec`, `ReproductionResult`) with strict schema validation, shell injection prevention, approved executable allowlists, resource limits, and fail-closed degradation.
 - **M2 — Reproduction Case Management & Evidence Capture (Implemented)**: Deterministic reproduction case tracking, revision pinning, multi-attempt history, bounded/redacted evidence capture, SHA256 digests, field-level provenance, safe retry policy (forbidding automatic non-idempotent retries), resume validation against stale revisions, and lifecycle transition integration.
 - **M3 — Deterministic Reproduction Planning (Implemented)**: Typed planning layer converting calibrated findings and trusted context into bounded, validated reproduction plans. Five strategies (`RUN_SPECIFIC_TEST`, `RUN_SCOPED_TEST_FILE`, `VALIDATE_BOUNDARY_CONDITION`, `CHECK_EXPECTED_OBSERVED`, `INSUFFICIENT_INFORMATION`). Deterministic plan IDs, full policy validator (14+ rejection criteria), CLI `forge plan` command group.
-- **M4–M6 (Planned)**: Dynamic trace capture, minimal reproduction synthesis, and automated verification suites.
+- **M4 — Outcome Classification & Evidence Validation (Implemented)**: Strongly typed 8-outcome taxonomy (`REPRODUCED`, `NOT_REPRODUCED`, `UNRELATED_FAILURE`, `ENVIRONMENT_BLOCKED`, `TIMEOUT`, `FLAKY`, `INVALID_PLAN`, `INCONCLUSIVE`) with deterministic reason codes, strict oracle presence and provenance checks (never infer reproduction from generic exit code or model assertion), precedence enforcement, and flaky retry detection.
+- **M5–M6 (Planned)**: Minimal reproduction synthesis, dynamic trace capture, and automated verification suites.
 
 ---
 
@@ -94,6 +95,10 @@ forge repro list --format json
 forge repro show case_find_01_7e3b9a1d4c20
 forge repro show case_find_01_7e3b9a1d4c20 --format json
 
+# Classify a reproduction case and its attempt history
+forge repro classify case_find_01_7e3b9a1d4c20
+forge repro classify case_find_01_7e3b9a1d4c20 --format json
+
 # Execute or resume a reproduction case attempt inside the sandbox
 forge repro run case_find_01_7e3b9a1d4c20
 forge repro run case_find_01_7e3b9a1d4c20 --resume
@@ -113,6 +118,9 @@ forge plan generate find_01 \
 
 # Validate a plan offline without execution (fail-secure policy check)
 forge plan validate plans/plan_find_01.json
+
+# Classify a plan's execution viability and oracle provenance
+forge plan classify plans/plan_find_01.json
 
 # Inspect plan metadata, strategy rationale, and provenance
 forge plan show plans/plan_find_01.json
@@ -243,4 +251,5 @@ cp .env.example .env
   - Sandbox Execution Contracts: [`docs/specs/phase-3-milestone-1.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-1.md)
   - Case Management & Evidence Capture: [`docs/specs/phase-3-milestone-2.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-2.md)
   - Deterministic Reproduction Planning: [`docs/specs/phase-3-milestone-3.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-3.md)
+  - Outcome Classification & Evidence Validation: [`docs/specs/phase-3-milestone-4.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-4.md)
 - Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)

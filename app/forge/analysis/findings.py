@@ -99,7 +99,7 @@ def validate_transition(
     if to_state == FindingLifecycleState.REPRODUCED:
         # Check details or content indicate successful reproduction
         status = evidence.details.get("status") or evidence.details.get("outcome")
-        if status and str(status).lower() in ["failed", "not_reproduced", "skipped", "error"]:
+        if status and str(status).lower() not in ["reproduced", "success"]:
             raise InvalidTransitionError(
                 f"Cannot mark finding as reproduced with failed reproduction status: '{status}'"
             )

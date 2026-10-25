@@ -125,6 +125,23 @@ CREATE TABLE IF NOT EXISTS reproduction_attempts (
     FOREIGN KEY(evidence_id) REFERENCES evidence(evidence_id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS reproduction_classifications (
+    classification_id TEXT PRIMARY KEY,
+    case_id TEXT NOT NULL,
+    attempt_id TEXT,
+    outcome TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    explanation TEXT NOT NULL,
+    classifier_version TEXT NOT NULL,
+    is_reproduced INTEGER NOT NULL DEFAULT 0,
+    oracle_present INTEGER NOT NULL DEFAULT 0,
+    oracle_verified INTEGER NOT NULL DEFAULT 0,
+    provenance_json TEXT NOT NULL DEFAULT '{}',
+    details_json TEXT NOT NULL DEFAULT '{}',
+    classified_at TEXT NOT NULL,
+    FOREIGN KEY(case_id) REFERENCES reproduction_cases(case_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
@@ -132,6 +149,7 @@ CREATE INDEX IF NOT EXISTS idx_transitions_finding ON finding_transitions(findin
 CREATE INDEX IF NOT EXISTS idx_run_events_sequence ON run_events(run_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_reproduction_cases_finding ON reproduction_cases(finding_id);
 CREATE INDEX IF NOT EXISTS idx_reproduction_attempts_case ON reproduction_attempts(case_id, attempt_number);
+CREATE INDEX IF NOT EXISTS idx_reproduction_classifications_case ON reproduction_classifications(case_id);
 """
 
 
