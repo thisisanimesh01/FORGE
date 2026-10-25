@@ -356,7 +356,7 @@ class TestReviewCLI:
         result = runner.invoke(app, ["review", str(repo_dir), "--base", "HEAD~1", "--head", "HEAD", "--format", "json"])
         assert result.exit_code == 0
         parsed = json.loads(result.output)
-        assert parsed["schema_version"] == "1.0.0"
+        assert parsed["schema_version"] == "2.0.0"
         assert parsed["summary_counts"]["total_findings"] == 0
 
     def test_cli_review_export_file(self, tmp_path: Path):
@@ -383,3 +383,362 @@ class TestReviewCLI:
         result = runner.invoke(app, ["review", str(repo_dir), "--base", "--output=pwned"])
         assert result.exit_code == 1
         assert "cannot start with a dash" in result.output.lower() or "git diff error" in result.output.lower()
+
+
+class TestReviewEvidenceCalibration:
+    """Test suite for Phase 2 Milestone 2 evidence-calibrated review findings."""
+
+    def test_calibrated_evidence_validation_and_hashing(self):
+        from forge.review.evidence import create_calibrated_evidence, EvidenceCalibrationStatus
+        from forge.schemas import EvidenceType
+
+        ev = create_calibrated_evidence(
+            evidence_type=EvidenceType.STATIC_ANALYSIS,
+            description="token check",
+            content="token = 'secret_val'\n",
+            file_path="src/utils.py",
+            start_line=10,
+            end_line=15,
+            provenance="git_diff_hunk",
+        )
+        assert ev.evidence_id.startswith("evi_")
+        assert ev.file_path == "src/utils.py"
+        assert ev.status == EvidenceCalibrationStatus.VERIFIED
+        assert ev.content_hash is not None
+        assert len(ev.content_hash) == 16  # sha256 prefix
+        assert ev.contradiction_reason is None
+
+    def test_stable_finding_ids_and_deterministic_report(self, tmp_path: Path):
+        from forge.review.engine import ReviewEngine
+        from forge.review.reporting import review_report_to_json, review_report_to_markdown
+        from forge.review.dedup import generate_finding_id
+        from forge.review.git import read_git_diff
+        from forge.review.parser import parse_unified_diff
+
+        # Deterministic IDs from identical inputs
+        id1 = generate_finding_id("SEC001", "src/auth.py", 42, "password = '123'")
+        id2 = generate_finding_id("SEC001", "src/auth.py", 42, "password = '123'")
+        assert id1 == id2
+        assert id1.startswith("rev_sec001_")
+
+        # Two consecutive reviews of the same repo produce byte-identical reports
+        repo_dir = tmp_path / "calib_repo_det"
+        repo_dir.mkdir()
+        init_git_repo(repo_dir)
+
+        (repo_dir / "vuln.py").write_text("import subprocess\nsubprocess.run('ls', shell=True)\n", encoding="utf-8")
+        subprocess.run(["git", "add", "vuln.py"], cwd=repo_dir, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "add unsafe shell"], cwd=repo_dir, capture_output=True, check=True)
+
+        engine = ReviewEngine()
+        diff_text = read_git_diff(repo_dir, base="HEAD~1", head="HEAD")
+        bundle1 = parse_unified_diff(diff_text, base_revision="HEAD~1", head_revision="HEAD")
+        bundle2 = parse_unified_diff(diff_text, base_revision="HEAD~1", head_revision="HEAD")
+
+        review1 = engine.review_diff(bundle1, target_path=repo_dir, mode="static")
+        review2 = engine.review_diff(bundle2, target_path=repo_dir, mode="static")
+
+        # Verify review_id and findings are deterministic across identical runs
+        assert review1.review_id == review2.review_id
+        assert len(review1.findings) == len(review2.findings)
+        assert [f.finding_id for f in review1.findings] == [f.finding_id for f in review2.findings]
+        assert [f.observed_evidence for f in review1.findings] == [f.observed_evidence for f in review2.findings]
+        assert [f.calibrated_evidence[0].content_hash for f in review1.findings] == [f.calibrated_evidence[0].content_hash for f in review2.findings]
+
+    def test_tripartite_separation_in_findings_and_markdown(self, tmp_path: Path):
+        from forge.review.engine import ReviewEngine
+        from forge.review.reporting import review_report_to_markdown
+        from forge.review.git import read_git_diff
+        from forge.review.parser import parse_unified_diff
+
+        repo_dir = tmp_path / "calib_repo_trip"
+        repo_dir.mkdir()
+        init_git_repo(repo_dir)
+
+        (repo_dir / "eval_bug.py").write_text("subprocess.run('cmd', shell=True)\n", encoding="utf-8")
+        subprocess.run(["git", "add", "eval_bug.py"], cwd=repo_dir, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "shell usage"], cwd=repo_dir, capture_output=True, check=True)
+
+        engine = ReviewEngine()
+        diff_text = read_git_diff(repo_dir, base="HEAD~1", head="HEAD")
+        bundle = parse_unified_diff(diff_text, base_revision="HEAD~1", head_revision="HEAD")
+        review = engine.review_diff(bundle, target_path=repo_dir, mode="static")
+        assert len(review.findings) >= 1
+        finding = review.findings[0]
+
+        # Tripartite check
+        assert finding.observed_evidence != ""
+        assert finding.inference != ""
+        assert finding.recommendation != ""
+        assert len(finding.calibrated_evidence) >= 1
+
+        md = review_report_to_markdown(review)
+        assert "**Observed Evidence:**" in md
+        assert "**Inference:**" in md
+        assert "**Recommendation:**" in md
+
+    def test_missing_evidence_downgrades_to_insufficient_and_low_confidence(self):
+        from forge.review.models import ReviewFinding, FindingCategory, FindingSeverity, FindingConfidence, FindingLifecycleState
+        from forge.review.calibration import calibrate_finding_evidence, EvidenceCalibrationStatus
+
+        finding = ReviewFinding(
+            finding_id="rev_test_001",
+            rule_id="RULE_001",
+            title="Unchecked input",
+            explanation="Input is not sanitized",
+            severity=FindingSeverity.HIGH,
+            confidence=FindingConfidence.HIGH,
+            file_path="src/api.py",
+            line_number=20,
+            code_snippet="x = request.get()",
+            category=FindingCategory.SECURITY,
+            lifecycle_state=FindingLifecycleState.SUSPECTED,
+            observed_evidence="Observed raw get call",
+            inference="May lead to injection",
+            recommendation="Sanitize input",
+            calibrated_evidence=[],
+        )
+
+        calibrated = calibrate_finding_evidence(finding)
+        assert calibrated.evidence_status == EvidenceCalibrationStatus.INSUFFICIENT
+        assert calibrated.confidence == FindingConfidence.LOW
+        assert calibrated.uncertainty_note is not None
+        assert "No concrete evidence records attached" in calibrated.uncertainty_note
+
+    def test_mismatched_file_evidence_downgrades_to_mismatched(self):
+        from forge.review.models import ReviewFinding, FindingCategory, FindingSeverity, FindingConfidence, FindingLifecycleState
+        from forge.review.evidence import create_calibrated_evidence, EvidenceCalibrationStatus
+        from forge.review.calibration import calibrate_finding_evidence
+        from forge.schemas import EvidenceType
+
+        ev = create_calibrated_evidence(
+            evidence_type=EvidenceType.STATIC_ANALYSIS,
+            description="some check",
+            content="some code",
+            file_path="src/other.py",
+            start_line=10,
+            end_line=12,
+            provenance="git_diff_hunk",
+        )
+
+        finding = ReviewFinding(
+            finding_id="rev_test_002",
+            rule_id="RULE_002",
+            title="Mismatched finding",
+            explanation="Check failed",
+            severity=FindingSeverity.MEDIUM,
+            confidence=FindingConfidence.HIGH,
+            file_path="src/target.py",
+            line_number=10,
+            code_snippet="some target code",
+            category=FindingCategory.DEFECT,
+            lifecycle_state=FindingLifecycleState.SUSPECTED,
+            observed_evidence="Saw problem in target.py",
+            inference="Might break",
+            recommendation="Fix it",
+            calibrated_evidence=[ev],
+        )
+
+        calibrated = calibrate_finding_evidence(finding)
+        assert calibrated.evidence_status == EvidenceCalibrationStatus.MISMATCHED
+        assert calibrated.confidence == FindingConfidence.LOW
+        assert "does not match finding" in calibrated.uncertainty_note
+
+    def test_contradictory_evidence_preserves_uncertainty_note(self):
+        from forge.review.models import ReviewFinding, FindingCategory, FindingSeverity, FindingConfidence, FindingLifecycleState
+        from forge.review.evidence import create_calibrated_evidence, EvidenceCalibrationStatus
+        from forge.review.calibration import calibrate_finding_evidence
+        from forge.schemas import EvidenceType
+
+        ev = create_calibrated_evidence(
+            evidence_type=EvidenceType.STATIC_ANALYSIS,
+            description="sanitizer check",
+            content="sanitized = sanitize(input)",
+            file_path="src/target.py",
+            start_line=10,
+            end_line=12,
+            provenance="git_diff_hunk",
+            status=EvidenceCalibrationStatus.CONTRADICTORY,
+            contradiction_reason="Sanitizer is already called immediately above",
+        )
+
+        finding = ReviewFinding(
+            finding_id="rev_test_003",
+            rule_id="RULE_003",
+            title="Potential injection",
+            explanation="Possible SQL injection",
+            severity=FindingSeverity.HIGH,
+            confidence=FindingConfidence.HIGH,
+            file_path="src/target.py",
+            line_number=11,
+            code_snippet="run_query(sanitized)",
+            category=FindingCategory.SECURITY,
+            lifecycle_state=FindingLifecycleState.SUSPECTED,
+            observed_evidence="Saw query run",
+            inference="Could be vulnerable",
+            recommendation="Ensure sanitization",
+            calibrated_evidence=[ev],
+        )
+
+        calibrated = calibrate_finding_evidence(finding)
+        assert calibrated.evidence_status == EvidenceCalibrationStatus.CONTRADICTORY
+        assert calibrated.confidence == FindingConfidence.LOW
+        assert "Contradictory evidence" in calibrated.uncertainty_note
+        assert "Sanitizer is already called" in calibrated.uncertainty_note
+
+    def test_lifecycle_transition_enforcement_with_valid_and_invalid_evidence(self):
+        from forge.review.models import ReviewFinding, FindingCategory, FindingSeverity, FindingConfidence, FindingLifecycleState
+        from forge.review.evidence import create_calibrated_evidence
+        from forge.review.calibration import enforce_review_lifecycle_transition, InvalidTransitionError
+        from forge.schemas import EvidenceType
+
+        ev_repro = create_calibrated_evidence(
+            evidence_type=EvidenceType.REPRODUCTION_RESULT,
+            description="repro run",
+            content="test failed with AssertionError",
+            file_path="src/calc.py",
+            start_line=1,
+            end_line=5,
+            provenance="test_runner",
+            evidence_id="evi_repro_1",
+        )
+
+        finding = ReviewFinding(
+            finding_id="rev_test_004",
+            rule_id="RULE_004",
+            title="Reproducible bug",
+            explanation="Division by zero",
+            severity=FindingSeverity.HIGH,
+            confidence=FindingConfidence.HIGH,
+            file_path="src/calc.py",
+            line_number=10,
+            code_snippet="def calc(): return 1 / 0",
+            category=FindingCategory.DEFECT,
+            lifecycle_state=FindingLifecycleState.SUSPECTED,
+            observed_evidence="1 / 0 in code",
+            inference="Raises ZeroDivisionError",
+            recommendation="Add zero check",
+            calibrated_evidence=[ev_repro],
+        )
+
+        # Transition with matching reproduction evidence succeeds
+        updated = enforce_review_lifecycle_transition(
+            finding,
+            FindingLifecycleState.REPRODUCED,
+            ev_repro,
+        )
+        assert updated.lifecycle_state == FindingLifecycleState.REPRODUCED
+
+        # Illegal skip to FIXED raises InvalidTransitionError
+        with pytest.raises(InvalidTransitionError, match="Illegal transition"):
+            enforce_review_lifecycle_transition(
+                finding,
+                FindingLifecycleState.FIXED,
+                ev_repro,
+            )
+
+    def test_llm_claims_cannot_advance_lifecycle_without_evidence(self):
+        from forge.review.models import ReviewFinding, FindingCategory, FindingSeverity, FindingConfidence, FindingLifecycleState
+        from forge.review.calibration import enforce_review_lifecycle_transition, InvalidTransitionError
+        from forge.review.evidence import create_calibrated_evidence
+        from forge.schemas import EvidenceType
+
+        finding = ReviewFinding(
+            finding_id="rev_test_005",
+            rule_id="RULE_005",
+            title="Alleged root cause",
+            explanation="LLM claims root cause is found",
+            severity=FindingSeverity.HIGH,
+            confidence=FindingConfidence.HIGH,
+            file_path="src/algo.py",
+            line_number=15,
+            code_snippet="def algo(): pass",
+            category=FindingCategory.DEFECT,
+            lifecycle_state=FindingLifecycleState.SUSPECTED,
+            observed_evidence="Saw pass",
+            inference="Missing impl",
+            recommendation="Implement logic",
+            calibrated_evidence=[],
+        )
+
+        # Passing evidence of wrong type (e.g., source excerpt instead of reproduction result) fails
+        ev_wrong = create_calibrated_evidence(
+            evidence_type=EvidenceType.SOURCE_EXCERPT,
+            description="diff hunk",
+            content="def algo(): pass",
+            file_path="src/algo.py",
+            start_line=15,
+            end_line=15,
+            provenance="git_diff",
+        )
+
+        with pytest.raises(InvalidTransitionError, match="requires evidence of type"):
+            enforce_review_lifecycle_transition(
+                finding,
+                FindingLifecycleState.REPRODUCED,
+                ev_wrong,
+            )
+
+    def test_deduplication_preserves_nearby_distinct_defects(self):
+        from forge.review.models import ReviewFinding, FindingCategory, FindingSeverity, FindingConfidence, FindingLifecycleState
+        from forge.review.dedup import deduplicate_findings
+
+        f1 = ReviewFinding(
+            finding_id="rev_sec001_1111",
+            rule_id="SEC001",
+            title="Unsafe exec 1",
+            explanation="Avoid exec",
+            severity=FindingSeverity.HIGH,
+            confidence=FindingConfidence.HIGH,
+            file_path="src/exec.py",
+            line_number=10,
+            code_snippet="exec(cmd1)",
+            category=FindingCategory.SECURITY,
+            lifecycle_state=FindingLifecycleState.SUSPECTED,
+            observed_evidence="exec at 10",
+            inference="RCE",
+            recommendation="Refactor",
+            calibrated_evidence=[],
+        )
+
+        # Duplicate of f1
+        f1_dup = ReviewFinding(
+            finding_id="rev_sec001_1111",
+            rule_id="SEC001",
+            title="Unsafe exec 1 duplicate",
+            explanation="Avoid exec",
+            severity=FindingSeverity.HIGH,
+            confidence=FindingConfidence.HIGH,
+            file_path="src/exec.py",
+            line_number=10,
+            code_snippet="exec(cmd1)",
+            category=FindingCategory.SECURITY,
+            lifecycle_state=FindingLifecycleState.SUSPECTED,
+            observed_evidence="exec at 10",
+            inference="RCE",
+            recommendation="Refactor",
+            calibrated_evidence=[],
+        )
+
+        # Distinct defect nearby on line 12
+        f2 = ReviewFinding(
+            finding_id="rev_sec001_2222",
+            rule_id="SEC001",
+            title="Unsafe exec 2",
+            explanation="Avoid exec",
+            severity=FindingSeverity.HIGH,
+            confidence=FindingConfidence.HIGH,
+            file_path="src/exec.py",
+            line_number=12,
+            code_snippet="exec(cmd2)",
+            category=FindingCategory.SECURITY,
+            lifecycle_state=FindingLifecycleState.SUSPECTED,
+            observed_evidence="exec at 12",
+            inference="RCE",
+            recommendation="Refactor",
+            calibrated_evidence=[],
+        )
+
+        deduped = deduplicate_findings([f1, f1_dup, f2])
+        assert len(deduped) == 2
+        assert {f.finding_id for f in deduped} == {"rev_sec001_1111", "rev_sec001_2222"}

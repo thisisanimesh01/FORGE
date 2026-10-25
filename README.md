@@ -14,8 +14,8 @@ Phase 1 operates strictly in **Audit-Only** mode. FORGE does not modify source c
 - **Event-Sourced Runs**: SQLite-backed append-only audit trail.
 - **LLM Investigation Loop**: Provider-independent typed LLM interface with bounded multi-turn investigation. Supports offline fake provider and real OpenAI-compatible APIs.
 - **Reporting & Benchmark Suite**: Deterministic JSON & Markdown reports, controlled seeded-bug fixtures, and automated benchmark evaluation with precision, recall, and pass rates.
-- **Phase 1 Security & Verification**: Verified zero-mutation invariant, fail-secure Docker degradation, secret redaction, and bounded investigation safety.
 - **Diff-Aware Code Review** *(Phase 2 Milestone 1)*: Read-only Git diff analysis comparing two revisions, accurate hunk and changed-line mapping, security vulnerability and defect detection on modified lines, and automated secret redaction.
+- **Evidence-Calibrated Review Findings** *(Phase 2 Milestone 2)*: Tripartite finding structure separating observed facts from inferences and recommendations. Deterministic finding IDs, evidence verification against diff hunks, automatic confidence downgrading for unbacked claims, and strict lifecycle state machine enforcement.
 
 ## Installation
 Ensure Python 3.11+ is installed.

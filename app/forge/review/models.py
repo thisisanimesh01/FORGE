@@ -2,13 +2,15 @@
 
 from datetime import datetime, timezone
 from enum import Enum
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
-from forge.schemas import FindingSeverity, FindingConfidence
+from forge.schemas import FindingSeverity, FindingConfidence, FindingLifecycleState
+from forge.review.evidence import CalibratedEvidence, EvidenceCalibrationStatus
 
-REVIEW_SCHEMA_VERSION = "1.0.0"
+REVIEW_SCHEMA_VERSION = "2.0.0"
 
 
 class ReviewFileStatus(str, Enum):
@@ -19,6 +21,17 @@ class ReviewFileStatus(str, Enum):
     RENAMED = "renamed"
     BINARY = "binary"
     UNMODIFIED = "unmodified"
+
+
+class FindingCategory(str, Enum):
+    """High-level classification of code review findings."""
+    SECURITY = "security"
+    DEFECT = "defect"
+    LOGIC = "logic"
+    PERFORMANCE = "performance"
+    STYLE = "style"
+    PROMPT_INJECTION = "prompt_injection"
+    SECRET_EXPOSURE = "secret_exposure"
 
 
 class DiffLine(BaseModel):
@@ -90,21 +103,37 @@ class DiffBundle(BaseModel):
 
 
 class ReviewFinding(BaseModel):
-    """Code review finding tied directly to diff changes."""
+    """Evidence-calibrated code review finding tied directly to diff changes."""
     model_config = ConfigDict(frozen=True)
 
     finding_id: str
+    category: FindingCategory = FindingCategory.DEFECT
+    severity: FindingSeverity = FindingSeverity.MEDIUM
+    confidence: FindingConfidence = FindingConfidence.MEDIUM
+    lifecycle_state: FindingLifecycleState = FindingLifecycleState.SUSPECTED
+    title: str
+    explanation: str
+
+    # Structured tripartite separation
+    observed_evidence: str = Field(description="Concrete facts observed in code/diff")
+    inference: str = Field(description="Analytical deduction based on observed facts")
+    recommendation: str = Field(description="Actionable suggested remedy")
+
+    # Location
     file_path: str
     line_number: Optional[int] = None
     end_line_number: Optional[int] = None
-    severity: FindingSeverity = FindingSeverity.MEDIUM
-    confidence: FindingConfidence = FindingConfidence.MEDIUM
-    title: str
-    explanation: str
     rule_id: str
     suggested_action: Optional[str] = None
     code_snippet: Optional[str] = None
+
+    # Evidence items with calibration
+    calibrated_evidence: List[CalibratedEvidence] = Field(default_factory=list)
     evidence_references: List[str] = Field(default_factory=list)
+
+    # Uncertainty and limitation handling
+    evidence_status: EvidenceCalibrationStatus = EvidenceCalibrationStatus.VERIFIED
+    uncertainty_note: Optional[str] = None
 
 
 class ReviewReport(BaseModel):

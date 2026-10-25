@@ -1,4 +1,4 @@
-"""Formatting and export utilities for code review reports."""
+"""Formatting and export utilities for evidence-calibrated code review reports."""
 
 import json
 from pathlib import Path
@@ -58,17 +58,45 @@ def review_report_to_markdown(report: ReviewReport) -> str:
             line_str = f"Line {f.line_number}" if f.line_number else "Commit / File-level"
             lines.extend([
                 f"### {idx}. [{f.severity.value.upper()}] {f.title}",
+                f"- **Finding ID**: `{f.finding_id}`",
+                f"- **Category**: `{f.category.value}`",
                 f"- **Location**: `{f.file_path}` ({line_str})",
                 f"- **Rule ID**: `{f.rule_id}`",
-                f"- **Confidence**: `{f.confidence.value}`",
-                f"- **Explanation**: {f.explanation}",
+                f"- **Severity**: `{f.severity.value.upper()}`",
+                f"- **Confidence**: `{f.confidence.value.upper()}`",
+                f"- **Lifecycle State**: `{f.lifecycle_state.value}`",
+                f"- **Evidence Status**: `{f.evidence_status.value}`",
+                "",
+                f"**Observed Evidence:** {f.observed_evidence}",
+                "",
+                f"**Inference:** {f.inference}",
+                "",
+                f"**Recommendation:** {f.recommendation}",
             ])
+
+            if f.uncertainty_note:
+                lines.extend([
+                    "",
+                    f"> [!WARNING] **Uncertainty / Evidence Limitation**: {f.uncertainty_note}",
+                ])
+
             if f.code_snippet:
                 lines.extend([
+                    "",
                     "```python",
                     f.code_snippet,
                     "```",
                 ])
+
+            if f.calibrated_evidence:
+                lines.extend([
+                    "",
+                    "**Attached Evidence:**",
+                ])
+                for ev in f.calibrated_evidence:
+                    lines.append(
+                        f"- `{ev.evidence_id}` [{ev.status.value}] ({ev.provenance}): {ev.description} (Hash: `{ev.content_hash}`)"
+                    )
             lines.append("")
 
     md_output = "\n".join(lines)
