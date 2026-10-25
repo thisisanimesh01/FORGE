@@ -19,7 +19,7 @@ FORGE is an enterprise-grade autonomous software engineering intelligence platfo
 ```
 Phase 1: Secure Repository Intelligence  ── [COMPLETED] (Milestones 1–7)
 Phase 2: Diff-Aware Intelligent Review   ── [COMPLETED] (Milestones 1–6)
-Phase 3: Defect Reproduction & Verification ── [IN PROGRESS] (Milestone 1 Implemented; 2–6 Planned)
+Phase 3: Defect Reproduction & Verification ── [IN PROGRESS] (Milestones 1–2 Implemented; 3–6 Planned)
 Phase 4: Targeted Autonomous Repair     ── [PLANNED]
 Phase 5: Regression & Safety Verification ── [PLANNED]
 ```
@@ -43,7 +43,8 @@ Phase 5: Regression & Safety Verification ── [PLANNED]
 
 ### Phase 3: Defect Reproduction & Verification (In Progress)
 - **M1 — Sandbox Execution Contracts (Implemented)**: Typed execution contracts (`ReproductionRequest`, `ReproductionCommand`, `ExecutionEnvironmentSpec`, `ReproductionResult`) with strict schema validation, shell injection prevention, approved executable allowlists, resource limits, and fail-closed degradation.
-- **M2–M6 (Planned)**: Automated reproduction test generation, minimal reproduction synthesis, dynamic trace capture, and lifecycle transition integration.
+- **M2 — Reproduction Case Management & Evidence Capture (Implemented)**: Deterministic reproduction case tracking, revision pinning, multi-attempt history, bounded/redacted evidence capture, SHA256 digests, field-level provenance, safe retry policy (forbidding automatic non-idempotent retries), resume validation against stale revisions, and lifecycle transition integration.
+- **M3–M6 (Planned)**: Minimal reproduction synthesis, dynamic trace capture, and automated verification suites.
 
 ---
 
@@ -76,6 +77,26 @@ forge sandbox check contracts/reproduce_example.json
 
 # Execute defect reproduction inside an isolated sandbox or report fail-closed skip
 forge sandbox reproduce contracts/reproduce_example.json -o reports/repro_result.json
+```
+
+### Reproduction Case Management & Evidence Capture (Phase 3 Milestone 2)
+```bash
+# Create a tracked reproduction case pinned to target commit SHA
+forge repro create contracts/auth_defect.json --commit a1b2c3d4e5f6 --max-retries 1
+
+# List reproduction cases (optionally filter by finding ID)
+forge repro list
+forge repro list --finding-id find_01
+forge repro list --format json
+
+# Inspect a reproduction case and its full attempt history
+forge repro show case_find_01_7e3b9a1d4c20
+forge repro show case_find_01_7e3b9a1d4c20 --format json
+
+# Execute or resume a reproduction case attempt inside the sandbox
+forge repro run case_find_01_7e3b9a1d4c20
+forge repro run case_find_01_7e3b9a1d4c20 --resume
+forge repro run case_find_01_7e3b9a1d4c20 --format json
 ```
 
 ### Diff-Aware Code Review (Phase 2 Milestones 1, 2, 5, & 6)
@@ -198,4 +219,5 @@ cp .env.example .env
   - CI Review Policy & SARIF: [`docs/specs/phase-2-milestone-6.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-2-milestone-6.md)
 - Phase 3 Specifications:
   - Sandbox Execution Contracts: [`docs/specs/phase-3-milestone-1.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-1.md)
+  - Case Management & Evidence Capture: [`docs/specs/phase-3-milestone-2.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-2.md)
 - Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)

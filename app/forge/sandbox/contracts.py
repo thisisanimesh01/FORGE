@@ -24,6 +24,8 @@ class ReproductionOutcome(str, Enum):
     NOT_REPRODUCED = "not_reproduced"      # Defect did not manifest (e.g. command passed unexpectedly)
     PASSED = "passed"                      # Clean control test passed as expected
     FAILED = "failed"                      # Execution failed with an unexpected error
+    INCONCLUSIVE = "inconclusive"          # Partial run or unexpected output where defect presence cannot be determined
+    BLOCKED = "blocked"                    # Execution blocked by environment or sandbox unavailability
     TIMEOUT = "timeout"                    # Execution exceeded allocated duration quota
     RESOURCE_EXHAUSTED = "resource_exhausted" # Container exceeded memory, CPU, or PID limit
     SKIPPED_SANDBOX_UNAVAILABLE = "skipped_sandbox_unavailable" # Docker unavailable; fail-closed

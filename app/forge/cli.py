@@ -21,11 +21,13 @@ findings_app = typer.Typer(help="Finding inspection commands.")
 sandbox_app = typer.Typer(help="Sandbox diagnostics and execution commands.")
 benchmark_app = typer.Typer(help="Benchmark evaluation commands.")
 policy_app = typer.Typer(help="CI review policy check and enforcement commands.")
+repro_app = typer.Typer(help="Reproduction case management and execution commands.")
 app.add_typer(db_app, name="db")
 app.add_typer(findings_app, name="findings")
 app.add_typer(sandbox_app, name="sandbox")
 app.add_typer(benchmark_app, name="benchmark")
 app.add_typer(policy_app, name="policy")
+app.add_typer(repro_app, name="repro")
 
 
 @app.command()
@@ -193,6 +195,189 @@ def sandbox_reproduce(
     if result.outcome == ReproductionOutcome.ERROR:
         raise typer.Exit(code=2)
     elif result.outcome in {ReproductionOutcome.FAILED, ReproductionOutcome.TIMEOUT}:
+        raise typer.Exit(code=1)
+
+
+# --- Reproduction Case Management Commands ---
+
+@repro_app.command(name="create")
+def repro_create(
+    contract_path: str = typer.Argument(..., help="Path to JSON file containing ReproductionRequest contract"),
+    commit_sha: str = typer.Option(..., "--commit", "-c", help="Pinned repository commit SHA"),
+    max_retries: int = typer.Option(0, "--max-retries", "-r", help="Max allowed execution retries (0-3)"),
+    format: str = typer.Option("text", "--format", "-f", help="Output format: text or json"),
+) -> None:
+    """Create and persist a new reproduction case in the SQLite store."""
+    from forge.reproduction import ReproductionCaseManager, CaseManagementError
+    from forge.sandbox.contracts import ReproductionRequest
+    from forge.storage.store import StoreError
+
+    contract_file = Path(contract_path).resolve()
+    if not contract_file.exists():
+        typer.secho(f"Contract file not found: {contract_file}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        raw_data = json.loads(contract_file.read_text(encoding="utf-8"))
+        contract = ReproductionRequest.model_validate(raw_data)
+    except Exception as e:
+        typer.secho(f"Malformed reproduction contract: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    manager = ReproductionCaseManager()
+    try:
+        case = manager.create_case(
+            finding_id=contract.finding_id,
+            target_repo=contract.target_repo,
+            target_commit_sha=commit_sha,
+            contract=contract,
+            max_retries=max_retries,
+        )
+    except (CaseManagementError, StoreError) as e:
+        typer.secho(f"Error creating reproduction case: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if format.lower() == "json":
+        typer.echo(json.dumps(case.model_dump(mode="json"), indent=2))
+    else:
+        typer.secho(f"Created reproduction case '{case.case_id}'", fg=typer.colors.GREEN)
+        typer.echo(f"  Finding ID:   {case.finding_id}")
+        typer.echo(f"  Target Repo:  {case.target_repo}")
+        typer.echo(f"  Commit SHA:   {case.target_commit_sha}")
+        typer.echo(f"  Max Retries:  {case.max_retries}")
+        typer.echo(f"  Status:       {case.status.value}")
+
+
+@repro_app.command(name="list")
+def repro_list(
+    finding_id: Optional[str] = typer.Option(None, "--finding-id", "-f", help="Filter by finding ID"),
+    format: str = typer.Option("text", "--format", help="Output format: text or json"),
+) -> None:
+    """List reproduction cases stored in SQLite."""
+    from forge.reproduction import ReproductionCaseManager
+
+    manager = ReproductionCaseManager()
+    cases = manager.list_cases(finding_id=finding_id)
+
+    if format.lower() == "json":
+        data = [c.model_dump(mode="json") for c in cases]
+        typer.echo(json.dumps(data, indent=2))
+        return
+
+    if not cases:
+        typer.echo("No reproduction cases found.")
+        return
+
+    typer.echo(f"{'Case ID':<36} {'Finding ID':<24} {'Status':<16} {'Attempts':<10}")
+    typer.echo("-" * 90)
+    for c in cases:
+        typer.echo(f"{c.case_id:<36} {c.finding_id:<24} {c.status.value:<16} {c.attempts_count:<10}")
+
+
+@repro_app.command(name="show")
+def repro_show(
+    case_id: str = typer.Argument(..., help="Reproduction case ID to inspect"),
+    format: str = typer.Option("text", "--format", "-f", help="Output format: text or json"),
+) -> None:
+    """Show details of a reproduction case and all execution attempts."""
+    from forge.reproduction import ReproductionCaseManager
+
+    manager = ReproductionCaseManager()
+    case = manager.get_case(case_id)
+    if not case:
+        typer.secho(f"Reproduction case '{case_id}' not found.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    attempts = manager.list_attempts(case_id)
+
+    if format.lower() == "json":
+        data = {
+            "case": case.model_dump(mode="json"),
+            "attempts": [a.model_dump(mode="json") for a in attempts],
+        }
+        typer.echo(json.dumps(data, indent=2))
+        return
+
+    typer.echo(f"Reproduction Case: {case.case_id}")
+    typer.echo(f"  Finding ID:    {case.finding_id}")
+    typer.echo(f"  Status:        {case.status.value}")
+    typer.echo(f"  Target Repo:   {case.target_repo}")
+    typer.echo(f"  Commit SHA:    {case.target_commit_sha}")
+    typer.echo(f"  Attempts:      {case.attempts_count} (Max Retries: {case.max_retries})")
+    typer.echo(f"  Created At:    {case.created_at.isoformat()}")
+
+    if attempts:
+        typer.echo("\nAttempts History:")
+        for a in attempts:
+            typer.echo(f"  - Attempt #{a.attempt_number} [{a.attempt_id}]: {a.outcome.value.upper()}")
+            typer.echo(f"    Exit Code:    {a.exit_code}")
+            typer.echo(f"    Duration:     {a.duration_ms:.1f}ms")
+            if a.diagnostic_message:
+                typer.echo(f"    Diagnostic:   {a.diagnostic_message}")
+            if a.matched_patterns:
+                typer.echo(f"    Patterns:     {', '.join(a.matched_patterns)}")
+            if a.evidence_id:
+                typer.echo(f"    Evidence ID:  {a.evidence_id}")
+    else:
+        typer.echo("\nAttempts: none executed yet")
+
+
+@repro_app.command(name="run")
+def repro_run(
+    case_id: str = typer.Argument(..., help="Reproduction case ID to execute"),
+    resume: bool = typer.Option(False, "--resume", help="Resume or retry a previously created case"),
+    format: str = typer.Option("text", "--format", "-f", help="Output format: text or json"),
+) -> None:
+    """Execute a reproduction case attempt inside the isolated sandbox."""
+    from forge.reproduction import ReproductionCaseManager, StaleRevisionError, NonIdempotentRetryError, CaseManagementError
+    from forge.repository import acquire_repository, cleanup_repository, SecurityError, AcquisitionError
+    from forge.sandbox.contracts import ReproductionOutcome
+
+    manager = ReproductionCaseManager()
+    case = manager.get_case(case_id)
+    if not case:
+        typer.secho(f"Reproduction case '{case_id}' not found.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    # Acquire repo at pinned commit
+    try:
+        acquired = acquire_repository(case.target_repo, branch=case.target_commit_sha)
+    except (SecurityError, AcquisitionError) as e:
+        typer.secho(f"Repository acquisition aborted: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        attempt = manager.run_attempt(
+            case_id=case_id,
+            workspace_path=acquired.workspace_path,
+            current_commit_sha=acquired.resolved_commit_sha,
+            is_resume=resume,
+        )
+    except (StaleRevisionError, NonIdempotentRetryError, CaseManagementError) as e:
+        typer.secho(f"Reproduction attempt aborted: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    finally:
+        cleanup_repository(acquired)
+
+    if format.lower() == "json":
+        typer.echo(json.dumps(attempt.model_dump(mode="json"), indent=2))
+        return
+
+    color = typer.colors.GREEN if attempt.outcome == ReproductionOutcome.REPRODUCED else (
+        typer.colors.YELLOW if attempt.outcome in [ReproductionOutcome.BLOCKED, ReproductionOutcome.SKIPPED_SANDBOX_UNAVAILABLE] else typer.colors.RED
+    )
+    typer.secho(f"\nAttempt #{attempt.attempt_number} Result: {attempt.outcome.value.upper()}", fg=color, bold=True)
+    if attempt.diagnostic_message:
+        typer.echo(f"Details:    {attempt.diagnostic_message}")
+    if attempt.exit_code is not None:
+        typer.echo(f"Exit Code:  {attempt.exit_code}")
+    typer.echo(f"Duration:   {attempt.duration_ms:.1f}ms")
+    if attempt.evidence_id:
+        typer.echo(f"Evidence:   {attempt.evidence_id}")
+
+    if attempt.outcome == ReproductionOutcome.ERROR:
+        raise typer.Exit(code=2)
+    elif attempt.outcome in [ReproductionOutcome.FAILED, ReproductionOutcome.TIMEOUT]:
         raise typer.Exit(code=1)
 
 

@@ -113,18 +113,21 @@ class ReproductionHarness:
                 if len(matched_patterns) == len(cmd.expected_output_patterns):
                     outcome = ReproductionOutcome.REPRODUCED
                     diagnostic = f"Defect reproduced: exit code {sbx_result.exit_code} and all {len(matched_patterns)} expected patterns matched."
+                elif len(matched_patterns) > 0:
+                    outcome = ReproductionOutcome.INCONCLUSIVE
+                    diagnostic = f"Exit code {sbx_result.exit_code} matched, but only partial pattern match ({len(matched_patterns)}/{len(cmd.expected_output_patterns)})."
                 else:
                     outcome = ReproductionOutcome.NOT_REPRODUCED
-                    diagnostic = f"Exit code {sbx_result.exit_code} matched, but missing expected output patterns."
+                    diagnostic = f"Exit code {sbx_result.exit_code} matched, but none of the {len(cmd.expected_output_patterns)} expected output patterns matched."
             else:
                 outcome = ReproductionOutcome.REPRODUCED
                 diagnostic = f"Defect reproduced: exit code {sbx_result.exit_code} matched expected reproduction codes ({cmd.expected_exit_codes})."
         elif sbx_result.exit_code == 0:
             outcome = ReproductionOutcome.PASSED
-            diagnostic = "Clean execution: command exited with 0 (defect did not reproduce)."
+            diagnostic = "Clean execution: command exited with 0 (defect did not reproduce; note that passing tests alone do not prove absence of defect)."
         else:
             outcome = ReproductionOutcome.FAILED
-            diagnostic = f"Execution exited with unexpected code {sbx_result.exit_code}."
+            diagnostic = f"Execution exited with unexpected nonzero code {sbx_result.exit_code} (arbitrary nonzero exit does not prove defect presence)."
 
         return ReproductionResult(
             request_id=request.request_id,

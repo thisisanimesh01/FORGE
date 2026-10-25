@@ -81,11 +81,57 @@ CREATE TABLE IF NOT EXISTS run_events (
     FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS reproduction_cases (
+    case_id TEXT PRIMARY KEY,
+    finding_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    target_repo TEXT NOT NULL,
+    target_commit_sha TEXT NOT NULL,
+    contract_json TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts_count INTEGER NOT NULL DEFAULT 0,
+    max_retries INTEGER NOT NULL DEFAULT 0,
+    retry_policy_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES runs(run_id) ON DELETE CASCADE,
+    FOREIGN KEY(finding_id) REFERENCES findings(finding_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS reproduction_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    case_id TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL,
+    run_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    exit_code INTEGER,
+    duration_ms REAL NOT NULL DEFAULT 0.0,
+    stdout_digest TEXT,
+    stderr_digest TEXT,
+    stdout_excerpt TEXT NOT NULL DEFAULT '',
+    stderr_excerpt TEXT NOT NULL DEFAULT '',
+    stdout_truncated INTEGER NOT NULL DEFAULT 0,
+    stderr_truncated INTEGER NOT NULL DEFAULT 0,
+    matched_patterns_json TEXT NOT NULL DEFAULT '[]',
+    evidence_id TEXT,
+    isolation_details_json TEXT NOT NULL DEFAULT '{}',
+    provenance_json TEXT NOT NULL DEFAULT '{}',
+    diagnostic_message TEXT,
+    cleanup_status TEXT NOT NULL DEFAULT 'cleaned',
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    FOREIGN KEY(case_id) REFERENCES reproduction_cases(case_id) ON DELETE CASCADE,
+    FOREIGN KEY(evidence_id) REFERENCES evidence(evidence_id) ON DELETE SET NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
 CREATE INDEX IF NOT EXISTS idx_transitions_finding ON finding_transitions(finding_id);
 CREATE INDEX IF NOT EXISTS idx_run_events_sequence ON run_events(run_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_reproduction_cases_finding ON reproduction_cases(finding_id);
+CREATE INDEX IF NOT EXISTS idx_reproduction_attempts_case ON reproduction_attempts(case_id, attempt_number);
 """
 
 
