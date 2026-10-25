@@ -151,7 +151,131 @@ def inspect(
         if no_llm:
             typer.echo("[Audit Mode] Static inspection complete (LLM disabled).")
         else:
-            typer.echo("[Audit Mode] Static inspection complete. (LLM orchestration enabled in Milestone 5)")
+            typer.echo("[Audit Mode] Static inspection complete. Run 'forge investigate <target>' to launch LLM investigation.")
+    finally:
+        cleanup_repository(acquired)
+
+
+@app.command()
+def investigate(
+    target: str = typer.Argument(..., help="Git HTTPS repository URL or authorized local directory"),
+    branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Target git branch to inspect"),
+    max_steps: Optional[int] = typer.Option(None, "--max-steps", "-s", help="Max agent turns (default 10)"),
+    no_llm: bool = typer.Option(False, "--no-llm", help="Force static inspection mode only"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Override LLM provider (fake, openai)"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Override LLM model name"),
+) -> None:
+    """Run an autonomous, typed LLM investigation of a target repository."""
+    from forge.repository import (
+        acquire_repository,
+        cleanup_repository,
+        detect_repository,
+        build_symbol_index,
+        load_instruction_files,
+        RepositoryMap,
+        SecurityError,
+        AcquisitionError,
+    )
+    from forge.storage.store import ForgeStore
+    from forge.investigation.tools import ToolRegistry
+    from forge.investigation.loop import InvestigationLoop
+    from forge.llm.fake import FakeLLMProvider
+    from forge.llm.openai import OpenAICompatibleProvider
+
+    settings = get_settings()
+    store = ForgeStore(db_path=settings.db_path)
+
+    typer.echo(f"Validating and acquiring target: {target}")
+    try:
+        acquired = acquire_repository(target, branch=branch)
+    except (SecurityError, AcquisitionError) as e:
+        typer.secho(f"Acquisition aborted: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        typer.echo(f"Building repository intelligence at: {acquired.workspace_path}")
+        intel = detect_repository(acquired.workspace_path)
+        symbols = build_symbol_index(acquired.workspace_path)
+        instructions = load_instruction_files(acquired.workspace_path)
+
+        repo_map = RepositoryMap(
+            target=target,
+            resolved_commit_sha=acquired.resolved_commit_sha,
+            target_branch=acquired.target_branch,
+            intelligence=intel,
+            symbol_index=symbols,
+            instructions=instructions,
+        )
+
+        typer.echo("")
+        typer.echo(repo_map.render_markdown_summary())
+        typer.echo("")
+
+        if no_llm:
+            typer.echo("[Investigation Mode] Static analysis complete (--no-llm specified).")
+            return
+
+        # Initialize run record in store
+        run_id = store.create_run(target=target)
+        typer.echo(f"Initialized Investigation Run: {run_id}")
+
+        # Configure LLM provider
+        provider_name = (provider or settings.llm_provider).lower()
+        if provider_name == "fake":
+            llm_inst = FakeLLMProvider(model_name=model or settings.llm_model)
+        elif provider_name in {"openai", "anthropic", "gemini"}:
+            llm_inst = OpenAICompatibleProvider(
+                model=model or settings.llm_model,
+                api_key=settings.llm_api_key,
+                api_base=settings.llm_api_base,
+            )
+            if not llm_inst.is_available():
+                typer.secho(
+                    f"Provider '{provider_name}' is not configured with credentials. Set FORGE_LLM_API_KEY.",
+                    fg=typer.colors.RED,
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+        else:
+            typer.secho(
+                f"Unknown LLM provider '{provider_name}'. Must be one of: fake, openai, anthropic, gemini.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+        tool_reg = ToolRegistry(
+            workspace_path=acquired.workspace_path,
+            repo_map=repo_map,
+            store=store,
+            run_id=run_id,
+        )
+
+        loop = InvestigationLoop(
+            provider=llm_inst,
+            tool_registry=tool_reg,
+            store=store,
+            run_id=run_id,
+            target=target,
+            repo_map=repo_map,
+            max_steps=max_steps or settings.max_steps,
+        )
+
+        typer.echo("Starting investigation loop...")
+        result = loop.run()
+
+        typer.echo(f"\nInvestigation finished with status: {result.status.upper()}")
+        typer.echo(f"Steps executed: {result.steps_executed} (Tool calls: {result.total_tool_calls})")
+        if result.final_response:
+            typer.echo("\n--- Agent Assessment ---")
+            typer.echo(result.final_response)
+            typer.echo("------------------------")
+
+        if result.findings:
+            typer.echo(f"\nFindings discovered: {len(result.findings)}")
+            for f in result.findings:
+                typer.echo(f"  - [{f.severity.value.upper()}] {f.title} ({f.finding_id})")
+
     finally:
         cleanup_repository(acquired)
 
