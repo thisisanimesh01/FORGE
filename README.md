@@ -1,27 +1,54 @@
 # FORGE — Autonomous Software Engineering Intelligence
 
-Phase 1: Secure Repository Intelligence.
+FORGE is an enterprise-grade autonomous software engineering intelligence platform. It investigates software repositories, reviews code diffs with evidence calibration, evaluates CI/CD security policies, and conducts isolated defect reproduction and verification without compromising host machine integrity or mutating target repositories during audit phases.
 
-FORGE is designed to understand software repositories, investigate defects, run isolated baseline checks, and assist software engineering teams without risking host machine integrity or mutating target repositories during audit phases.
+---
 
-## Phase 1 Scope & Status
-Phase 1 operates strictly in **Audit-Only** mode. FORGE does not modify source code, create git commits, push branches, or open pull requests.
+## Maturity & Capability Boundaries
 
-## Key Features
-- **Deterministic Sandboxing**: Executes checks strictly inside isolated execution environments (or skips with clear diagnostic reporting when unconfigured).
-- **Python Intelligence**: AST-based symbol indexing, dependency identification, and context budgeting.
-- **Typed Evidence & Findings**: Findings are evidence-backed with strict lifecycle tracking (`suspected -> reproduced -> root_caused -> fixed -> verified`).
-- **Event-Sourced Runs**: SQLite-backed append-only audit trail.
-- **LLM Investigation Loop**: Provider-independent typed LLM interface with bounded multi-turn investigation. Supports offline fake provider and real OpenAI-compatible APIs.
-- **Reporting & Benchmark Suite**: Deterministic JSON & Markdown reports, controlled seeded-bug fixtures, and automated benchmark evaluation with precision, recall, and pass rates.
-- **Diff-Aware Code Review** *(Phase 2 Milestone 1)*: Read-only Git diff analysis comparing two revisions, accurate hunk and changed-line mapping, security vulnerability and defect detection on modified lines, and automated secret redaction.
-- **Evidence-Calibrated Review Findings** *(Phase 2 Milestone 2)*: Tripartite finding structure separating observed facts from inferences and recommendations. Deterministic finding IDs, evidence verification against diff hunks, automatic confidence downgrading for unbacked claims, and strict lifecycle state machine enforcement.
-- **Review Quality Benchmarking** *(Phase 2 Milestone 3)*: Controlled, versioned benchmark suite for code review quality evaluation covering genuine security/logic defects, harmless lookalikes, clean controls, attribution challenges, prompt injection, and secret redaction.
-- **Adversarial Review Validation & Generalization** *(Phase 2 Milestone 4)*: Genuinely held-out adversarial fixture corpus, resolution of case-level vs finding-level counting units, evaluator self-tests, and defensible regression thresholds.
-- **Security-Sensitive Dataflow & Secret-Exposure Detection** *(Phase 2 Milestone 5)*: Dedicated AST-based security analysis and bounded dataflow tracking module. Detects hardcoded credentials in nested dictionaries and Authorization headers, formatted token assembly via string interpolation, and sensitive values leaking into logging, print, or HTTP sinks. Enhanced secret redaction boundary and a dedicated security benchmark corpus (`--corpus security`).
-- **CI Review Policies & SARIF Export** *(Phase 2 Milestone 6)*: Declarative CI policy enforcement with configurable severity/confidence thresholds, category filtering, auditable scoped rule suppressions, and fail-closed evidence handling. Full compliance with SARIF 2.1.0 for GitHub Code Scanning and CI dashboards.
+- **Audit-Only & Immutable**: FORGE strictly investigates repositories. It never modifies target repository source code, creates git commits, pushes branches, opens pull requests, merges code, or deploys software.
+- **Untrusted Input Invariant**: All repository contents, documentation, commit messages, PR diffs, and tool outputs are treated as untrusted data.
+- **Fail-Secure Container Sandboxing**: Any dynamic execution of repository code occurs strictly within an isolated Docker container with dropped capabilities, read-only root filesystems, non-root user execution, and disabled network access.
+- **Refusal of Host Fallback**: When Docker is unavailable, runtime execution is marked `SKIPPED_SANDBOX_UNAVAILABLE`. FORGE strictly refuses to fall back to executing untrusted repository code directly on the host machine.
+- **Zero Fabrication**: Claims must be backed by concrete, verified evidence. Confidence is automatically downgraded for unbacked assertions.
+
+---
+
+## Phase Roadmap & Status
+
+```
+Phase 1: Secure Repository Intelligence  ── [COMPLETED] (Milestones 1–7)
+Phase 2: Diff-Aware Intelligent Review   ── [COMPLETED] (Milestones 1–6)
+Phase 3: Defect Reproduction & Verification ── [IN PROGRESS] (Milestone 1 Implemented; 2–6 Planned)
+Phase 4: Targeted Autonomous Repair     ── [PLANNED]
+Phase 5: Regression & Safety Verification ── [PLANNED]
+```
+
+### Phase 1: Secure Repository Intelligence (Completed)
+- **M1 — Architecture Baseline & Workspace Isolation**: Safe HTTPS/local repository acquisition, path traversal guards, and git hook suppression.
+- **M2 — Static Repository Intelligence**: AST symbol indexing, language/framework detection, instruction file extraction, and token-bounded context budgeting.
+- **M3 — Evidence Records, State Machine, & Storage**: Structured evidence, finding lifecycle transitions (`suspected -> reproduced -> root_caused -> fixed -> verified`), and SQLite event store.
+- **M4 — Secure Container Sandbox Boundary**: Docker adapter with non-root user (`1000:1000`), `--network none`, `--read-only`, dropped capabilities, memory/CPU quotas, and secret redaction.
+- **M5 — Bounded Investigation Orchestration**: Multi-turn typed LLM agent with tool calling (`list_dir`, `search`, `read_file`, `get_symbol_index`, `run_check`).
+- **M6 — Evidence-Linked Reports & Benchmarking**: Seeded-bug test fixtures, precision/recall evaluation, and JSON/Markdown report generation.
+- **M7 — Checkpoint & Comprehensive Verification**: End-to-end security audits, secret scanning, and host immutability verification.
+
+### Phase 2: Diff-Aware Intelligent Review (Completed)
+- **M1 — Diff-Aware Code Review Engine**: Read-only Git diff analysis comparing two revisions, accurate hunk and changed-line mapping, security vulnerability and defect detection on modified lines, and automated secret redaction.
+- **M2 — Evidence-Calibrated Review Findings**: Tripartite finding structure separating observed facts from inferences and recommendations. Deterministic finding IDs, evidence verification against diff hunks, automatic confidence downgrading for unbacked claims, and strict lifecycle state machine enforcement.
+- **M3 — Review Quality Benchmarking**: Versioned benchmark suite evaluating review quality covering genuine security/logic defects, harmless lookalikes, clean controls, attribution challenges, prompt injection, and secret redaction.
+- **M4 — Adversarial Review Validation & Generalization**: Genuinely held-out adversarial fixture corpus, resolution of case-level vs finding-level counting units, evaluator self-tests, and defensible regression thresholds.
+- **M5 — Security-Sensitive Dataflow & Secret-Exposure Detection**: AST-based security analysis and bounded dataflow tracking. Detects hardcoded credentials in nested dictionaries and Authorization headers, formatted token assembly via string interpolation, and sensitive values leaking into logging, print, or HTTP sinks (`--corpus security`).
+- **M6 — CI Review Policies & SARIF Export**: Declarative CI policy enforcement with configurable severity/confidence thresholds, category filtering, auditable scoped rule suppressions, fail-closed evidence handling, and full OASIS SARIF 2.1.0 compliance.
+
+### Phase 3: Defect Reproduction & Verification (In Progress)
+- **M1 — Sandbox Execution Contracts (Implemented)**: Typed execution contracts (`ReproductionRequest`, `ReproductionCommand`, `ExecutionEnvironmentSpec`, `ReproductionResult`) with strict schema validation, shell injection prevention, approved executable allowlists, resource limits, and fail-closed degradation.
+- **M2–M6 (Planned)**: Automated reproduction test generation, minimal reproduction synthesis, dynamic trace capture, and lifecycle transition integration.
+
+---
 
 ## Installation
+
 Ensure Python 3.11+ is installed.
 ```bash
 python3 -m venv .venv
@@ -29,85 +56,124 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-## CLI Usage
+---
+
+## Verified CLI Usage
+
+### System & Sandbox Diagnostics
 ```bash
-# System Diagnostics
+# Verify environment, Python, Git, SQLite, and Docker status
 forge doctor
+
+# Inspect sandbox runtime health, container configuration, and isolation limits
 forge sandbox doctor
-
-# Diff-Aware Code Review (Phase 2 Milestones 1, 2, 5, & 6)
-forge review <repo-path> --base HEAD~1 --head HEAD           # Review latest commit changes
-forge review <repo-path> --base main --head feature-branch   # Review branch diff
-forge review <repo-path> --base v1.0.0 --head v1.1.0 --no-llm # Offline static review only
-forge review <repo-path> --format json                      # Output review as JSON
-forge review <repo-path> --format sarif                     # Output review as SARIF 2.1.0
-forge review <repo-path> -o reports/review.sarif            # Export SARIF directly to file
-
-# CI Review Policy Checking (Phase 2 Milestone 6)
-forge policy check reports/review.json                      # Check review report against default policy
-forge policy check reports/review.json --policy docs/examples/ci_review_policy.json # Custom policy gate
-forge policy check reports/review.json --format json        # Machine-readable JSON for CI pipelines
-
-# Review Quality & Security Benchmarks (Phase 2 Milestones 3, 4, & 5)
-forge benchmark review                                      # Run standard review quality benchmarks
-forge benchmark review --corpus heldout                     # Run held-out adversarial benchmark corpus
-forge benchmark review --corpus security                    # Run security dataflow benchmark corpus
-forge benchmark review --format json                        # Output benchmark results as JSON
-forge benchmark review --fixture SEC01_nested_dict_credential # Run a specific security fixture
-forge benchmark review -o reports/review_benchmark.json     # Export results to JSON file
-
-# Repository Auditing & Investigation
-forge inspect <repo-url-or-path>          # Static inspection
-forge investigate <repo-url-or-path>     # LLM-powered investigation
-forge investigate <repo> --no-llm        # Offline static inspection only
-
-# Reporting
-forge report <run-id>                    # Markdown report to stdout
-forge report <run-id> --format json      # JSON report to stdout
-forge report <run-id> -o reports/run.md  # Export to file
-
-# Audit History & Findings
-forge runs                               # List historical runs
-forge findings list                      # List all findings
-forge findings show <finding-id>         # Inspect specific finding details & evidence
-
-# Repository Benchmark Suite (Phase 1)
-forge benchmark list                     # List all available seeded-bug fixtures
-forge benchmark run --mode static        # Run offline static benchmark suite
-forge benchmark run --mode llm           # Run LLM-assisted benchmark suite
-forge benchmark run --case <case-id>     # Run an individual benchmark fixture
-forge benchmark run -o results.json      # Export benchmark metrics to JSON
 ```
 
+### Isolated Defect Reproduction Contracts (Phase 3 Milestone 1)
+```bash
+# Validate reproduction contract schema and security bounds offline
+forge sandbox check contracts/reproduce_example.json
 
-## Benchmark Metrics Interpretation
-FORGE evaluates benchmark cases by comparing detected findings against expected fixture specifications:
-- **True Positive (TP)**: Seeded defect correctly detected in target file/symbol.
-- **False Positive (FP)**: Defect falsely claimed on clean control fixture or unaffected files.
-- **False Negative (FN)**: Seeded defect missed by the analysis.
+# Execute defect reproduction inside an isolated sandbox or report fail-closed skip
+forge sandbox reproduce contracts/reproduce_example.json -o reports/repro_result.json
+```
+
+### Diff-Aware Code Review (Phase 2 Milestones 1, 2, 5, & 6)
+```bash
+# Review latest commit changes against previous revision
+forge review <repo-path> --base HEAD~1 --head HEAD
+
+# Review branch differences
+forge review <repo-path> --base main --head feature-branch
+
+# Offline static review without LLM assistance
+forge review <repo-path> --base main --head HEAD --no-llm
+
+# Output review as JSON or standards-compliant SARIF 2.1.0
+forge review <repo-path> --format json
+forge review <repo-path> --format sarif -o reports/review.sarif
+```
+
+### CI Review Policy Enforcement (Phase 2 Milestone 6)
+```bash
+# Evaluate review findings against default CI policy
+forge policy check reports/review.json
+
+# Gate CI pipeline using custom declarative policy
+forge policy check reports/review.json --policy docs/examples/ci_review_policy.json
+
+# Output machine-readable policy decision for CI/CD pipelines
+forge policy check reports/review.json --format json
+```
+
+### Review Quality & Security Benchmarks (Phase 2 Milestones 3, 4, & 5)
+```bash
+# Run standard review quality benchmarks
+forge benchmark review
+
+# Run held-out adversarial benchmark corpus
+forge benchmark review --corpus heldout
+
+# Run security dataflow benchmark corpus
+forge benchmark review --corpus security
+
+# Output benchmark metrics to JSON
+forge benchmark review --format json -o reports/review_benchmark.json
+```
+
+### Repository Auditing & Investigation (Phase 1)
+```bash
+# Safely acquire and inspect repository structure (read-only)
+forge inspect <repo-url-or-path> --no-llm
+
+# Multi-turn LLM investigation
+forge investigate <repo-url-or-path>
+
+# Export audit report
+forge report <run-id> --format markdown -o reports/run.md
+
+# Audit history & findings
+forge runs
+forge findings list
+forge findings show <finding-id>
+
+# Phase 1 repository benchmark suite
+forge benchmark run --mode static
+forge benchmark run --mode llm
+```
+
+---
+
+## Benchmark Metrics & Evaluation
+
+FORGE measures detection accuracy against curated ground-truth fixtures:
+- **True Positive (TP)**: Target defect correctly detected in affected file and symbol.
+- **False Positive (FP)**: Defect falsely claimed on clean control fixtures or unaffected files.
+- **False Negative (FN)**: Target defect missed by the analysis.
 - **True Negative (TN)**: Clean control fixture correctly identified with 0 defect findings.
 - **Precision**: $\frac{TP}{TP + FP}$ (N/A if no defects reported).
 - **Recall**: $\frac{TP}{TP + FN}$ (N/A if no seeded defects present).
 - **F1 Score**: Harmonic mean of Precision and Recall.
 - **Case Pass Rate**: Percentage of benchmark cases where outcome matched ground truth.
 
-### Static vs. LLM-Assisted Modes
-- **`--mode static`**: Runs rule-based AST syntax and pattern analysis. Fast, fully deterministic, offline, and does not require an LLM API key or Docker.
-- **`--mode llm`**: Executes multi-turn agent reasoning and tool calling (`read_source_excerpt`, `search_symbols`, `list_directory`). Compatible with `FakeLLMProvider` for offline testing.
+---
 
-## Sandbox & Docker-Unavailable Behavior
-When Docker is unavailable on the host, FORGE fails closed:
-- Commands requiring isolated container execution are marked `SKIPPED_UNAVAILABLE`.
-- Host execution fallback is strictly prohibited.
+## Sandboxing & Fail-Closed Security Policy
+
+When Docker is unavailable on the host:
+- Execution commands are safely skipped with status `SKIPPED_SANDBOX_UNAVAILABLE`.
+- Host execution fallback is strictly prohibited to guarantee host machine safety.
+- Clear diagnostics are output detailing how to configure Docker for isolated execution.
+
+---
 
 ## Configuration
-Copy `.env.example` to `.env` and configure as needed:
 
+Copy `.env.example` to `.env` and configure as needed:
 ```bash
 cp .env.example .env
 ```
 
-Key environment variables:
 | Variable | Default | Description |
 |---|---|---|
 | `FORGE_LLM_PROVIDER` | `fake` | Provider: `fake` (offline) or `openai` (real) |
@@ -115,5 +181,21 @@ Key environment variables:
 | `FORGE_LLM_MODEL` | `gpt-4o` | Model identifier |
 | `FORGE_LLM_API_BASE` | *(empty)* | Custom endpoint URL (Ollama, Azure, vLLM) |
 | `FORGE_MAX_STEPS` | `10` | Max investigation iterations |
+| `FORGE_DOCKER_IMAGE` | `python:3.11-slim` | Base container image for sandboxed execution |
 
-See `docs/specs/phase-1.md` and `docs/phase-1-plan.md` for detailed specifications and architecture.
+---
+
+## Documentation & Architecture References
+
+- Engineering Rules & Mandatory Release Gates: [`AGENTS.md`](file:///Users/animeshyadav/Desktop/project/forge/AGENTS.md)
+- Phase 1 Specification: [`docs/specs/phase-1.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-1.md)
+- Phase 2 Specifications:
+  - Diff Review: [`docs/specs/phase-2-milestone-1.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-2-milestone-1.md)
+  - Evidence Calibration: [`docs/specs/phase-2-milestone-2.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-2-milestone-2.md)
+  - Review Benchmarks: [`docs/specs/phase-2-milestone-3.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-2-milestone-3.md)
+  - Adversarial Generalization: [`docs/specs/phase-2-milestone-4.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-2-milestone-4.md)
+  - Security Dataflow Analysis: [`docs/specs/phase-2-milestone-5.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-2-milestone-5.md)
+  - CI Review Policy & SARIF: [`docs/specs/phase-2-milestone-6.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-2-milestone-6.md)
+- Phase 3 Specifications:
+  - Sandbox Execution Contracts: [`docs/specs/phase-3-milestone-1.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-1.md)
+- Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)

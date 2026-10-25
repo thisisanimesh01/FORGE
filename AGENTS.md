@@ -30,3 +30,18 @@
 ## 6. Secrets & Safety
 - **No Secrets in Code/Logs**: Redact API keys, tokens, and sensitive paths from logs, reports, and events.
 - **Outbound Scanning**: Sanitize reports before output.
+
+## 7. Milestone Release Gate & Documentation Policy
+Updating `README.md` and related documentation is a mandatory release gate for every milestone and every phase, not an optional documentation task. No milestone is complete until documentation and verification gates pass.
+
+The mandatory release gate requires:
+1. **Update `README.md`**: Document actual completed features, limitations, and verified CLI/API usage.
+2. **Milestone Specification**: Create or update the corresponding milestone specification in `docs/specs/`.
+3. **Phase Status & Roadmap**: Update phase status and roadmap whenever a phase starts, transitions, or closes.
+4. **Reconcile CLI Examples**: Ensure all CLI examples match actual command arguments, flags, and tested behavior.
+5. **Secrets & Hygiene**: Review `.gitignore`, staged files, logs, and artifacts to guarantee zero secrets or private data are committed.
+6. **Verification Suite**: Run documentation-related checks (`git diff --check`) and the full regression test suite (`pytest`).
+7. **Atomic Publication**: Commit and push documentation updates together with the milestone implementation, only after all gates pass.
+8. **Publication Verification**: Verify that the README and specification updates are included in the exact published commit.
+
+If a milestone introduces purely internal architecture or no user-facing changes, still update `README.md` status, roadmap, or explicit architectural notes detailing why no CLI change is warranted. Never claim features exist without observed implementation and verification.

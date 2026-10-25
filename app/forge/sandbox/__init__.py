@@ -18,6 +18,14 @@ from forge.sandbox.policy import (
 from forge.sandbox.adapter import Sandbox
 from forge.sandbox.docker import DockerSandbox
 from forge.sandbox.evidence import record_sandbox_result_in_store
+from forge.sandbox.contracts import (
+    ReproductionOutcome,
+    ExecutionEnvironmentSpec,
+    ReproductionCommand,
+    ReproductionRequest,
+    ReproductionResult,
+)
+from forge.sandbox.runner import ReproductionHarness
 
 __all__ = [
     "ExecutionLimits",
@@ -34,4 +42,10 @@ __all__ = [
     "Sandbox",
     "DockerSandbox",
     "record_sandbox_result_in_store",
+    "ReproductionOutcome",
+    "ExecutionEnvironmentSpec",
+    "ReproductionCommand",
+    "ReproductionRequest",
+    "ReproductionResult",
+    "ReproductionHarness",
 ]

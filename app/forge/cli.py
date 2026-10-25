@@ -108,6 +108,94 @@ def sandbox_doctor() -> None:
         typer.echo("Security notice:     FORGE strictly refuses to run repository code directly on host.")
 
 
+@sandbox_app.command(name="check")
+def sandbox_check(
+    contract_path: str = typer.Argument(..., help="Path to JSON file containing ReproductionRequest contract"),
+) -> None:
+    """Validate a reproduction execution contract without running untrusted code."""
+    from forge.sandbox.contracts import ReproductionRequest
+    contract_file = Path(contract_path).resolve()
+    if not contract_file.exists():
+        typer.secho(f"Contract file not found: {contract_file}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        raw_data = json.loads(contract_file.read_text(encoding="utf-8"))
+        req = ReproductionRequest.model_validate(raw_data)
+    except Exception as e:
+        typer.secho(f"Contract validation failed: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    typer.secho(f"Contract '{req.request_id}' is valid.", fg=typer.colors.GREEN)
+    typer.echo(f"  Finding ID:   {req.finding_id}")
+    typer.echo(f"  Hypothesis:   {req.hypothesis}")
+    typer.echo(f"  Command:      {' '.join(req.command.args)}")
+    typer.echo(f"  Workdir:      {req.command.relative_cwd}")
+    typer.echo(f"  Image:        {req.environment.docker_image}")
+    typer.echo(f"  Timeout:      {req.environment.timeout_seconds}s")
+    typer.echo(f"  Memory Limit: {req.environment.memory_limit}")
+
+
+@sandbox_app.command(name="reproduce")
+def sandbox_reproduce(
+    contract_path: str = typer.Argument(..., help="Path to JSON file containing ReproductionRequest contract"),
+    output_path: Optional[str] = typer.Option(None, "--output", "-o", help="Path to export reproduction result JSON"),
+) -> None:
+    """Execute defect reproduction inside an isolated sandbox or fail closed."""
+    from forge.sandbox.contracts import ReproductionRequest, ReproductionOutcome
+    from forge.sandbox.runner import ReproductionHarness
+    from forge.repository import acquire_repository, cleanup_repository, SecurityError, AcquisitionError
+
+    contract_file = Path(contract_path).resolve()
+    if not contract_file.exists():
+        typer.secho(f"Contract file not found: {contract_file}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        raw_data = json.loads(contract_file.read_text(encoding="utf-8"))
+        req = ReproductionRequest.model_validate(raw_data)
+    except Exception as e:
+        typer.secho(f"Malformed contract: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    typer.echo(f"Evaluating reproduction contract: {req.request_id} (Finding: {req.finding_id})")
+
+    # Acquire repository safely
+    try:
+        acquired = acquire_repository(req.target_repo, branch=req.commit_sha)
+    except (SecurityError, AcquisitionError) as e:
+        typer.secho(f"Repository acquisition aborted: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        harness = ReproductionHarness()
+        result = harness.execute(req, acquired.workspace_path)
+    finally:
+        cleanup_repository(acquired)
+
+    # Render results
+    color = typer.colors.GREEN if result.outcome == ReproductionOutcome.REPRODUCED else (
+        typer.colors.YELLOW if result.outcome == ReproductionOutcome.SKIPPED_SANDBOX_UNAVAILABLE else typer.colors.RED
+    )
+    typer.secho(f"\nReproduction Outcome: {result.outcome.value.upper()}", fg=color, bold=True)
+    if result.diagnostic_message:
+        typer.echo(f"Details: {result.diagnostic_message}")
+    if result.exit_code is not None:
+        typer.echo(f"Exit Code: {result.exit_code}")
+    typer.echo(f"Duration: {result.duration_ms:.1f}ms")
+
+    if output_path:
+        out_p = Path(output_path).resolve()
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(result.model_dump(mode="json"), indent=2), encoding="utf-8")
+        typer.secho(f"\nReproduction result exported to: {out_p}", fg=typer.colors.GREEN)
+
+    if result.outcome == ReproductionOutcome.ERROR:
+        raise typer.Exit(code=2)
+    elif result.outcome in {ReproductionOutcome.FAILED, ReproductionOutcome.TIMEOUT}:
+        raise typer.Exit(code=1)
+
+
 
 @app.command()
 def inspect(
