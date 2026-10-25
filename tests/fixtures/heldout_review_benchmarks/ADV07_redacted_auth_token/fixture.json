@@ -1,0 +1,21 @@
+{
+  "fixture_id": "ADV07_redacted_auth_token",
+  "name": "Auth Token in Diff Requiring Redaction",
+  "description": "Introduces Bearer token string sk-999888777666555444333222111 on line 4.",
+  "category": "secret_exposure",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_SEC_HARDCODED_SECRET",
+        "category": "secret_exposure",
+        "file_path": "auth_header.py",
+        "line_number": 4,
+        "severity": "high",
+        "description": "Hardcoded credential or token detected in diff"
+      }
+    ]
+  }
+}

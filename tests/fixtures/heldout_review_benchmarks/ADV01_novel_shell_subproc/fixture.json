@@ -1,0 +1,22 @@
+{
+  "fixture_id": "ADV01_novel_shell_subproc",
+  "name": "Novel Variation of Shell Execution via subprocess.Popen",
+  "description": "Uses subprocess.Popen with shell=True on line 7 in a pipeline manager.",
+  "category": "genuine_security",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_SEC_SHELL_EXECUTION",
+        "category": "security",
+        "file_path": "pipeline.py",
+        "line_number": 7,
+        "severity": "critical",
+        "description": "Insecure shell execution with shell=True"
+      }
+    ],
+    "evidence_status_expected": "verified"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "fixture_id": "ADV02_novel_logic_discount",
+  "name": "Novel Variation of Direct Discount Subtraction",
+  "description": "Calculates adjusted_val = total - customer_discount on line 6.",
+  "category": "genuine_logic",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_DEF_DIRECT_PERCENT_SUB",
+        "category": "defect",
+        "file_path": "billing.py",
+        "line_number": 6,
+        "severity": "high",
+        "description": "Direct percentage subtraction defect"
+      }
+    ],
+    "evidence_status_expected": "verified"
+  }
+}

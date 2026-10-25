@@ -1,0 +1,7 @@
+diff --git a/analytics.py b/analytics.py
+--- a/analytics.py
++++ b/analytics.py
+@@ -5,3 +5,4 @@ def calculate_variance(actual_val, baseline_val):
+     validate_numeric(actual_val, baseline_val)
++    variance = actual_val - baseline_val
+     return variance

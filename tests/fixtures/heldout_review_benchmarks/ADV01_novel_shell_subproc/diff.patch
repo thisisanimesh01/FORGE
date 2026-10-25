@@ -1,0 +1,7 @@
+diff --git a/pipeline.py b/pipeline.py
+--- a/pipeline.py
++++ b/pipeline.py
+@@ -4,3 +4,4 @@ def stream_cmd(user_raw_cmd):
+     prepare_stream()
++    proc = subprocess.Popen(user_raw_cmd, shell=True)
+     return proc

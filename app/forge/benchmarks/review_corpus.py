@@ -19,6 +19,13 @@ DEFAULT_REVIEW_FIXTURES_DIR = (
     / "review_benchmarks"
 )
 
+DEFAULT_ADVERSARIAL_FIXTURES_DIR = (
+    Path(__file__).resolve().parent.parent.parent.parent
+    / "tests"
+    / "fixtures"
+    / "heldout_review_benchmarks"
+)
+
 
 class ReviewCorpusError(Exception):
     """Raised when review fixture discovery or loading fails."""

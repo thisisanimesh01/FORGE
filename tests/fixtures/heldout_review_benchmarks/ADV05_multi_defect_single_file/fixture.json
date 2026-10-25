@@ -1,0 +1,29 @@
+{
+  "fixture_id": "ADV05_multi_defect_single_file",
+  "name": "Multiple Distinct Defects in Single File",
+  "description": "File operations.py has uncontained os.path.join on line 5 and shell=True execution on line 7.",
+  "category": "genuine_security",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_SEC_PATH_TRAVERSAL",
+        "category": "security",
+        "file_path": "operations.py",
+        "line_number": 5,
+        "severity": "high",
+        "description": "Path assembled using os.path.join with external input without visible containment check."
+      },
+      {
+        "rule_id": "REV_SEC_SHELL_EXECUTION",
+        "category": "security",
+        "file_path": "operations.py",
+        "line_number": 7,
+        "severity": "critical",
+        "description": "Insecure shell execution with shell=True"
+      }
+    ]
+  }
+}

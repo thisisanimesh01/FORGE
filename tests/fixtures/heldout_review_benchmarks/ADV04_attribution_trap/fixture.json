@@ -1,0 +1,21 @@
+{
+  "fixture_id": "ADV04_attribution_trap",
+  "name": "Attribution Trap Multi-File Multi-Function",
+  "description": "Safe functions in auth.py and uncontained os.path.join in download.py line 7.",
+  "category": "attribution_challenge",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": true,
+    "expected_findings": [
+      {
+        "rule_id": "REV_SEC_PATH_TRAVERSAL",
+        "category": "security",
+        "file_path": "download.py",
+        "line_number": 7,
+        "severity": "high",
+        "description": "Path assembled using os.path.join with external input without visible containment check."
+      }
+    ]
+  }
+}

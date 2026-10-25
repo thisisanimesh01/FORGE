@@ -525,10 +525,16 @@ def benchmark_run(
 def benchmark_review(
     mode: str = typer.Option("static", "--mode", "-m", help="Evaluation mode: static or llm"),
     fixture_filter: Optional[str] = typer.Option(None, "--fixture", "-f", help="Filter for specific fixture ID"),
+    corpus: str = typer.Option("standard", "--corpus", "-c", help="Benchmark corpus: standard or heldout/adversarial"),
     output_format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
     output_path: Optional[str] = typer.Option(None, "--output", "-o", help="Optional file path to export benchmark results"),
 ) -> None:
     """Execute review quality benchmarks evaluating precision, recall, and evidence calibration."""
+    from forge.benchmarks.review_corpus import (
+        ReviewCorpusLoader,
+        DEFAULT_REVIEW_FIXTURES_DIR,
+        DEFAULT_ADVERSARIAL_FIXTURES_DIR,
+    )
     from forge.benchmarks.review_runner import ReviewBenchmarkRunner
     from forge.benchmarks.review_reporting import (
         review_benchmark_to_json,
@@ -541,8 +547,17 @@ def benchmark_review(
         typer.secho(f"Invalid mode '{mode}'. Choose 'static' or 'llm'.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
+    c_choice = corpus.lower()
+    if c_choice in {"heldout", "adversarial"}:
+        loader = ReviewCorpusLoader(fixtures_dir=DEFAULT_ADVERSARIAL_FIXTURES_DIR)
+    elif c_choice in {"standard", "default"}:
+        loader = ReviewCorpusLoader(fixtures_dir=DEFAULT_REVIEW_FIXTURES_DIR)
+    else:
+        typer.secho(f"Invalid corpus '{corpus}'. Choose 'standard' or 'heldout'.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
     provider = FakeLLMProvider() if m == "llm" else None
-    runner = ReviewBenchmarkRunner()
+    runner = ReviewBenchmarkRunner(loader=loader)
     result = runner.run_suite(mode=m, fixture_filter=fixture_filter, provider=provider)
 
     is_json = output_format.lower() == "json"

@@ -1,0 +1,13 @@
+{
+  "fixture_id": "ADV03_lookalike_safe_diff",
+  "name": "Lookalike Benign Arithmetic Difference",
+  "description": "Calculates variance = actual_val - baseline_val on line 8, which is completely safe.",
+  "category": "harmless_lookalike",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": false,
+    "expected_findings": [],
+    "allow_benign_clean": true
+  }
+}

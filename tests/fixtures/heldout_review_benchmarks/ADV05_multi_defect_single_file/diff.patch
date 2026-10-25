@@ -1,0 +1,9 @@
+diff --git a/operations.py b/operations.py
+--- a/operations.py
++++ b/operations.py
+@@ -2,3 +2,7 @@ def process_job(user_input, cmd_arg):
+     log_start()
++    target_dest = os.path.join("/tmp/scratch", user_input)
++    prepare_dir(target_dest)
++    subprocess.run("sync " + cmd_arg, shell=True)
+     return True

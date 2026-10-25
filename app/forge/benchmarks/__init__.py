@@ -34,6 +34,7 @@ from forge.benchmarks.review_corpus import (
     ReviewCorpusLoader,
     ReviewCorpusError,
     DEFAULT_REVIEW_FIXTURES_DIR,
+    DEFAULT_ADVERSARIAL_FIXTURES_DIR,
 )
 from forge.benchmarks.review_metrics import calculate_review_metrics
 from forge.benchmarks.review_runner import ReviewBenchmarkRunner
@@ -69,6 +70,7 @@ __all__ = [
     "ReviewCorpusLoader",
     "ReviewCorpusError",
     "DEFAULT_REVIEW_FIXTURES_DIR",
+    "DEFAULT_ADVERSARIAL_FIXTURES_DIR",
     "calculate_review_metrics",
     "ReviewBenchmarkRunner",
     "review_benchmark_to_json",

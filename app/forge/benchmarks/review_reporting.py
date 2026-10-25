@@ -52,20 +52,41 @@ def review_benchmark_to_markdown(result: ReviewBenchmarkRunResult) -> str:
         f"| **Location Accuracy** | {loc_str} | Accuracy of finding line & file attribution |",
         f"| **Evidence Validity Rate** | {ev_str} | Rate of findings backed by verified evidence |",
         "",
-        "### Classification Counts",
-        f"- **True Positives (TP)**: {met.true_positives}",
-        f"- **False Positives (FP)**: {met.false_positives}",
-        f"- **False Negatives (FN)**: {met.false_negatives}",
-        f"- **True Negatives (TN)**: {met.true_negatives}",
-        f"- **Attribution Failures (Wrong File)**: {met.wrong_file_attributions}",
-        f"- **Execution Errors**: {met.error_cases}",
-        f"- **Skipped / Unavailable**: {met.skipped_unavailable_cases}",
+        "### Classification Counts (Case-level vs Finding-level)",
+        f"- **Case-Level Outcomes (Total Cases: {met.total_cases})**:",
+        f"  - Case True Positives (defective fixtures passed): {met.case_true_positives}",
+        f"  - Case True Negatives (clean fixtures passed): {met.case_true_negatives}",
+        f"  - Case False Positives (clean fixtures falsely flagged): {met.case_false_positives}",
+        f"  - Case False Negatives (defective fixtures missed): {met.case_false_negatives}",
+        f"  - Case Errors: {met.error_cases}",
+        f"  - Case Skipped / Unavailable: {met.skipped_unavailable_cases}",
+        f"- **Finding-Level Counts (Defect Detection Unit)**:",
+        f"  - Finding True Positives (TP): {met.finding_true_positives}",
+        f"  - Finding False Positives (FP): {met.finding_false_positives}",
+        f"  - Finding False Negatives (FN): {met.finding_false_negatives}",
+        f"  - Attribution Failures (Wrong File): {met.wrong_file_attributions}",
         "",
         "### Severity Distribution",
     ]
 
     for sev, count in sorted(met.severity_distribution.items()):
         lines.append(f"- **{sev.capitalize()}**: {count}")
+
+    if met.category_metrics:
+        lines.extend([
+            "",
+            "### Per-Category Performance Breakdown",
+            "",
+            "| Category | Cases | Passed | Pass Rate | Finding TP | Finding FP | Finding FN | Precision | Recall |",
+            "|---|---|---|---|---|---|---|---|---|",
+        ])
+        for cat_name, cmet in sorted(met.category_metrics.items()):
+            p_rate = f"{cmet['pass_rate']:.1%}" if cmet.get("pass_rate") is not None else "N/A"
+            c_prec = f"{cmet['precision']:.1%}" if cmet.get("precision") is not None else "N/A"
+            c_rec = f"{cmet['recall']:.1%}" if cmet.get("recall") is not None else "N/A"
+            lines.append(
+                f"| `{cat_name}` | {cmet['total_cases']} | {cmet['passed_cases']} | {p_rate} | {cmet['finding_true_positives']} | {cmet['finding_false_positives']} | {cmet['finding_false_negatives']} | {c_prec} | {c_rec} |"
+            )
 
     lines.extend([
         "",

@@ -1,0 +1,14 @@
+diff --git a/auth.py b/auth.py
+--- a/auth.py
++++ b/auth.py
+@@ -1,3 +1,4 @@
+ def check_session(token):
++    active = verify_token_expiry(token)
+     return active
+diff --git a/download.py b/download.py
+--- a/download.py
++++ b/download.py
+@@ -4,3 +4,4 @@ def get_asset(user_relpath):
+     cache_root = "/var/cache/app"
++    target_asset = os.path.join(cache_root, user_relpath)
+     return send_file(target_asset)

@@ -1,0 +1,7 @@
+diff --git a/billing.py b/billing.py
+--- a/billing.py
++++ b/billing.py
+@@ -3,3 +3,4 @@ def compute_invoice(subtotal, customer_discount):
+     check_eligibility(customer_discount)
++    net_charge = subtotal - customer_discount
+     return net_charge

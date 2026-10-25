@@ -1,0 +1,12 @@
+{
+  "fixture_id": "ADV08_renamed_file_clean",
+  "name": "Renamed File and Pure Move Without Defects",
+  "description": "File old_utils.py renamed to new_utils.py without adding defective lines.",
+  "category": "empty_or_boundary",
+  "base_revision": "HEAD~1",
+  "head_revision": "HEAD",
+  "expected": {
+    "has_defects": false,
+    "expected_findings": []
+  }
+}

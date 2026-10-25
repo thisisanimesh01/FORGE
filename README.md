@@ -17,6 +17,7 @@ Phase 1 operates strictly in **Audit-Only** mode. FORGE does not modify source c
 - **Diff-Aware Code Review** *(Phase 2 Milestone 1)*: Read-only Git diff analysis comparing two revisions, accurate hunk and changed-line mapping, security vulnerability and defect detection on modified lines, and automated secret redaction.
 - **Evidence-Calibrated Review Findings** *(Phase 2 Milestone 2)*: Tripartite finding structure separating observed facts from inferences and recommendations. Deterministic finding IDs, evidence verification against diff hunks, automatic confidence downgrading for unbacked claims, and strict lifecycle state machine enforcement.
 - **Review Quality Benchmarking** *(Phase 2 Milestone 3)*: Controlled, versioned benchmark suite for code review quality evaluation covering genuine security/logic defects, harmless lookalikes, clean controls, attribution challenges, prompt injection, and secret redaction.
+- **Adversarial Review Validation & Generalization** *(Phase 2 Milestone 4)*: Genuinely held-out adversarial fixture corpus, resolution of case-level vs finding-level counting units, evaluator self-tests, and defensible regression thresholds.
 
 ## Installation
 Ensure Python 3.11+ is installed.
@@ -39,10 +40,11 @@ forge review <repo-path> --base v1.0.0 --head v1.1.0 --no-llm # Offline static r
 forge review <repo-path> --format json                      # Output review as JSON
 forge review <repo-path> -o reports/review.md               # Export review report to file
 
-# Review Quality Benchmarks (Phase 2 Milestone 3)
-forge benchmark review                                      # Run review quality benchmarks (Markdown)
-forge benchmark review --format json                        # Output review benchmark results as JSON
-forge benchmark review --fixture RBM01_path_traversal       # Run a single review fixture
+# Review Quality Benchmarks (Phase 2 Milestone 3 & 4)
+forge benchmark review                                      # Run standard review quality benchmarks
+forge benchmark review --corpus heldout                     # Run held-out adversarial benchmark corpus
+forge benchmark review --format json                        # Output benchmark results as JSON
+forge benchmark review --fixture ADV01_novel_shell_subproc  # Run a specific adversarial fixture
 forge benchmark review -o reports/review_benchmark.json     # Export results to JSON file
 
 # Repository Auditing & Investigation

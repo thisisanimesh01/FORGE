@@ -121,12 +121,23 @@ class ReviewBenchmarkMetrics(BaseModel):
     error_cases: int = 0
     skipped_unavailable_cases: int = 0
 
-    # Binary counts across fixtures and findings
+    # Case-level counts (sum = total_cases)
+    case_true_positives: int = 0
+    case_false_positives: int = 0
+    case_false_negatives: int = 0
+    case_true_negatives: int = 0
+
+    # Finding-level counts (evaluated across all reported and expected findings)
+    finding_true_positives: int = 0
+    finding_false_positives: int = 0
+    finding_false_negatives: int = 0
+    wrong_file_attributions: int = 0
+
+    # Backward-compatible aliases for finding-level counts:
     true_positives: int = 0
     false_positives: int = 0
     false_negatives: int = 0
     true_negatives: int = 0
-    wrong_file_attributions: int = 0
 
     # Derived statistical rates (None when denominator is zero)
     precision: Optional[float] = None
@@ -140,6 +151,9 @@ class ReviewBenchmarkMetrics(BaseModel):
 
     # Severity distribution of detected findings
     severity_distribution: Dict[str, int] = Field(default_factory=dict)
+
+    # Per-category metric breakdown
+    category_metrics: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
 
 class ReviewBenchmarkRunResult(BaseModel):
