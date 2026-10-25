@@ -20,10 +20,12 @@ db_app = typer.Typer(help="Database management commands.")
 findings_app = typer.Typer(help="Finding inspection commands.")
 sandbox_app = typer.Typer(help="Sandbox diagnostics and execution commands.")
 benchmark_app = typer.Typer(help="Benchmark evaluation commands.")
+policy_app = typer.Typer(help="CI review policy check and enforcement commands.")
 app.add_typer(db_app, name="db")
 app.add_typer(findings_app, name="findings")
 app.add_typer(sandbox_app, name="sandbox")
 app.add_typer(benchmark_app, name="benchmark")
+app.add_typer(policy_app, name="policy")
 
 
 @app.command()
@@ -597,7 +599,7 @@ def review(
     base: str = typer.Option("HEAD~1", "--base", "-b", help="Base git revision (commit SHA, branch, tag, HEAD~N)"),
     head: str = typer.Option("HEAD", "--head", "-h", help="Head git revision"),
     no_llm: bool = typer.Option(False, "--no-llm", help="Run offline static pattern review without LLM"),
-    output_format: str = typer.Option("markdown", "--format", "-f", help="Output format: markdown or json"),
+    output_format: str = typer.Option("markdown", "--format", "-f", help="Output format: markdown, json, or sarif"),
     output: Optional[str] = typer.Option(None, "--output", "-o", help="Optional file path to export review report"),
 ) -> None:
     """Perform diff-aware intelligent code review between two revisions."""
@@ -607,6 +609,7 @@ def review(
         ReviewEngine,
         review_report_to_json,
         review_report_to_markdown,
+        review_report_to_sarif,
         export_review_report,
         GitDiffError,
     )
@@ -617,8 +620,9 @@ def review(
         typer.secho(f"Error: Target repository directory '{repository}' not found.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    is_json = output_format.lower() == "json"
-    if not is_json and not output:
+    fmt = output_format.lower()
+    is_machine_readable = fmt in {"json", "sarif"}
+    if not is_machine_readable and not output:
         typer.echo(f"Starting diff review for: {repo_path}")
         typer.echo(f"  Comparing revisions: {base} ... {head}")
 
@@ -636,19 +640,107 @@ def review(
 
     report = engine.review_diff(diff_bundle, target_path=repo_path, mode=mode)
 
-    if is_json:
+    if fmt == "json":
         rendered = review_report_to_json(report)
+    elif fmt == "sarif":
+        rendered = review_report_to_sarif(report)
     else:
         rendered = review_report_to_markdown(report)
 
     if output:
         out_file = Path(output).resolve()
-        export_review_report(report, out_file, output_format=output_format.lower())
+        export_review_report(report, out_file, output_format=fmt)
         typer.secho(f"\nReview report successfully exported to: {out_file}", fg=typer.colors.GREEN)
     else:
-        if not is_json:
+        if not is_machine_readable:
             typer.echo("")
         typer.echo(rendered)
+
+
+# --- Policy Check Command ---
+
+
+@policy_app.command(name="check")
+def policy_check(
+    report_file: str = typer.Argument(..., help="Path to JSON review report or repository path to evaluate"),
+    policy_file: Optional[str] = typer.Option(None, "--policy", "-p", help="Path to review policy JSON file"),
+    output_format: str = typer.Option("markdown", "--format", "-f", help="Output format: markdown or json"),
+) -> None:
+    """Evaluate review findings against a CI policy and report blocking defects."""
+    from forge.review import (
+        ReviewReport,
+        evaluate_review_policy,
+        load_policy_from_file,
+        PolicyConfigurationError,
+        ReviewPolicy,
+    )
+    from forge.config import redact_secrets
+
+    input_path = Path(report_file).resolve()
+    if not input_path.exists():
+        typer.secho(f"Error: Input file or repository '{report_file}' not found.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    # 1. Load Policy
+    policy: Optional[ReviewPolicy] = None
+    if policy_file:
+        p_path = Path(policy_file).resolve()
+        try:
+            policy = load_policy_from_file(p_path)
+        except PolicyConfigurationError as err:
+            typer.secho(f"Policy configuration error: {err}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=2)
+    else:
+        policy = ReviewPolicy()
+
+    # 2. Load Review Report
+    review_report: Optional[ReviewReport] = None
+    if input_path.is_file():
+        try:
+            raw_text = input_path.read_text(encoding="utf-8")
+            raw_json = json.loads(raw_text)
+            review_report = ReviewReport.model_validate(raw_json)
+        except Exception as exc:
+            typer.secho(f"Invalid review report file: {exc}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=2)
+    else:
+        typer.secho(f"Error: Expected review report JSON file, got directory '{input_path}'. Run 'forge review <repo> --format json -o report.json' first.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    # 3. Evaluate Policy
+    eval_report = evaluate_review_policy(review_report, policy=policy)
+
+    # 4. Output Results
+    is_json = output_format.lower() == "json"
+    if is_json:
+        typer.echo(redact_secrets(json.dumps(eval_report.model_dump(mode="json"), indent=2, sort_keys=True)))
+    else:
+        lines = [
+            f"# FORGE CI Review Policy Check: {eval_report.policy_name}",
+            f"- **Policy ID**: `{eval_report.policy_id}`",
+            f"- **Evaluated At**: `{eval_report.evaluated_at}`",
+            f"- **Result**: `{'PASSED' if eval_report.passed else 'FAILED'}`",
+            "",
+            "## Summary",
+            f"- Total Findings Evaluated: {eval_report.total_findings_evaluated}",
+            f"- Blocking Findings: {eval_report.blocking_findings_count}",
+            f"- Suppressed Findings: {eval_report.suppressed_findings_count}",
+            f"- Unverified / Unbacked Findings: {eval_report.unbacked_findings_count}",
+            "",
+            "## Finding Decisions",
+        ]
+        if not eval_report.decisions:
+            lines.append("No findings to evaluate. Policy passed.")
+        else:
+            for dec in eval_report.decisions:
+                status_icon = "[BLOCKED]" if dec.is_blocking else f"[{dec.action.value.upper()}]"
+                lines.append(f"- **{status_icon}** `{dec.rule_id}` at `{dec.file_path}:{dec.line_number or 0}`: {dec.decision_reason}")
+
+        typer.echo(redact_secrets("\n".join(lines)))
+
+    # 5. Exit Code: 0 on pass, 1 on policy block/failure, 2 on input error
+    if not eval_report.passed:
+        raise typer.Exit(code=1)
 
 
 def main() -> None:

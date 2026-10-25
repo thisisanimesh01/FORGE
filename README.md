@@ -19,6 +19,7 @@ Phase 1 operates strictly in **Audit-Only** mode. FORGE does not modify source c
 - **Review Quality Benchmarking** *(Phase 2 Milestone 3)*: Controlled, versioned benchmark suite for code review quality evaluation covering genuine security/logic defects, harmless lookalikes, clean controls, attribution challenges, prompt injection, and secret redaction.
 - **Adversarial Review Validation & Generalization** *(Phase 2 Milestone 4)*: Genuinely held-out adversarial fixture corpus, resolution of case-level vs finding-level counting units, evaluator self-tests, and defensible regression thresholds.
 - **Security-Sensitive Dataflow & Secret-Exposure Detection** *(Phase 2 Milestone 5)*: Dedicated AST-based security analysis and bounded dataflow tracking module. Detects hardcoded credentials in nested dictionaries and Authorization headers, formatted token assembly via string interpolation, and sensitive values leaking into logging, print, or HTTP sinks. Enhanced secret redaction boundary and a dedicated security benchmark corpus (`--corpus security`).
+- **CI Review Policies & SARIF Export** *(Phase 2 Milestone 6)*: Declarative CI policy enforcement with configurable severity/confidence thresholds, category filtering, auditable scoped rule suppressions, and fail-closed evidence handling. Full compliance with SARIF 2.1.0 for GitHub Code Scanning and CI dashboards.
 
 ## Installation
 Ensure Python 3.11+ is installed.
@@ -34,12 +35,18 @@ pip install -e ".[dev]"
 forge doctor
 forge sandbox doctor
 
-# Diff-Aware Code Review (Phase 2 Milestones 1, 2, & 5)
+# Diff-Aware Code Review (Phase 2 Milestones 1, 2, 5, & 6)
 forge review <repo-path> --base HEAD~1 --head HEAD           # Review latest commit changes
 forge review <repo-path> --base main --head feature-branch   # Review branch diff
 forge review <repo-path> --base v1.0.0 --head v1.1.0 --no-llm # Offline static review only
 forge review <repo-path> --format json                      # Output review as JSON
-forge review <repo-path> -o reports/review.md               # Export review report to file
+forge review <repo-path> --format sarif                     # Output review as SARIF 2.1.0
+forge review <repo-path> -o reports/review.sarif            # Export SARIF directly to file
+
+# CI Review Policy Checking (Phase 2 Milestone 6)
+forge policy check reports/review.json                      # Check review report against default policy
+forge policy check reports/review.json --policy docs/examples/ci_review_policy.json # Custom policy gate
+forge policy check reports/review.json --format json        # Machine-readable JSON for CI pipelines
 
 # Review Quality & Security Benchmarks (Phase 2 Milestones 3, 4, & 5)
 forge benchmark review                                      # Run standard review quality benchmarks

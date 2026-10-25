@@ -35,6 +35,25 @@ from forge.review.reporting import (
     review_report_to_markdown,
 )
 
+from forge.review.policy import (
+    evaluate_review_policy,
+    load_policy_from_file,
+    PolicyConfigurationError,
+)
+from forge.review.policy_models import (
+    FindingPolicyAction,
+    FindingPolicyEvaluation,
+    PolicyEvaluationReport,
+    PolicyEvidenceHandling,
+    ReviewPolicy,
+    RuleSuppression,
+)
+from forge.review.sarif import (
+    review_report_to_sarif,
+    SARIF_SCHEMA_URI,
+    SARIF_VERSION,
+)
+
 __all__ = [
     "CalibratedEvidence",
     "DiffBundle",
@@ -44,22 +63,34 @@ __all__ = [
     "EvidenceCalibrationStatus",
     "FindingCalibrationError",
     "FindingCategory",
+    "FindingPolicyAction",
+    "FindingPolicyEvaluation",
     "GitDiffError",
+    "PolicyConfigurationError",
+    "PolicyEvaluationReport",
+    "PolicyEvidenceHandling",
     "ReviewEngine",
     "ReviewFileStatus",
     "ReviewFinding",
+    "ReviewPolicy",
     "ReviewReport",
     "REVIEW_SCHEMA_VERSION",
+    "RuleSuppression",
+    "SARIF_SCHEMA_URI",
+    "SARIF_VERSION",
     "calibrate_finding_evidence",
     "compute_content_hash",
     "create_calibrated_evidence",
     "deduplicate_findings",
     "enforce_review_lifecycle_transition",
+    "evaluate_review_policy",
     "export_review_report",
     "generate_finding_id",
+    "load_policy_from_file",
     "parse_unified_diff",
     "read_git_diff",
     "review_report_to_json",
     "review_report_to_markdown",
+    "review_report_to_sarif",
     "validate_revision",
 ]

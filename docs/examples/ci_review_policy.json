@@ -1,0 +1,20 @@
+{
+  "policy_id": "ci_security_gate_strict",
+  "name": "Strict CI Security & Defect Gate",
+  "description": "Fails CI build on any high or critical defect with high confidence, while respecting documented suppressions.",
+  "min_fail_severity": "high",
+  "min_enforce_confidence": "high",
+  "included_categories": null,
+  "excluded_categories": [],
+  "evidence_handling": "report_only",
+  "scope_changed_lines_only": true,
+  "suppressions": [
+    {
+      "rule_id": "REV_DEF_CHAINED_DICT_ACCESS",
+      "file_path": "tests/unit/test_review_benchmark.py",
+      "reason": "Test assertions deliberately verify exact dictionary structure in unit test suite.",
+      "author": "security-team",
+      "expires_at": "2027-01-01"
+    }
+  ]
+}

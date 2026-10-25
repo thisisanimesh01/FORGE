@@ -112,9 +112,14 @@ def review_report_to_markdown(report: ReviewReport) -> str:
 
 def export_review_report(report: ReviewReport, output_path: Path, output_format: str = "markdown") -> Path:
     """Save review report to disk safely."""
+    from forge.review.sarif import review_report_to_sarif
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if output_format == "json":
+    fmt = output_format.lower()
+    if fmt == "json":
         content = review_report_to_json(report)
+    elif fmt == "sarif":
+        content = review_report_to_sarif(report)
     else:
         content = review_report_to_markdown(report)
 
