@@ -14,6 +14,15 @@ from forge.reproduction.manager import (
     StaleRevisionError,
     NonIdempotentRetryError,
 )
+from forge.reproduction.planner import (
+    ReproductionStrategy,
+    ReproductionPlan,
+    PlanProvenance,
+    PlanValidationResult,
+    ReproductionPlanner,
+    generate_plan_id,
+)
+from forge.reproduction.validator import ReproductionPlanValidator
 
 __all__ = [
     "CaseStatus",
@@ -26,4 +35,13 @@ __all__ = [
     "CaseManagementError",
     "StaleRevisionError",
     "NonIdempotentRetryError",
+    # Planner
+    "ReproductionStrategy",
+    "ReproductionPlan",
+    "PlanProvenance",
+    "PlanValidationResult",
+    "ReproductionPlanner",
+    "generate_plan_id",
+    # Validator
+    "ReproductionPlanValidator",
 ]

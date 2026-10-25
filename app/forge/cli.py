@@ -22,12 +22,15 @@ sandbox_app = typer.Typer(help="Sandbox diagnostics and execution commands.")
 benchmark_app = typer.Typer(help="Benchmark evaluation commands.")
 policy_app = typer.Typer(help="CI review policy check and enforcement commands.")
 repro_app = typer.Typer(help="Reproduction case management and execution commands.")
+plan_app = typer.Typer(help="Deterministic reproduction plan generation, validation, and execution commands.")
 app.add_typer(db_app, name="db")
 app.add_typer(findings_app, name="findings")
 app.add_typer(sandbox_app, name="sandbox")
 app.add_typer(benchmark_app, name="benchmark")
 app.add_typer(policy_app, name="policy")
 app.add_typer(repro_app, name="repro")
+app.add_typer(plan_app, name="plan")
+
 
 
 @app.command()
@@ -1013,6 +1016,284 @@ def policy_check(
 
     # 5. Exit Code: 0 on pass, 1 on policy block/failure, 2 on input error
     if not eval_report.passed:
+        raise typer.Exit(code=1)
+
+
+
+# --- Plan commands ---
+# Exit codes: 0=success/valid, 1=plan failed/not-reproduced, 2=invalid plan/policy violation,
+#             3=blocked (sandbox unavailable), 4=inconclusive
+
+
+@plan_app.command(name="generate")
+def plan_generate(
+    finding_id: str = typer.Argument(..., help="Finding ID to generate a plan for"),
+    commit_sha: str = typer.Option(..., "--commit", "-c", help="Pinned repository commit SHA"),
+    target_repo: str = typer.Option(..., "--repo", "-r", help="Target repository URL or local path"),
+    command: Optional[str] = typer.Option(None, "--command", help="Command argument vector as JSON array string, e.g. '[\"pytest\",\"tests/test_foo.py\"]'"),
+    expected_behavior: Optional[str] = typer.Option(None, "--expected", "-e", help="Independently sourced expected behaviour description"),
+    provenance: str = typer.Option("static_analysis", "--provenance", "-p", help="Expected behaviour provenance: trusted_fixture or static_analysis"),
+    strategy: Optional[str] = typer.Option(None, "--strategy", "-s", help="Preferred strategy override: run_specific_test, run_scoped_test_file, validate_boundary_condition, check_expected_observed"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Optional file path to export plan as JSON"),
+) -> None:
+    """Generate a deterministic reproduction plan for a finding.
+
+    Exit codes: 0=plan generated, 2=invalid arguments or policy violation.
+    """
+    from forge.reproduction.planner import (
+        ReproductionPlanner,
+        ReproductionStrategy,
+    )
+    from forge.reproduction.models import FieldProvenance
+
+    # Parse provenance
+    try:
+        prov = FieldProvenance(provenance)
+    except ValueError:
+        typer.secho(
+            f"Invalid provenance '{provenance}'. Must be one of: "
+            f"{[p.value for p in FieldProvenance]}",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=2)
+
+    _TRUSTED = {FieldProvenance.TRUSTED_FIXTURE, FieldProvenance.STATIC_ANALYSIS}
+    if expected_behavior and prov not in _TRUSTED:
+        typer.secho(
+            f"Provenance '{prov.value}' is not trusted. Use 'trusted_fixture' or 'static_analysis'.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # Parse command args
+    command_args = None
+    if command:
+        try:
+            command_args = json.loads(command)
+            if not isinstance(command_args, list) or not all(isinstance(a, str) for a in command_args):
+                raise ValueError("Command must be a JSON array of strings")
+        except (json.JSONDecodeError, ValueError) as exc:
+            typer.secho(f"Invalid --command JSON: {exc}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=2)
+
+    # Parse strategy override
+    preferred = None
+    if strategy:
+        try:
+            preferred = ReproductionStrategy(strategy)
+        except ValueError:
+            typer.secho(
+                f"Invalid strategy '{strategy}'. Valid values: "
+                f"{[s.value for s in ReproductionStrategy]}",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=2)
+
+    planner = ReproductionPlanner()
+    try:
+        plan = planner.create_plan(
+            finding_id=finding_id,
+            commit_sha=commit_sha,
+            target_repo=target_repo,
+            trusted_expected_behavior=expected_behavior,
+            expected_behavior_provenance=prov,
+            command_args=command_args,
+            preferred_strategy=preferred,
+        )
+    except ValueError as exc:
+        typer.secho(f"Plan generation error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    plan_json = json.dumps(plan.model_dump(mode="json"), indent=2, sort_keys=True)
+
+    if output:
+        out_p = Path(output).resolve()
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(plan_json, encoding="utf-8")
+        typer.secho(f"Plan written to: {out_p}", fg=typer.colors.GREEN)
+    else:
+        typer.echo(plan_json)
+
+
+@plan_app.command(name="validate")
+def plan_validate(
+    plan_file: str = typer.Argument(..., help="Path to plan JSON file to validate"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Workspace root path for symlink-escape check"),
+) -> None:
+    """Validate a reproduction plan file without executing it (dry run).
+
+    Exit codes: 0=valid, 2=policy violations found.
+    """
+    from forge.reproduction.planner import ReproductionPlan
+    from forge.reproduction.validator import ReproductionPlanValidator
+
+    plan_path = Path(plan_file).resolve()
+    if not plan_path.exists():
+        typer.secho(f"Plan file not found: {plan_file}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        raw = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan = ReproductionPlan.model_validate(raw)
+    except Exception as exc:
+        typer.secho(f"Failed to load plan: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    ws_path = Path(workspace).resolve() if workspace else None
+    validator = ReproductionPlanValidator()
+    result = validator.validate(plan, workspace_path=ws_path)
+
+    if result.is_valid:
+        typer.secho(f"Plan '{plan.plan_id}' is VALID.", fg=typer.colors.GREEN)
+    else:
+        typer.secho(f"Plan '{plan.plan_id}' has {len(result.violations)} violation(s):", fg=typer.colors.RED, err=True)
+        for v in result.violations:
+            typer.secho(f"  - {v}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+
+@plan_app.command(name="show")
+def plan_show(
+    plan_file: str = typer.Argument(..., help="Path to plan JSON file"),
+) -> None:
+    """Show human-readable plan details.
+
+    Exit codes: 0=success, 2=invalid file.
+    """
+    from forge.reproduction.planner import ReproductionPlan
+
+    plan_path = Path(plan_file).resolve()
+    if not plan_path.exists():
+        typer.secho(f"Plan file not found: {plan_file}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        raw = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan = ReproductionPlan.model_validate(raw)
+    except Exception as exc:
+        typer.secho(f"Failed to load plan: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    typer.echo(f"Plan ID:          {plan.plan_id}")
+    typer.echo(f"Plan Version:     {plan.plan_version}")
+    typer.echo(f"Finding ID:       {plan.finding_id}")
+    typer.echo(f"Commit SHA:       {plan.commit_sha}")
+    typer.echo(f"Target Repo:      {plan.target_repo}")
+    typer.echo(f"Strategy:         {plan.strategy.value}")
+    typer.echo(f"Rationale:        {plan.strategy_rationale}")
+    if plan.command:
+        typer.echo(f"Command:          {' '.join(plan.command.args)}")
+        typer.echo(f"Working Dir:      {plan.command.relative_cwd}")
+        typer.echo(f"Expected Exit:    {plan.command.expected_exit_codes}")
+    else:
+        typer.echo("Command:          (none — INSUFFICIENT_INFORMATION)")
+    typer.echo(f"Expected Behavior:{' ' + plan.expected_behavior if plan.expected_behavior else ' (not set)'}")
+    typer.echo(f"Network Approved: {plan.network_approved}")
+    typer.echo(f"Provenance:")
+    typer.echo(f"  strategy:         {plan.provenance.strategy_source.value}")
+    typer.echo(f"  expected_behavior:{plan.provenance.expected_behavior_source.value}")
+    typer.echo(f"  command:          {plan.provenance.command_source.value}")
+    typer.echo(f"  resource_limits:  {plan.provenance.resource_limits_source.value}")
+    if plan.preconditions:
+        typer.echo(f"Preconditions:")
+        for p in plan.preconditions:
+            typer.echo(f"  - {p}")
+    if plan.known_uncertainties:
+        typer.echo(f"Known Uncertainties:")
+        for u in plan.known_uncertainties:
+            typer.echo(f"  - {u}")
+    typer.echo(f"Created At:       {plan.created_at.isoformat()}")
+
+
+@plan_app.command(name="run")
+def plan_run(
+    plan_file: str = typer.Argument(..., help="Path to plan JSON file to execute"),
+    workspace: str = typer.Option(..., "--workspace", "-w", help="Absolute path to the repository workspace"),
+    finding_id: Optional[str] = typer.Option(None, "--finding", "-f", help="Finding ID to attach execution evidence to"),
+    run_id: Optional[str] = typer.Option(None, "--run-id", help="Audit run ID (required when finding_id is set)"),
+) -> None:
+    """Validate a reproduction plan and execute it via the reproduction harness.
+
+    Exit codes:
+      0 = reproduced (defect confirmed)
+      1 = not reproduced / test passed unexpectedly
+      2 = invalid plan / policy violation (execution refused)
+      3 = blocked (Docker / sandbox unavailable)
+      4 = inconclusive (partial output, cannot determine outcome)
+    """
+    from forge.reproduction.planner import ReproductionPlan, ReproductionStrategy
+    from forge.reproduction.validator import ReproductionPlanValidator
+    from forge.sandbox.contracts import (
+        ReproductionCommand,
+        ReproductionRequest,
+        ReproductionOutcome,
+        ExecutionEnvironmentSpec,
+    )
+    from forge.sandbox.runner import ReproductionHarness
+
+    plan_path = Path(plan_file).resolve()
+    if not plan_path.exists():
+        typer.secho(f"Plan file not found: {plan_file}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        raw = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan = ReproductionPlan.model_validate(raw)
+    except Exception as exc:
+        typer.secho(f"Failed to load plan: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    # 1. Validate before execution
+    ws_path = Path(workspace).resolve()
+    validator = ReproductionPlanValidator()
+    result = validator.validate(plan, workspace_path=ws_path)
+    if not result.is_valid:
+        typer.secho("Plan validation failed — execution refused:", fg=typer.colors.RED, err=True)
+        for v in result.violations:
+            typer.secho(f"  - {v}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    if plan.command is None:
+        typer.secho("Plan has no command (INSUFFICIENT_INFORMATION strategy) — execution refused.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    # 2. Build ReproductionRequest from the plan
+    import uuid as _uuid
+    request = ReproductionRequest(
+        request_id=f"req_{_uuid.uuid4().hex[:12]}",
+        finding_id=plan.finding_id,
+        target_repo=plan.target_repo,
+        commit_sha=plan.commit_sha,
+        hypothesis=plan.strategy_rationale,
+        command=plan.command,
+        environment=plan.environment,
+    )
+
+    # 3. Execute via harness (fail-closed when Docker unavailable)
+    harness = ReproductionHarness()
+    typer.echo(f"Executing plan '{plan.plan_id}' against workspace: {ws_path}")
+    typer.echo(f"  Strategy: {plan.strategy.value}")
+    typer.echo(f"  Command:  {' '.join(plan.command.args)}")
+
+    res = harness.execute(request, ws_path)
+
+    typer.echo(f"\nOutcome: {res.outcome.value.upper()}")
+    if res.diagnostic_message:
+        typer.echo(f"Diagnostic: {res.diagnostic_message}")
+    if res.exit_code is not None:
+        typer.echo(f"Exit Code: {res.exit_code}")
+
+    # 4. Map outcome to exit code
+    if res.outcome == ReproductionOutcome.REPRODUCED:
+        raise typer.Exit(code=0)
+    elif res.outcome in {ReproductionOutcome.NOT_REPRODUCED, ReproductionOutcome.PASSED, ReproductionOutcome.FAILED}:
+        raise typer.Exit(code=1)
+    elif res.outcome in {ReproductionOutcome.BLOCKED, ReproductionOutcome.SKIPPED_SANDBOX_UNAVAILABLE}:
+        typer.secho("Sandbox unavailable — execution blocked (Docker not found).", fg=typer.colors.YELLOW, err=True)
+        raise typer.Exit(code=3)
+    elif res.outcome == ReproductionOutcome.INCONCLUSIVE:
+        raise typer.Exit(code=4)
+    else:
         raise typer.Exit(code=1)
 
 
