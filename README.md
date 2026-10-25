@@ -14,7 +14,8 @@ Phase 1 operates strictly in **Audit-Only** mode. FORGE does not modify source c
 - **Event-Sourced Runs**: SQLite-backed append-only audit trail.
 - **LLM Investigation Loop**: Provider-independent typed LLM interface with bounded multi-turn investigation. Supports offline fake provider and real OpenAI-compatible APIs.
 - **Reporting & Benchmark Suite**: Deterministic JSON & Markdown reports, controlled seeded-bug fixtures, and automated benchmark evaluation with precision, recall, and pass rates.
-- **Phase 1 Security & Verification** *(Milestone 7)*: Verified zero-mutation invariant, fail-secure Docker degradation, secret redaction, and bounded investigation safety.
+- **Phase 1 Security & Verification**: Verified zero-mutation invariant, fail-secure Docker degradation, secret redaction, and bounded investigation safety.
+- **Diff-Aware Code Review** *(Phase 2 Milestone 1)*: Read-only Git diff analysis comparing two revisions, accurate hunk and changed-line mapping, security vulnerability and defect detection on modified lines, and automated secret redaction.
 
 ## Installation
 Ensure Python 3.11+ is installed.
@@ -29,6 +30,13 @@ pip install -e ".[dev]"
 # System Diagnostics
 forge doctor
 forge sandbox doctor
+
+# Diff-Aware Code Review (Phase 2 Milestone 1)
+forge review <repo-path> --base HEAD~1 --head HEAD           # Review latest commit changes
+forge review <repo-path> --base main --head feature-branch   # Review branch diff
+forge review <repo-path> --base v1.0.0 --head v1.1.0 --no-llm # Offline static review only
+forge review <repo-path> --format json                      # Output review as JSON
+forge review <repo-path> -o reports/review.md               # Export review report to file
 
 # Repository Auditing & Investigation
 forge inspect <repo-url-or-path>          # Static inspection
@@ -52,6 +60,7 @@ forge benchmark run --mode llm           # Run LLM-assisted benchmark suite
 forge benchmark run --case <case-id>     # Run an individual benchmark fixture
 forge benchmark run -o results.json      # Export benchmark metrics to JSON
 ```
+
 
 ## Benchmark Metrics Interpretation
 FORGE evaluates benchmark cases by comparing detected findings against expected fixture specifications:

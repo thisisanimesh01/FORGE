@@ -37,15 +37,21 @@ env/
 .vscode/
 *.swp
 *.swo
+*.DS_Store
+.directory
 
 # Testing & Coverage
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
 .tox/
 
 # Local database & run artifacts
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 data/
@@ -57,6 +63,16 @@ workspace_tmp/
 
 # Environment files and credentials
 .env
-.env.local
+.env.*
+!.env.example
 *.pem
 *.key
+*.cert
+*.crt
+*.pfx
+*.p12
+*.id_rsa
+*.id_ed25519
+secrets/
+credentials.json
+token.json

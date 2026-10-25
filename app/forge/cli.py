@@ -521,6 +521,68 @@ def benchmark_run(
         typer.secho(f"\nBenchmark results saved to: {out_p}", fg=typer.colors.GREEN)
 
 
+# --- Code Review Command ---
+
+@app.command(name="review")
+def review(
+    repository: str = typer.Argument(..., help="Path to local git repository to review"),
+    base: str = typer.Option("HEAD~1", "--base", "-b", help="Base git revision (commit SHA, branch, tag, HEAD~N)"),
+    head: str = typer.Option("HEAD", "--head", "-h", help="Head git revision"),
+    no_llm: bool = typer.Option(False, "--no-llm", help="Run offline static pattern review without LLM"),
+    output_format: str = typer.Option("markdown", "--format", "-f", help="Output format: markdown or json"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Optional file path to export review report"),
+) -> None:
+    """Perform diff-aware intelligent code review between two revisions."""
+    from forge.review import (
+        read_git_diff,
+        parse_unified_diff,
+        ReviewEngine,
+        review_report_to_json,
+        review_report_to_markdown,
+        export_review_report,
+        GitDiffError,
+    )
+    from forge.llm.fake import FakeLLMProvider
+
+    repo_path = Path(repository).resolve()
+    if not repo_path.exists() or not repo_path.is_dir():
+        typer.secho(f"Error: Target repository directory '{repository}' not found.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    is_json = output_format.lower() == "json"
+    if not is_json and not output:
+        typer.echo(f"Starting diff review for: {repo_path}")
+        typer.echo(f"  Comparing revisions: {base} ... {head}")
+
+    try:
+        raw_diff = read_git_diff(repo_path, base=base, head=head)
+    except GitDiffError as err:
+        typer.secho(f"Git diff error: {err}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    diff_bundle = parse_unified_diff(raw_diff, base_revision=base, head_revision=head)
+
+    mode = "static" if no_llm else "llm"
+    provider = FakeLLMProvider() if mode == "llm" else None
+    engine = ReviewEngine(provider=provider)
+
+    report = engine.review_diff(diff_bundle, target_path=repo_path, mode=mode)
+
+    if is_json:
+        rendered = review_report_to_json(report)
+    else:
+        rendered = review_report_to_markdown(report)
+
+    if output:
+        out_file = Path(output).resolve()
+        export_review_report(report, out_file, output_format=output_format.lower())
+        typer.secho(f"\nReview report successfully exported to: {out_file}", fg=typer.colors.GREEN)
+    else:
+        if not is_json:
+            typer.echo("")
+        typer.echo(rendered)
+
+
 def main() -> None:
     """CLI entry point."""
     app()
