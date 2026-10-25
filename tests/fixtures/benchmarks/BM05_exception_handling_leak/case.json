@@ -1,0 +1,17 @@
+{
+  "case_id": "BM05_exception_handling_leak",
+  "name": "Unhandled Exception in Payload Parser",
+  "description": "Payload processor crashes with KeyError when optional payload headers or keys are absent.",
+  "category": "exception_handling",
+  "target_file": "parser.py",
+  "target_symbol": "extract_session_id",
+  "expected_defect": {
+    "has_defect": true,
+    "category": "exception_handling",
+    "severity": "medium",
+    "observable_condition": "KeyError on missing session key"
+  },
+  "execution_requirements": {
+    "requires_sandbox": false
+  }
+}

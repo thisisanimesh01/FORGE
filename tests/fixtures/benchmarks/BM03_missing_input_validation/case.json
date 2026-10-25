@@ -1,0 +1,17 @@
+{
+  "case_id": "BM03_missing_input_validation",
+  "name": "Missing Input Validation in User Registration",
+  "description": "User registration processes raw input without checking for empty string or invalid age types.",
+  "category": "input_validation",
+  "target_file": "user.py",
+  "target_symbol": "register_user",
+  "expected_defect": {
+    "has_defect": true,
+    "category": "input_validation",
+    "severity": "medium",
+    "observable_condition": "ValueError on unvalidated type conversion"
+  },
+  "execution_requirements": {
+    "requires_sandbox": false
+  }
+}

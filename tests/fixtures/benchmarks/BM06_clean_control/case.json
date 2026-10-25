@@ -1,0 +1,17 @@
+{
+  "case_id": "BM06_clean_control",
+  "name": "Clean Math Utilities (Control Fixture)",
+  "description": "Clean, defect-free mathematical utility functions with proper validations.",
+  "category": "clean_control",
+  "target_file": "math_utils.py",
+  "target_symbol": "safe_divide",
+  "expected_defect": {
+    "has_defect": false,
+    "category": null,
+    "severity": "info",
+    "observable_condition": "None (Clean Code)"
+  },
+  "execution_requirements": {
+    "requires_sandbox": false
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "case_id": "BM02_return_value_discount",
+  "name": "Faulty Discount Calculation",
+  "description": "Calculates discounted total incorrectly by subtracting raw percent instead of fraction of price.",
+  "category": "calculation_error",
+  "target_file": "pricing.py",
+  "target_symbol": "calculate_discounted_price",
+  "expected_defect": {
+    "has_defect": true,
+    "category": "calculation_error",
+    "severity": "high",
+    "observable_condition": "Incorrect price total calculation"
+  },
+  "execution_requirements": {
+    "requires_sandbox": false
+  }
+}

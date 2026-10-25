@@ -1,0 +1,17 @@
+{
+  "case_id": "BM04_unsafe_path_handling",
+  "name": "Path Traversal in File Retrieval",
+  "description": "Joins user-supplied filename directly to base directory without checking for directory traversal.",
+  "category": "unsafe_path",
+  "target_file": "files.py",
+  "target_symbol": "get_file_path",
+  "expected_defect": {
+    "has_defect": true,
+    "category": "unsafe_path",
+    "severity": "high",
+    "observable_condition": "Arbitrary path access via ../ traversal"
+  },
+  "execution_requirements": {
+    "requires_sandbox": false
+  }
+}

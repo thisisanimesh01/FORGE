@@ -1,0 +1,18 @@
+{
+  "case_id": "BM01_boundary_off_by_one",
+  "name": "Off-by-One Upper Bound Defect",
+  "description": "Binary search algorithm accesses array with upper bound <= len(arr), causing IndexError.",
+  "category": "boundary_condition",
+  "target_file": "search.py",
+  "target_symbol": "binary_search",
+  "expected_defect": {
+    "has_defect": true,
+    "category": "boundary_condition",
+    "severity": "high",
+    "observable_condition": "IndexError: list index out of range"
+  },
+  "execution_requirements": {
+    "requires_sandbox": false,
+    "test_command": ["pytest", "test_search.py"]
+  }
+}

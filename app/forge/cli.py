@@ -19,9 +19,11 @@ app = typer.Typer(
 db_app = typer.Typer(help="Database management commands.")
 findings_app = typer.Typer(help="Finding inspection commands.")
 sandbox_app = typer.Typer(help="Sandbox diagnostics and execution commands.")
+benchmark_app = typer.Typer(help="Benchmark evaluation commands.")
 app.add_typer(db_app, name="db")
 app.add_typer(findings_app, name="findings")
 app.add_typer(sandbox_app, name="sandbox")
+app.add_typer(benchmark_app, name="benchmark")
 
 
 @app.command()
@@ -284,9 +286,42 @@ def investigate(
 def report(
     run_id: str = typer.Argument(..., help="Run ID to generate report for"),
     output_format: str = typer.Option("markdown", "--format", "-f", help="Report format: markdown or json"),
+    output_path: Optional[str] = typer.Option(None, "--output", "-o", help="Optional file or directory path to export report"),
 ) -> None:
     """Display or export audit report for a completed run."""
-    typer.echo(f"Fetching report for Run ID: {run_id} (Format: {output_format})")
+    from forge.reporting.builder import ReportBuilder, ReportError, report_to_markdown, report_to_json, export_report
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    try:
+        store = ForgeStore(db_path=settings.db_path)
+        builder = ReportBuilder(store)
+        rep = builder.build_report(run_id)
+    except ReportError as e:
+        typer.secho(f"Report generation error: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"Unexpected error loading run '{run_id}': {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    fmt = output_format.lower()
+    if fmt not in {"markdown", "json"}:
+        typer.secho(f"Invalid format '{output_format}'. Supported formats: markdown, json", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if output_path:
+        out_p = Path(output_path)
+        try:
+            saved_file = export_report(rep, out_p, output_format=fmt)
+            typer.secho(f"Report successfully exported to: {saved_file}", fg=typer.colors.GREEN)
+        except Exception as e:
+            typer.secho(f"Failed to export report to '{output_path}': {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+    else:
+        if fmt == "json":
+            typer.echo(report_to_json(rep))
+        else:
+            typer.echo(report_to_markdown(rep))
 
 
 # --- Database commands ---
@@ -406,10 +441,84 @@ def findings_show(
         typer.echo("  Evidence: none attached")
 
 
-@app.command()
-def benchmark() -> None:
-    """Execute the mini benchmark suite against test fixture repositories."""
-    typer.echo("Benchmarking suite will execute in Milestone 6.")
+# --- Benchmark commands ---
+
+@benchmark_app.command(name="list")
+def benchmark_list() -> None:
+    """List all available benchmark test fixtures."""
+    from forge.benchmarks.corpus import CorpusLoader
+    loader = CorpusLoader()
+    cases = loader.discover_cases()
+    if not cases:
+        typer.echo("No benchmark cases found.")
+        return
+
+    typer.echo(f"{'Case ID':<30} {'Category':<22} {'Target File':<18} {'Has Defect':<10}")
+    typer.echo("-" * 84)
+    for c in cases:
+        has_def = "YES" if c.expected_defect.has_defect else "NO (Clean)"
+        typer.echo(f"{c.case_id:<30} {c.category.value:<22} {c.target_file:<18} {has_def:<10}")
+
+
+@benchmark_app.command(name="run")
+def benchmark_run(
+    mode: str = typer.Option("static", "--mode", "-m", help="Evaluation mode: static or llm"),
+    case_filter: Optional[str] = typer.Option(None, "--case", "-c", help="Filter for specific case ID"),
+    output_path: Optional[str] = typer.Option(None, "--output", "-o", help="Path to export benchmark results as JSON"),
+) -> None:
+    """Execute the benchmark suite and evaluate metrics."""
+    from forge.benchmarks.runner import BenchmarkRunner
+    from forge.storage.store import ForgeStore
+
+    m = mode.lower()
+    if m not in {"static", "llm"}:
+        typer.secho(f"Invalid mode '{mode}'. Choose 'static' or 'llm'.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    settings = get_settings()
+    store = ForgeStore(db_path=settings.db_path)
+    runner = BenchmarkRunner(store=store)
+
+    typer.echo(f"Starting FORGE Benchmark Suite (Mode: {m.upper()})...")
+    result = runner.run_suite(mode=m, case_filter=case_filter)
+
+    typer.echo(f"\nBenchmark Run Complete: {result.benchmark_run_id}")
+    typer.echo(f"Execution Duration: {result.total_duration_seconds}s")
+    typer.echo("\n--- Case Results ---")
+    typer.echo(f"{'Case ID':<30} {'Outcome':<20} {'Expected':<12} {'Detected':<10} {'Duration':<8}")
+    typer.echo("-" * 84)
+    for cr in result.case_results:
+        exp = "Defect" if cr.has_defect_expected else "Clean"
+        det = "YES" if cr.defect_detected else "NO"
+        color = typer.colors.GREEN if cr.outcome.value == "pass" else (typer.colors.YELLOW if "skip" in cr.outcome.value else typer.colors.RED)
+        outcome_str = typer.style(cr.outcome.value.upper(), fg=color)
+        typer.echo(f"{cr.case_id:<30} {outcome_str:<29} {exp:<12} {det:<10} {cr.duration_seconds}s")
+
+    # Metrics Summary
+    met = result.metrics
+    typer.echo("\n--- Metrics Summary ---")
+    typer.echo(f"  Total Cases:         {met.total_cases}")
+    typer.echo(f"  Passed Cases:        {met.passed_cases}")
+    typer.echo(f"  Failed Cases:        {met.failed_cases}")
+    typer.echo(f"  Skipped/Unavailable: {met.skipped_unavailable_cases}")
+    typer.echo(f"  True Positives:      {met.true_positives}")
+    typer.echo(f"  False Positives:     {met.false_positives}")
+    typer.echo(f"  False Negatives:     {met.false_negatives}")
+    typer.echo(f"  True Negatives:      {met.true_negatives}")
+    prec_str = f"{met.precision:.2%}" if met.precision is not None else "N/A"
+    rec_str = f"{met.recall:.2%}" if met.recall is not None else "N/A"
+    f1_str = f"{met.f1_score:.2%}" if met.f1_score is not None else "N/A"
+    rate_str = f"{met.case_pass_rate:.2%}" if met.case_pass_rate is not None else "N/A"
+    typer.echo(f"  Precision:           {prec_str}")
+    typer.echo(f"  Recall:              {rec_str}")
+    typer.echo(f"  F1 Score:            {f1_str}")
+    typer.echo(f"  Case Pass Rate:      {rate_str}")
+
+    if output_path:
+        out_p = Path(output_path).resolve()
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(result.model_dump(), indent=2, sort_keys=True), encoding="utf-8")
+        typer.secho(f"\nBenchmark results saved to: {out_p}", fg=typer.colors.GREEN)
 
 
 def main() -> None:
