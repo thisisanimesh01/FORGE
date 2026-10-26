@@ -1921,6 +1921,51 @@ def repair_benchmark_alias(
     )
 
 
+@repair_app.command(name="test")
+def repair_acceptance_test(
+    scenario: Optional[str] = typer.Option(None, "--scenario", "-s", help="Filter for specific acceptance scenario ID (e.g. ACC01)"),
+    output_format: str = typer.Option("markdown", "--format", "-f", help="Output format: markdown or json"),
+    output_path: Optional[str] = typer.Option(None, "--output", "-o", help="Optional file path to export acceptance report"),
+) -> None:
+    """Execute the Phase 4 M5 end-to-end repair reliability acceptance suite."""
+    from forge.repair.acceptance import run_acceptance_suite, render_acceptance_markdown, render_acceptance_json
+
+    fmt = output_format.lower().strip()
+    if fmt not in ("markdown", "json"):
+        typer.secho(f"Invalid format '{output_format}'. Must be 'markdown' or 'json'.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        report = run_acceptance_suite(scenario_filter=scenario)
+    except Exception as e:
+        typer.secho(f"Acceptance suite execution failed: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    rendered = render_acceptance_json(report) if fmt == "json" else render_acceptance_markdown(report)
+
+    if output_path:
+        out_p = Path(output_path).resolve()
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(rendered, encoding="utf-8")
+        typer.echo(f"Acceptance report exported to: {out_p}")
+    else:
+        typer.echo(rendered)
+
+    if report.metrics.failed_scenarios > 0:
+        raise typer.Exit(code=1)
+    raise typer.Exit(code=0)
+
+
+@repair_app.command(name="acceptance")
+def repair_acceptance_alias(
+    scenario: Optional[str] = typer.Option(None, "--scenario", "-s", help="Filter for specific acceptance scenario ID (e.g. ACC01)"),
+    output_format: str = typer.Option("markdown", "--format", "-f", help="Output format: markdown or json"),
+    output_path: Optional[str] = typer.Option(None, "--output", "-o", help="Optional file path to export acceptance report"),
+) -> None:
+    """Execute the Phase 4 M5 end-to-end repair reliability acceptance suite (alias for 'forge repair test')."""
+    repair_acceptance_test(scenario=scenario, output_format=output_format, output_path=output_path)
+
+
 # =============================================================================
 # Controlled Repair Orchestration Workflow CLI Commands (Phase 4 M4)
 # =============================================================================

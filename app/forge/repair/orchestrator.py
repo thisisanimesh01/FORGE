@@ -60,12 +60,14 @@ class RepairOrchestrator:
         planner: Optional[RepairPlanner] = None,
         verifier: Optional[RepairVerifier] = None,
         sandbox: Optional[Any] = None,
+        budget: Optional[RepairBudget] = None,
     ):
         settings = get_settings()
         self.store = store or ForgeStore(db_path=settings.db_path)
         self.sandbox = sandbox or DockerSandbox()
         self.planner = planner or RepairPlanner()
         self.verifier = verifier or RepairVerifier(sandbox=self.sandbox)
+        self.budget = budget or RepairBudget()
 
     # -------------------------------------------------------------------------
     # 1. Workflow Initialization
@@ -250,13 +252,22 @@ class RepairOrchestrator:
             plan = self.store.get_repair_plan(workflow.plan_id)
 
         if not plan:
-            plan = self.planner.plan_repair(
-                finding_id=workflow.finding_id,
-                target_repo=target_path,
-                base_commit_sha=workflow.base_commit_sha,
-                store=self.store,
-                run_id=workflow.run_id,
-            )
+            try:
+                plan = self.planner.plan_repair(
+                    finding_id=workflow.finding_id,
+                    target_repo=target_path,
+                    base_commit_sha=workflow.base_commit_sha,
+                    store=self.store,
+                    run_id=workflow.run_id,
+                )
+            except Exception as e:
+                return self.store.transition_repair_workflow(
+                    workflow_id=workflow.workflow_id,
+                    expected_from_state=RepairWorkflowState.EVIDENCE_VALIDATED,
+                    target_state=RepairWorkflowState.FAILED,
+                    stage="generate_plan",
+                    error_message=f"Plan generation failed with exception: {e}",
+                )
 
         if not plan:
             return self.store.transition_repair_workflow(
@@ -350,6 +361,58 @@ class RepairOrchestrator:
                 error_message=f"Target file '{plan.target_file}' is protected by policy: {prot_reason}",
             )
 
+        # Revalidate patch candidate bounds against budget
+        cand = plan.patch_candidate
+        total_lines = cand.added_lines + cand.removed_lines
+        if total_lines > self.budget.max_lines_changed:
+            return self.store.transition_repair_workflow(
+                workflow_id=workflow.workflow_id,
+                expected_from_state=RepairWorkflowState.PLAN_GENERATED,
+                target_state=RepairWorkflowState.REJECTED,
+                stage="validate_patch",
+                error_message=f"Patch exceeds lines budget: {total_lines} > {self.budget.max_lines_changed}",
+            )
+
+        if cand.hunk_count > self.budget.max_hunks:
+            return self.store.transition_repair_workflow(
+                workflow_id=workflow.workflow_id,
+                expected_from_state=RepairWorkflowState.PLAN_GENERATED,
+                target_state=RepairWorkflowState.REJECTED,
+                stage="validate_patch",
+                error_message=f"Patch exceeds hunk count budget: {cand.hunk_count} > {self.budget.max_hunks}",
+            )
+
+        diff_bytes = len(cand.unified_diff.encode("utf-8"))
+        if diff_bytes > self.budget.max_patch_bytes:
+            return self.store.transition_repair_workflow(
+                workflow_id=workflow.workflow_id,
+                expected_from_state=RepairWorkflowState.PLAN_GENERATED,
+                target_state=RepairWorkflowState.REJECTED,
+                stage="validate_patch",
+                error_message=f"Patch exceeds diff size budget: {diff_bytes} > {self.budget.max_patch_bytes} bytes",
+            )
+
+        if len(cand.target_files) > self.budget.max_files_modified:
+            return self.store.transition_repair_workflow(
+                workflow_id=workflow.workflow_id,
+                expected_from_state=RepairWorkflowState.PLAN_GENERATED,
+                target_state=RepairWorkflowState.REJECTED,
+                stage="validate_patch",
+                error_message=f"Patch modifies {len(cand.target_files)} files, exceeding limit of {self.budget.max_files_modified}",
+            )
+
+        # Path traversal check on target files
+        for tf in cand.target_files:
+            norm = Path(tf).as_posix().strip()
+            if ".." in norm.split("/") or norm.startswith("/") or norm.startswith("\\"):
+                return self.store.transition_repair_workflow(
+                    workflow_id=workflow.workflow_id,
+                    expected_from_state=RepairWorkflowState.PLAN_GENERATED,
+                    target_state=RepairWorkflowState.REJECTED,
+                    stage="validate_patch",
+                    error_message=f"Path traversal forbidden in target files: '{tf}'",
+                )
+
         return self.store.transition_repair_workflow(
             workflow_id=workflow.workflow_id,
             expected_from_state=RepairWorkflowState.PLAN_GENERATED,
@@ -388,19 +451,6 @@ class RepairOrchestrator:
 
     def _step_execute_verification(self, workflow: RepairWorkflowRecord) -> RepairWorkflowRecord:
         """Stage: execute sandboxed verification inside isolated container."""
-        # 1. Fail-closed Sandbox Availability Gate
-        sandbox_avail = self.sandbox.is_available() if hasattr(self.sandbox, "is_available") else True
-        if not sandbox_avail:
-            return self.store.transition_repair_workflow(
-                workflow_id=workflow.workflow_id,
-                expected_from_state=RepairWorkflowState.VERIFICATION_PENDING,
-                target_state=RepairWorkflowState.BLOCKED,
-                stage="execute_verification",
-                outcome=RepairOutcome.SANDBOX_UNAVAILABLE,
-                sandbox_available=False,
-                error_message="Container sandbox unavailable (Docker not found or inactive). Host execution refused.",
-            )
-
         target_path = Path(workflow.target_repo).resolve()
 
         # Re-check git HEAD before execution
@@ -412,6 +462,19 @@ class RepairOrchestrator:
                 target_state=RepairWorkflowState.BLOCKED,
                 stage="execute_verification",
                 error_message=f"Base revision changed before verification: expected '{workflow.base_commit_sha}', observed '{head_sha}'",
+            )
+
+        # 1. Fail-closed Sandbox Availability Gate
+        sandbox_avail = self.sandbox.is_available() if hasattr(self.sandbox, "is_available") else True
+        if not sandbox_avail:
+            return self.store.transition_repair_workflow(
+                workflow_id=workflow.workflow_id,
+                expected_from_state=RepairWorkflowState.VERIFICATION_PENDING,
+                target_state=RepairWorkflowState.BLOCKED,
+                stage="execute_verification",
+                outcome=RepairOutcome.SANDBOX_UNAVAILABLE,
+                sandbox_available=False,
+                error_message="Container sandbox unavailable (Docker not found or inactive). Host execution refused.",
             )
 
         plan = self.store.get_repair_plan(workflow.plan_id)
@@ -436,11 +499,21 @@ class RepairOrchestrator:
             )
 
         # Execute sandboxed verification
-        result: RepairVerificationResult = self.verifier.verify_plan(
-            plan=plan,
-            target_repo=target_path,
-            store=self.store,
-        )
+        try:
+            result: RepairVerificationResult = self.verifier.verify_plan(
+                plan=plan,
+                target_repo=target_path,
+                store=self.store,
+            )
+        except Exception as exc:
+            return self.store.transition_repair_workflow(
+                workflow_id=workflow.workflow_id,
+                expected_from_state=RepairWorkflowState.VERIFICATION_PENDING,
+                target_state=RepairWorkflowState.FAILED,
+                stage="execute_verification",
+                outcome=RepairOutcome.REPAIR_FAILED,
+                error_message=f"Verification execution crashed with exception: {exc}",
+            )
 
         # Map outcome to state transition
         if result.outcome == RepairOutcome.REPAIR_VERIFIED:
@@ -551,7 +624,13 @@ class RepairOrchestrator:
                     raise RepairSafetyError("Cannot resume: container sandbox is still unavailable")
 
                 # Transition out of blocked
-                next_state = RepairWorkflowState.VERIFICATION_PENDING if workflow.patch_digest else RepairWorkflowState.EVIDENCE_VALIDATED
+                if workflow.patch_digest:
+                    next_state = RepairWorkflowState.VERIFICATION_PENDING
+                elif workflow.plan_id:
+                    next_state = RepairWorkflowState.EVIDENCE_VALIDATED
+                else:
+                    next_state = RepairWorkflowState.CREATED
+
                 workflow = self.store.transition_repair_workflow(
                     workflow_id=workflow_id,
                     expected_from_state=RepairWorkflowState.BLOCKED,
@@ -566,13 +645,25 @@ class RepairOrchestrator:
 
         # Handle FAILED state retry
         elif workflow.state == RepairWorkflowState.FAILED:
+            if head_sha and head_sha != workflow.base_commit_sha:
+                raise StaleBaseRevisionError(
+                    f"Cannot retry: repository HEAD '{head_sha}' differs from pinned base SHA '{workflow.base_commit_sha}'"
+                )
+            next_state = RepairWorkflowState.VERIFICATION_PENDING if workflow.patch_digest else RepairWorkflowState.EVIDENCE_VALIDATED
             workflow = self.store.transition_repair_workflow(
                 workflow_id=workflow_id,
                 expected_from_state=RepairWorkflowState.FAILED,
-                target_state=RepairWorkflowState.VERIFICATION_PENDING,
-                stage="retry_verification",
-                payload={"message": "Retrying verification after failure"},
+                target_state=next_state,
+                stage="retry_workflow",
+                payload={"message": f"Retrying workflow from {next_state.value}"},
             )
+
+        else:
+            # Interrupted active workflow
+            if head_sha and head_sha != workflow.base_commit_sha:
+                raise StaleBaseRevisionError(
+                    f"Cannot advance interrupted workflow: repository HEAD '{head_sha}' differs from pinned base SHA '{workflow.base_commit_sha}'"
+                )
 
         if auto_advance:
             return self.advance(workflow_id)

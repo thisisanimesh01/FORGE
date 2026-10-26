@@ -22,7 +22,7 @@ Phase 2: Diff-Aware Intelligent Review   ── [COMPLETED] (Milestones 1–6)
 Phase 3: Defect Reproduction & Verification ── [COMPLETED] (Milestones 1–6)
 Pre-Phase 4: Local Ollama & Multi-Provider LLM Integration ── [COMPLETED]
 Phase 4 Readiness & Sandbox Gate        ── [COMPLETED]
-Phase 4: Targeted Autonomous Repair     ── [IN PROGRESS] (Milestones 1–4 Completed)
+Phase 4: Targeted Autonomous Repair     ── [IN PROGRESS] (Milestones 1–5 Completed)
 Phase 5: Regression & Safety Verification ── [PLANNED]
 ```
 
@@ -31,7 +31,7 @@ Phase 5: Regression & Safety Verification ── [PLANNED]
 - **M2 — Isolated Patch Application & Verification (Implemented)**: Safely applies validated candidate patches in isolated disposable scratch workspaces and verifies them against independent test reproduction oracles inside the Docker container sandbox boundary. Features a pure-Python AST-verifying diff applier, tamper detection (SHA256 mismatch rejection), command allowlisting and shell injection defense, fail-closed host protection (`SANDBOX_UNAVAILABLE` when Docker is absent without executing code on the host), deterministic outcome taxonomy (`REPAIR_VERIFIED`, `REPAIR_FAILED`, `BROKEN_BUILD`, `REGRESSION_DETECTED`, `TIMEOUT`, `INCONCLUSIVE`), SQLite attempt persistence (`repair_attempts`), and CLI commands (`forge repair verify`, `forge repair attempts`).
 - **M3 — Repair Quality & Regression Benchmarking (Implemented)**: Deterministic, offline benchmark suite evaluating repair-plan quality, patch validation, and verification classification across 11 representative defect categories (syntax errors, incorrect logic, boundary conditions, missing validation, exception handling, security-sensitive mistakes, clean controls, ambiguous findings, insufficient evidence, adversarial instructions, and regression-inducing patches). Features independent ground truth, honest denominators (`None` / `N/A` for empty classes), secret redaction, and CLI integration (`forge benchmark repair` and `forge repair benchmark`).
 - **M4 — Controlled Repair Orchestration & Lifecycle (Implemented)**: Resumable, auditable end-to-end orchestration workflow connecting verified evidence, bounded repair planning, static patch validation, containerized sandbox verification, and a mandatory human review gate. Features a typed state machine with strict transition enforcement (`CREATED -> EVIDENCE_VALIDATED -> PLAN_GENERATED -> PATCH_VALIDATED -> VERIFICATION_PENDING -> VERIFIED / FAILED / BLOCKED -> AWAITING_HUMAN_REVIEW -> APPROVED / REJECTED`), fail-closed container boundaries (`SANDBOX_UNAVAILABLE` when Docker is missing), anti-tampering SHA256 digest validation, stale base revision detection, plan-only dry-run bypass, optimistic concurrency control with monotonic versioning, append-only sequential event auditing with automated secret scrubbing, strict target repository immutability (zero file modifications, no commits/pushes/PRs), and full CLI management (`forge repair workflow start/status/list/resume/review`).
-- **M5 — Multi-Candidate Repair Ranking & Export (Planned)**: Multi-candidate ranking, Pareto trade-off assessment, and exportable patch bundle generation.
+- **M5 — End-to-End Repair Reliability & Adversarial Testing (Implemented)**: Hardened end-to-end acceptance suite executing 26 deterministic scenarios across 10 failure domains: happy-path repair, evidence integrity gating, budget and protected-file safety, revision drift interception, all 6 verification outcomes, fail-closed container boundaries, provider timeout/malformed/auth resilience, resumability, optimistic concurrency conflict detection, adversarial prompt injection untrusted framing, path traversal rejection, and mandatory human review enforcement. Features quantitative metrics with honest denominators, automated secret scrubbing, and CLI commands (`forge repair test`, `forge repair acceptance`).
 - **Strict Boundary Notice**: **Automated modification of target repositories, autonomous git commits, branch pushes, pull requests, merges, and deployments remain strictly FORBIDDEN.**
 
 ### Phase 4 Readiness & Sandbox Gate (Completed)
@@ -178,6 +178,21 @@ forge repair workflow resume rwf_find_001_a1b2c3d4_abc123
 # Submit mandatory human review decision (approve or reject)
 forge repair workflow review rwf_find_001_a1b2c3d4_abc123 --decision approve --notes "Verified fix against regression suite"
 forge repair workflow review rwf_find_001_a1b2c3d4_abc123 --decision reject --notes "Incomplete edge case handling"
+```
+
+### End-to-End Repair Reliability & Adversarial Acceptance Suite (Phase 4 Milestone 5)
+```bash
+# Execute the full 26-scenario end-to-end acceptance suite (Markdown report)
+forge repair test
+
+# Run via acceptance alias
+forge repair acceptance
+
+# Run a specific acceptance scenario by ID (e.g., ACC01, ACC15, ACC26)
+forge repair test --scenario ACC01
+
+# Export machine-readable JSON acceptance report with automated secret scrubbing
+forge repair test --format json --output reports/acceptance_report.json
 ```
 
 ### Isolated Defect Reproduction Contracts (Phase 3 Milestone 1)
@@ -378,4 +393,5 @@ cp .env.example .env
   - Isolated Patch Application & Verification: [`docs/specs/phase-4-m2-patch-verification.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m2-patch-verification.md)
   - Repair Quality & Regression Benchmarking: [`docs/specs/phase-4-m3-repair-benchmarks.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m3-repair-benchmarks.md)
   - Controlled Repair Orchestration & Lifecycle: [`docs/specs/phase-4-m4-repair-orchestration.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m4-repair-orchestration.md)
+  - End-to-End Repair Reliability & Adversarial Testing: [`docs/specs/phase-4-m5-reliability.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m5-reliability.md)
 - Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)

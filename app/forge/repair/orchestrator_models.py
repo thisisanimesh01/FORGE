@@ -51,11 +51,13 @@ ALLOWED_WORKFLOW_TRANSITIONS: Dict[RepairWorkflowState, Set[RepairWorkflowState]
     },
     RepairWorkflowState.EVIDENCE_VALIDATED: {
         RepairWorkflowState.PLAN_GENERATED,
+        RepairWorkflowState.FAILED,
         RepairWorkflowState.BLOCKED,
         RepairWorkflowState.REJECTED,
     },
     RepairWorkflowState.PLAN_GENERATED: {
         RepairWorkflowState.PATCH_VALIDATED,
+        RepairWorkflowState.FAILED,
         RepairWorkflowState.BLOCKED,
         RepairWorkflowState.REJECTED,
     },
@@ -75,10 +77,12 @@ ALLOWED_WORKFLOW_TRANSITIONS: Dict[RepairWorkflowState, Set[RepairWorkflowState]
         RepairWorkflowState.AWAITING_HUMAN_REVIEW,
     },
     RepairWorkflowState.FAILED: {
+        RepairWorkflowState.EVIDENCE_VALIDATED,    # Retry planning if failed before plan
         RepairWorkflowState.VERIFICATION_PENDING,  # Retry verification if eligible
         RepairWorkflowState.REJECTED,
     },
     RepairWorkflowState.BLOCKED: {
+        RepairWorkflowState.CREATED,               # Retry evidence check if unblocked
         RepairWorkflowState.EVIDENCE_VALIDATED,     # Retry / unblocked from planning
         RepairWorkflowState.VERIFICATION_PENDING,  # Retry / unblocked from verification
         RepairWorkflowState.REJECTED,
