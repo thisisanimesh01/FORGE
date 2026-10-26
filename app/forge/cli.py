@@ -536,7 +536,7 @@ def investigate(
     branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Target git branch to inspect"),
     max_steps: Optional[int] = typer.Option(None, "--max-steps", "-s", help="Max agent turns (default 10)"),
     no_llm: bool = typer.Option(False, "--no-llm", help="Force static inspection mode only"),
-    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Override LLM provider (fake, ollama, ollama_cloud, groq, gemini, deepseek, openai)"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Override LLM provider (fake, ollama, ollama_cloud, groq, gemini, deepseek)"),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Override LLM model name"),
 ) -> None:
     """Run an autonomous, typed LLM investigation of a target repository."""
@@ -593,7 +593,7 @@ def investigate(
         run_id = store.create_run(target=target)
         typer.echo(f"Initialized Investigation Run: {run_id}")
 
-        # Configure LLM provider via factory (supports: fake, ollama, groq, gemini, deepseek, openai)
+        # Configure LLM provider via factory (supports: fake, ollama, ollama_cloud, groq, gemini, deepseek)
         from forge.llm.factory import get_provider
         from forge.llm.provider import LLMUnavailableError
         try:

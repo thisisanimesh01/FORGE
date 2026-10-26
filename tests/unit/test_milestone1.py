@@ -29,9 +29,9 @@ def test_redact_secrets():
 
 
 def test_forge_settings_sanitized():
-    settings = ForgeSettings(llm_api_key="super_secret_test_key")
+    settings = ForgeSettings(groq_api_key="super_secret_test_key")
     sanitized = settings.get_sanitized_dict()
-    assert sanitized["llm_api_key"] == "[REDACTED]"
+    assert sanitized["groq_api_key"] == "[REDACTED]"
     assert sanitized["env"] == "development"
     assert sanitized["max_steps"] == 10
 

@@ -1198,11 +1198,19 @@ class TestSecurityBoundaries:
     def test_cli_investigate_unconfigured_real_provider_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         """forge investigate fails with non-zero exit when real provider is missing credentials."""
         monkeypatch.setenv("FORGE_DB_PATH", str(tmp_path / "test.db"))
-        monkeypatch.delenv("FORGE_LLM_API_KEY", raising=False)
-        monkeypatch.delenv("FORGE_LLM_API_BASE", raising=False)
+        monkeypatch.setenv("GROQ_API_KEY", "")
+        monkeypatch.setenv("GROQ_API", "")
+        monkeypatch.setenv("FORGE_GROQ_API_KEY", "")
+        result = runner.invoke(app, ["investigate", ".", "--provider", "groq"])
+        assert result.exit_code == 1
+        assert "groq_api_key" in result.output.lower() or "credentials" in result.output.lower()
+
+    def test_cli_investigate_openai_provider_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """forge investigate rejects 'openai' as an unsupported/unknown provider."""
+        monkeypatch.setenv("FORGE_DB_PATH", str(tmp_path / "test.db"))
         result = runner.invoke(app, ["investigate", ".", "--provider", "openai"])
         assert result.exit_code == 1
-        assert "not configured with credentials" in result.output.lower() or "credentials" in result.output.lower()
+        assert "unknown llm provider 'openai'" in result.output.lower()
 
     def test_cli_investigate_unknown_provider_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         """forge investigate fails when an invalid provider name is supplied."""

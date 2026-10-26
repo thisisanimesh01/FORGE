@@ -84,7 +84,6 @@ class TestGetProvider:
         """Ollama Cloud raises LLMUnavailableError when OLLAMA_API_KEY is missing."""
         clean = dict(os.environ)
         clean["OLLAMA_API_KEY"] = ""
-        clean["FORGE_LLM_API_KEY"] = ""
         with patch.dict(os.environ, clean, clear=True):
             with pytest.raises(LLMUnavailableError, match="OLLAMA_API_KEY"):
                 get_provider(provider_name="ollama_cloud")
@@ -156,13 +155,34 @@ class TestGetProvider:
         assert isinstance(provider, OpenAICompatibleProvider)
         assert "deepseek.com" in provider.api_base
 
-    def test_openai_provider_requires_api_key(self):
-        """OpenAI raises LLMUnavailableError when FORGE_LLM_API_KEY is missing."""
+    def test_openai_provider_rejected_as_unsupported(self):
+        """OpenAI is rejected as an unsupported/unknown provider."""
+        with pytest.raises(LLMUnavailableError, match="Unknown LLM provider 'openai'"):
+            get_provider(provider_name="openai")
+
+    def test_no_openai_endpoint_in_factory_defaults(self):
+        """OpenAI endpoints and default models are not registered in the factory."""
+        assert "openai" not in _DEFAULT_MODELS
+        assert "openai" not in _DEFAULT_BASE_URLS
+        for url in _DEFAULT_BASE_URLS.values():
+            assert "api.openai.com" not in url
+
+    def test_openai_compatible_provider_has_no_openai_default(self):
+        """OpenAICompatibleProvider has no default URL pointing to api.openai.com."""
+        provider = OpenAICompatibleProvider()
+        assert "api.openai.com" not in provider.api_base
+        assert provider.api_base == ""
+
+    def test_groq_does_not_accept_foreign_credentials(self):
+        """Groq requires GROQ_API_KEY and does not fall back to other credentials."""
         clean = dict(os.environ)
-        clean["FORGE_LLM_API_KEY"] = ""
+        clean["GROQ_API_KEY"] = ""
+        clean["GROQ_API"] = ""
+        clean["GEMINI_API_KEY"] = "AIza_gemini_key"
+        clean["DEEPSEEK_API_KEY"] = "sk-deepseek_key"
         with patch.dict(os.environ, clean, clear=True):
-            with pytest.raises(LLMUnavailableError, match="FORGE_LLM_API_KEY"):
-                get_provider(provider_name="openai")
+            with pytest.raises(LLMUnavailableError, match="GROQ_API_KEY"):
+                get_provider(provider_name="groq")
 
     def test_unknown_provider_raises(self):
         """Unknown provider name raises LLMUnavailableError."""
@@ -245,7 +265,6 @@ class TestCloudFallbackPrevention:
         clean = dict(os.environ)
         clean["GROQ_API_KEY"] = ""
         clean["GROQ_API"] = ""
-        clean["FORGE_LLM_API_KEY"] = ""
         with patch.dict(os.environ, clean, clear=True):
             with pytest.raises(LLMUnavailableError):
                 get_provider(provider_name="groq")
@@ -276,7 +295,6 @@ class TestCloudFallbackPrevention:
         clean = dict(os.environ)
         clean["GROQ_API_KEY"] = ""
         clean["GROQ_API"] = ""
-        clean["FORGE_LLM_API_KEY"] = ""
         clean["FORGE_ALLOW_CLOUD_FALLBACK"] = "true"
         with patch.dict(os.environ, clean, clear=True):
             with pytest.raises(LLMUnavailableError):
@@ -317,13 +335,20 @@ class TestDescribeProvider:
         clean = dict(os.environ)
         clean["GROQ_API_KEY"] = ""
         clean["GROQ_API"] = ""
-        clean["FORGE_LLM_API_KEY"] = ""
         with patch.dict(os.environ, clean, clear=True):
             info = describe_provider("groq")
         assert info["provider"] == "groq"
         assert info["credentials_configured"] is False
         assert info["requires_network"] is True
         assert "api.groq.com" in info["api_base"]
+
+    def test_describe_provider_openai_rejected_as_unknown(self):
+        """describe_provider for 'openai' does not claim credentials or return openai endpoint."""
+        info = describe_provider("openai")
+        assert info["provider"] == "openai"
+        assert info["credentials_configured"] is False
+        assert info["api_base"] == "unknown"
+        assert "api.openai.com" not in info["api_base"]
 
     def test_groq_describe_key_configured(self):
         with _env(GROQ_API_KEY="gsk_test_only"):
@@ -362,7 +387,7 @@ class TestSecretRedaction:
         result = redact_secrets(text)
         assert "gsk_" not in result
 
-    def test_openai_key_pattern_redacted(self):
+    def test_sk_key_pattern_redacted(self):
         text = "api_key: sk-abcdef123456789012345678901234567890abcdef"
         result = redact_secrets(text)
         assert "sk-" not in result or "[REDACTED" in result
@@ -381,13 +406,12 @@ class TestSecretRedaction:
         assert "Investigation completed" in result
         assert "3 findings" in result
 
-    def test_forge_settings_redacts_llm_api_key(self):
-        """get_sanitized_dict() hides the LLM API key."""
-        with _env(FORGE_LLM_API_KEY="sk-supersecretkey12345678901234567890"):
-            settings = ForgeSettings()
+    def test_forge_settings_does_not_have_llm_api_key(self):
+        """ForgeSettings no longer defines llm_api_key."""
+        settings = ForgeSettings()
+        assert not hasattr(settings, "llm_api_key")
         sanitized = settings.get_sanitized_dict()
-        assert sanitized.get("llm_api_key") == "[REDACTED]"
-        assert "sk-supersecret" not in str(sanitized)
+        assert "llm_api_key" not in sanitized
 
     def test_forge_settings_redacts_provider_specific_keys(self):
         """get_sanitized_dict() redacts GROQ_API_KEY, GEMINI_API_KEY, DEEPSEEK_API_KEY, OLLAMA_API_KEY."""
@@ -451,12 +475,12 @@ class TestConfigurationLoading:
         assert settings.allow_cloud_fallback is False
 
     def test_sanitized_dict_omits_all_secrets(self):
-        with _env(FORGE_LLM_API_KEY="sk-fake123456789012345678901234567890ab"):
+        with _env(GROQ_API_KEY="gsk_fake123456789012345678901234567890ab"):
             settings = ForgeSettings()
         sanitized = settings.get_sanitized_dict()
         full_str = str(sanitized)
         # Must not contain the actual key value
-        assert "sk-fake" not in full_str
+        assert "gsk_fake" not in full_str
 
     def test_ollama_base_url_in_sanitized_dict(self):
         """OLLAMA_BASE_URL appears verbatim in sanitized dict (not a secret)."""
@@ -593,6 +617,7 @@ class TestBoundedRetries:
         client = httpx.Client(transport=transport)
         provider = OpenAICompatibleProvider(
             api_key="sk-test",
+            api_base="https://api.mock.example/v1",
             http_client=client,
             max_retries=1,
         )
@@ -617,6 +642,7 @@ class TestBoundedRetries:
         client = httpx.Client(transport=transport)
         provider = OpenAICompatibleProvider(
             api_key="sk-test",
+            api_base="https://api.mock.example/v1",
             http_client=client,
             max_retries=1,
         )

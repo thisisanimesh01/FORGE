@@ -28,7 +28,7 @@ Phase 5: Regression & Safety Verification ── [PLANNED]
 ### Pre-Phase 4: Local Ollama & Multi-Provider LLM Integration (Completed)
 - **Local Ollama Runtime**: Default local execution via Ollama (`http://localhost:11434/v1`) with zero cloud credential requirements. Hardware resource analysis (8 GB M1, 13 GiB available disk) establishing suitability of compact coding models (`qwen2.5-coder:1.5b` or `llama3.2:3b`).
 - **Ollama Cloud Integration**: Managed inference at `https://ollama.com/v1` via `ollama_cloud` (`ollama-cloud`) requiring `OLLAMA_API_KEY` with default model `gemma4:cloud`. Decoupled from local Ollama to prevent silent routing.
-- **Multi-Cloud Integration**: Standard `httpx` OpenAI-compatible support for Groq (`GROQ_API_KEY` / `GROQ_API`), Google Gemini (`GEMINI_API_KEY` / `GEMINI_API`), DeepSeek (`DEEPSEEK_API_KEY` / `DEEPSEEK_API`), and OpenAI (`FORGE_LLM_API_KEY`) with zero extra SDK dependencies.
+- **Multi-Cloud Integration**: Standard `httpx` OpenAI-compatible support for Groq (`GROQ_API_KEY` / `GROQ_API`), Google Gemini (`GEMINI_API_KEY` / `GEMINI_API`), and DeepSeek (`DEEPSEEK_API_KEY` / `DEEPSEEK_API`) with zero extra SDK dependencies.
 - **Fail-Secure Architecture**: Strict cloud fallback prohibition (`FORGE_ALLOW_CLOUD_FALLBACK=false`), bounded transient 5xx retries, typed rate-limit and authentication error mapping, and automated token scrubbing.
 
 
@@ -236,16 +236,15 @@ cp .env.example .env
 
 | Variable | Default | Description |
 |---|---|---|
-| `FORGE_LLM_PROVIDER` | `ollama` | Provider: `ollama` (default local), `ollama_cloud` (hosted), `groq`, `gemini`, `deepseek`, `openai`, or `fake` (offline) |
+| `FORGE_LLM_PROVIDER` | `ollama` | Provider: `ollama` (default local), `ollama_cloud` (hosted), `groq`, `gemini`, `deepseek`, or `fake` (offline) |
 | `FORGE_LLM_MODEL` | *(empty)* | Model identifier override (provider defaults used when empty) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Base URL for local Ollama server (compatible with Friday convention) |
 | `OLLAMA_API_KEY` | *(empty)* | API key for Ollama Cloud (`https://ollama.com/v1`) |
 | `GROQ_API_KEY` | *(empty)* | API key for Groq Cloud (compatible with Friday convention) |
 | `GEMINI_API_KEY` | *(empty)* | API key for Google Gemini (compatible with Friday convention) |
 | `DEEPSEEK_API_KEY` | *(empty)* | API key for DeepSeek (compatible with Friday convention) |
-| `FORGE_LLM_API_KEY` | *(empty)* | API key for OpenAI provider |
 | `FORGE_ALLOW_CLOUD_FALLBACK` | `false` | Security guard: silent cloud fallback is strictly forbidden |
-| `FORGE_LLM_API_BASE` | *(empty)* | Custom endpoint base URL override (Azure, vLLM, local proxies) |
+| `FORGE_LLM_API_BASE` | *(empty)* | Custom endpoint base URL override (vLLM, custom proxies) |
 | `FORGE_MAX_STEPS` | `10` | Max investigation iterations |
 | `FORGE_DOCKER_IMAGE` | `python:3.11-slim` | Base container image for sandboxed execution |
 
@@ -273,4 +272,5 @@ cp .env.example .env
   - Multi-Provider Configuration & Credential Reuse: [`docs/specs/phase-3-provider-transition.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-provider-transition.md)
   - Local Ollama & Multi-Provider LLM Integration: [`docs/specs/pre-phase-4-llm-providers.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/pre-phase-4-llm-providers.md)
   - Ollama Cloud Provider Integration: [`docs/specs/ollama-cloud-provider.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/ollama-cloud-provider.md)
+  - Removal of OpenAI API Provider: [`docs/specs/remove-openai-provider.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/remove-openai-provider.md)
 - Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)

@@ -41,8 +41,9 @@ FORGE resolves providers via the centralized factory function `forge.llm.get_pro
 | `ollama` | `OpenAICompatibleProvider` | `llama3` | `http://localhost:11434/v1` | None | Local machine |
 | `groq` | `OpenAICompatibleProvider` | `llama-3.3-70b-versatile` | `https://api.groq.com/openai/v1` | `GROQ_API_KEY` | Cloud (free tier) |
 | `gemini` | `OpenAICompatibleProvider` | `gemini-2.0-flash` | `https://generativelanguage.googleapis.com/v1beta/openai` | `GEMINI_API_KEY` | Cloud (free tier) |
-| `deepseek` | `OpenAICompatibleProvider` | `deepseek-chat` | `https://api.deepseek.com/v1` | `DEEPSEEK_API_KEY` | Cloud (free tier) |
-| `openai` | `OpenAICompatibleProvider` | `gpt-4o` | `https://api.openai.com/v1` | `FORGE_LLM_API_KEY` | Cloud (commercial) |
+| `deepseek` | `OpenAICompatibleProvider` | `deepseek-chat` | `https://api.deepseek.com/v1` | `DEEPSEEK_API_KEY` | Cloud (commercial) |
+
+*(Note: OpenAI API provider support has been removed per `docs/specs/remove-openai-provider.md`.)*
 
 ---
 
@@ -52,13 +53,12 @@ FORGE uses a local, gitignored `.env` file for runtime configuration. Default va
 
 ### Supported Variable Mapping
 
-- `FORGE_LLM_PROVIDER`: Provider selector (`ollama` by default; accepts `fake`, `ollama`, `groq`, `gemini`, `deepseek`, `openai`).
+- `FORGE_LLM_PROVIDER`: Provider selector (`ollama` by default; accepts `fake`, `ollama`, `ollama_cloud`, `groq`, `gemini`, `deepseek`).
 - `FORGE_LLM_MODEL`: Model identifier override. When empty, provider defaults apply.
 - `OLLAMA_BASE_URL`: Base URL for local Ollama server (matches Friday convention; default: `http://localhost:11434`).
 - `GROQ_API_KEY`: API key for Groq Cloud (matches Friday convention).
 - `GEMINI_API_KEY`: API key for Google Gemini (matches Friday convention).
 - `DEEPSEEK_API_KEY`: API key for DeepSeek (matches Friday convention).
-- `FORGE_LLM_API_KEY`: API key for OpenAI provider.
 - `FORGE_ALLOW_CLOUD_FALLBACK`: Hard security guard; strictly defaults to `false`.
 
 ### Safe Credential Reuse Instructions

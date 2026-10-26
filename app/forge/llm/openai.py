@@ -34,20 +34,19 @@ class OpenAICompatibleProvider:
         http_client: Optional[httpx.Client] = None,
     ):
         settings = get_settings()
-        self.api_key = api_key if api_key is not None else settings.llm_api_key
+        self.api_key = api_key if api_key is not None else ""
         self.model = model or settings.llm_model
-        raw_base = api_base or settings.llm_api_base or "https://api.openai.com/v1"
+        raw_base = api_base or settings.llm_api_base or ""
         self.api_base = raw_base.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.max_retries = max(0, max_retries)
         self._custom_client = http_client
 
     def is_available(self) -> bool:
-        """Return True if API key or base is configured."""
-        # For local proxies (e.g. Ollama, vLLM), API key may not be required if api_base is set
+        """Return True if API key or local/loopback endpoint is configured."""
         if self.api_key and self.api_key.strip():
             return True
-        if self.api_base and "api.openai.com" not in self.api_base:
+        if self.api_base and ("localhost" in self.api_base or "127.0.0.1" in self.api_base):
             return True
         return False
 
@@ -116,7 +115,12 @@ class OpenAICompatibleProvider:
         """Send chat completion request to endpoint and parse response."""
         if not self.is_available():
             raise LLMAuthenticationError(
-                "LLM provider is not configured. Please set FORGE_LLM_API_KEY or configure a local provider."
+                "LLM provider is not configured. Please set provider credentials or configure a local provider."
+            )
+
+        if not self.api_base:
+            raise LLMUnavailableError(
+                "LLM endpoint base URL is not configured. Set api_base or configure a valid provider."
             )
 
         endpoint = f"{self.api_base}/chat/completions"
@@ -152,7 +156,7 @@ class OpenAICompatibleProvider:
         # Handle HTTP error status codes
         if resp.status_code == 401 or resp.status_code == 403:
             raise LLMAuthenticationError(
-                f"LLM authentication failed (HTTP {resp.status_code}). Check your FORGE_LLM_API_KEY."
+                f"LLM authentication failed (HTTP {resp.status_code}). Check provider credentials."
             )
 
         if resp.status_code == 429:

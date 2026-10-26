@@ -7,21 +7,21 @@ existing ``OpenAICompatibleProvider`` with provider-specific base-URLs and auth.
 
 Supported providers
 -------------------
-* ``fake``     — deterministic offline mock (no credentials, no network).
-* ``ollama``   — local Ollama inference server (no API key required).
-* ``groq``     — Groq Cloud API (OpenAI-compatible; requires ``GROQ_API_KEY``).
-* ``gemini``   — Google Gemini via the OpenAI-compatibility shim
-                 (requires ``GEMINI_API_KEY``).
-* ``deepseek`` — DeepSeek API (OpenAI-compatible; requires ``DEEPSEEK_API_KEY``).
-* ``openai``   — OpenAI API (requires ``FORGE_LLM_API_KEY``).
+* ``fake``         — deterministic offline mock (no credentials, no network).
+* ``ollama``       — local Ollama inference server (no API key required).
+* ``ollama_cloud`` — hosted Ollama Cloud (requires ``OLLAMA_API_KEY``).
+* ``groq``         — Groq Cloud API (OpenAI-compatible; requires ``GROQ_API_KEY``).
+* ``gemini``       — Google Gemini via the OpenAI-compatibility shim
+                     (requires ``GEMINI_API_KEY``).
+* ``deepseek``     — DeepSeek API (OpenAI-compatible; requires ``DEEPSEEK_API_KEY``).
 
 Environment variable reference
 -------------------------------
 ``FORGE_LLM_PROVIDER``  — provider selector (default: ``fake``).
 ``FORGE_LLM_MODEL``     — model ID override (provider-specific default used when absent).
 ``FORGE_LLM_API_BASE``  — base-URL override (overrides per-provider default).
-``FORGE_LLM_API_KEY``   — API key (used by openai provider and as last-resort fallback).
 ``OLLAMA_BASE_URL``     — Ollama base URL (default: http://localhost:11434).
+``OLLAMA_API_KEY``      — Ollama Cloud API key.
 ``GROQ_API_KEY``        — Groq API key.
 ``GEMINI_API_KEY``      — Gemini API key.
 ``DEEPSEEK_API_KEY``    — DeepSeek API key.
@@ -55,7 +55,6 @@ _DEFAULT_MODELS: dict[str, str] = {
     "groq": "llama-3.3-70b-versatile",
     "gemini": "gemini-2.0-flash",
     "deepseek": "deepseek-chat",
-    "openai": "gpt-4o",
 }
 
 #: Base URL for each cloud provider's OpenAI-compatible endpoint.
@@ -64,7 +63,6 @@ _DEFAULT_BASE_URLS: dict[str, str] = {
     "groq": "https://api.groq.com/openai/v1",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
     "deepseek": "https://api.deepseek.com/v1",
-    "openai": "https://api.openai.com/v1",
 }
 
 
@@ -119,12 +117,9 @@ def get_provider(
     if resolved_provider == "deepseek":
         return _build_deepseek_provider(model=model, settings=settings)
 
-    if resolved_provider == "openai":
-        return _build_openai_provider(model=model, settings=settings)
-
     raise LLMUnavailableError(
         f"Unknown LLM provider '{resolved_provider}'. "
-        "Supported providers: fake, ollama, ollama_cloud, groq, gemini, deepseek, openai. "
+        "Supported providers: fake, ollama, ollama_cloud, groq, gemini, deepseek. "
         "Set FORGE_LLM_PROVIDER to one of these values."
     )
 
@@ -187,7 +182,6 @@ def _build_groq_provider(model, settings) -> OpenAICompatibleProvider:
         getattr(settings, "groq_api_key", None)
         or os.environ.get("GROQ_API_KEY")
         or os.environ.get("GROQ_API")
-        or settings.llm_api_key
         or ""
     ).strip()
     if not api_key:
@@ -211,7 +205,6 @@ def _build_gemini_provider(model, settings) -> OpenAICompatibleProvider:
         getattr(settings, "gemini_api_key", None)
         or os.environ.get("GEMINI_API_KEY")
         or os.environ.get("GEMINI_API")
-        or settings.llm_api_key
         or ""
     ).strip()
     if not api_key:
@@ -235,7 +228,6 @@ def _build_deepseek_provider(model, settings) -> OpenAICompatibleProvider:
         getattr(settings, "deepseek_api_key", None)
         or os.environ.get("DEEPSEEK_API_KEY")
         or os.environ.get("DEEPSEEK_API")
-        or settings.llm_api_key
         or ""
     ).strip()
     if not api_key:
@@ -246,23 +238,6 @@ def _build_deepseek_provider(model, settings) -> OpenAICompatibleProvider:
         )
     api_base = settings.llm_api_base or _DEFAULT_BASE_URLS["deepseek"]
     resolved_model = model or settings.llm_model or _DEFAULT_MODELS["deepseek"]
-    return OpenAICompatibleProvider(
-        api_key=api_key,
-        model=resolved_model,
-        api_base=api_base,
-    )
-
-
-def _build_openai_provider(model, settings) -> OpenAICompatibleProvider:
-    """Build an OpenAI provider."""
-    api_key = (settings.llm_api_key or "").strip()
-    if not api_key:
-        raise LLMUnavailableError(
-            "Provider 'openai' is not configured with credentials. Set FORGE_LLM_API_KEY. "
-            "No automatic fallback is performed."
-        )
-    api_base = settings.llm_api_base or _DEFAULT_BASE_URLS["openai"]
-    resolved_model = model or settings.llm_model or _DEFAULT_MODELS["openai"]
     return OpenAICompatibleProvider(
         api_key=api_key,
         model=resolved_model,
@@ -308,10 +283,9 @@ def describe_provider(provider_name: Optional[str] = None) -> dict:
 
     key_checks = {
         "ollama_cloud": bool(getattr(settings, "ollama_api_key", None) or os.environ.get("OLLAMA_API_KEY")),
-        "groq": bool(getattr(settings, "groq_api_key", None) or os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_API") or settings.llm_api_key),
-        "gemini": bool(getattr(settings, "gemini_api_key", None) or os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API") or settings.llm_api_key),
-        "deepseek": bool(getattr(settings, "deepseek_api_key", None) or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API") or settings.llm_api_key),
-        "openai": bool(settings.llm_api_key),
+        "groq": bool(getattr(settings, "groq_api_key", None) or os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_API")),
+        "gemini": bool(getattr(settings, "gemini_api_key", None) or os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API")),
+        "deepseek": bool(getattr(settings, "deepseek_api_key", None) or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API")),
     }
     key_set = key_checks.get(resolved, False)
     base = settings.llm_api_base or _DEFAULT_BASE_URLS.get(resolved, "unknown")

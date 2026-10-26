@@ -9,10 +9,10 @@
 
 ## 1. Overview & Objectives
 
-Before beginning Phase 4 (Targeted Autonomous Repair), this milestone establishes and verifies FORGE's multi-provider LLM infrastructure. It enables local, zero-cost execution via Ollama as the default provider, alongside cloud provider support for Groq, Google Gemini, DeepSeek, and OpenAI.
+Before beginning Phase 4 (Targeted Autonomous Repair), this milestone establishes and verifies FORGE's multi-provider LLM infrastructure. It enables local, zero-cost execution via Ollama as the default provider, alongside cloud provider support for Groq, Google Gemini, and DeepSeek (with OpenAI API provider support removed per deprecation specification).
 
 Key architectural requirements enforced:
-- **Zero-SDK overhead**: All four providers and Ollama expose OpenAI-compatible endpoints (`/v1/chat/completions`), allowing FORGE to use `OpenAICompatibleProvider` via standard `httpx`.
+- **Zero-SDK overhead**: All cloud providers and Ollama expose standard HTTP chat completion endpoints (`/v1/chat/completions`), allowing FORGE to use the generic `OpenAICompatibleProvider` protocol adapter via standard `httpx`.
 - **Fail-secure cloud fallback**: Automatic or silent provider switching is strictly forbidden (`allow_cloud_fallback=False`). Missing credentials or endpoint errors raise immediate, typed exceptions.
 - **Strict secret redaction**: All API keys, tokens, and authorization headers are scrubbed before logging, reports, or CLI display.
 - **Untrusted model boundary**: Model outputs are untrusted data and cannot alter execution permissions, sandbox policies, or network configurations.
@@ -43,10 +43,10 @@ Provider resolution is centralized in `forge.llm.get_provider()`:
 |---|---|---|---|---|---|
 | `fake` | `FakeLLMProvider` | `forge-fake-model` | In-memory deterministic mock | None | Offline (CI / test suite) |
 | `ollama` | `OpenAICompatibleProvider` | `llama3` | `http://localhost:11434/v1` | None required | Local machine (Default) |
+| `ollama_cloud` | `OpenAICompatibleProvider` | `gemma4:cloud` | `https://ollama.com/v1` | `OLLAMA_API_KEY` | Hosted Remote Cloud |
 | `groq` | `OpenAICompatibleProvider` | `llama-3.3-70b-versatile` | `https://api.groq.com/openai/v1` | `GROQ_API_KEY`, `GROQ_API` | Cloud (free tier available) |
 | `gemini` | `OpenAICompatibleProvider` | `gemini-2.0-flash` | `https://generativelanguage.googleapis.com/v1beta/openai` | `GEMINI_API_KEY`, `GEMINI_API` | Cloud (free tier available) |
-| `deepseek` | `OpenAICompatibleProvider` | `deepseek-chat` | `https://api.deepseek.com/v1` | `DEEPSEEK_API_KEY`, `DEEPSEEK_API` | Cloud (free tier available) |
-| `openai` | `OpenAICompatibleProvider` | `gpt-4o` | `https://api.openai.com/v1` | `FORGE_LLM_API_KEY` | Cloud (commercial) |
+| `deepseek` | `OpenAICompatibleProvider` | `deepseek-chat` | `https://api.deepseek.com/v1` | `DEEPSEEK_API_KEY`, `DEEPSEEK_API` | Cloud (commercial available) |
 
 ### Key Precedence & Aliases
 `ForgeSettings` supports both standard `*_API_KEY` and short `*_API` naming via `pydantic.AliasChoices`:
