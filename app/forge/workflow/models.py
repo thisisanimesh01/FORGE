@@ -53,6 +53,22 @@ class TargetImmutabilityViolationError(WorkflowError):
     """Raised when an operation attempts to mutate or compromise target repository."""
 
 
+class InvalidWorkflowTransitionError(WorkflowError):
+    """Raised when an illegal workflow state transition is attempted."""
+
+
+class WorkflowConcurrencyError(WorkflowError):
+    """Raised when an optimistic concurrency conflict occurs during workflow update."""
+
+
+class WorkflowResumeError(WorkflowError):
+    """Raised when an invalid or ineligible workflow resumption is attempted."""
+
+
+class HumanApprovalRequiredError(WorkflowError):
+    """Raised when an automated action attempts to bypass mandatory human review."""
+
+
 # =============================================================================
 # Enums
 # =============================================================================
@@ -63,6 +79,38 @@ class IntakeSourceType(str, Enum):
     UNIFIED_DIFF = "unified_diff"
     ISSUE_DESCRIPTION = "issue_description"
     TEST_SPECIFICATION = "test_specification"
+
+
+class EngineeringWorkflowState(str, Enum):
+    """Typed lifecycle states for Phase 5 supervised end-to-end engineering workflows."""
+    # Intake & Analysis
+    CREATED = "created"
+    INTAKE_VALIDATED = "intake_validated"
+    REPO_ANALYZED = "repo_analyzed"
+
+    # Reproduction
+    REPRODUCTION_PENDING = "reproduction_pending"
+    REPRODUCED = "reproduced"
+    REPRO_FAILED = "repro_failed"
+    REPRO_BLOCKED = "repro_blocked"
+    REPRO_INCONCLUSIVE = "repro_inconclusive"
+
+    # Repair & Validation
+    REPAIR_PENDING = "repair_pending"
+    REPAIR_FAILED = "repair_failed"
+
+    # Verification & Regression
+    VERIFICATION_PENDING = "verification_pending"
+    VERIFIED = "verified"
+    VERIFICATION_FAILED = "verification_failed"
+    VERIFICATION_BLOCKED = "verification_blocked"
+    REGRESSION_CHECKING = "regression_checking"
+    REGRESSION_FAILED = "regression_failed"
+
+    # Human Review Gate & Terminal States
+    AWAITING_HUMAN_REVIEW = "awaiting_human_review"
+    APPROVED = "approved"
+    REJECTED = "rejected"
 
 
 # =============================================================================
@@ -261,3 +309,43 @@ class RepositoryContext(BaseModel):
     budget_summary: ContextBudgetSummary = Field(description="Budget accounting and truncation audit")
     rendered_prompt: str = Field(description="Budgeted, untrusted-framed markdown prompt for model intake")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# =============================================================================
+# Workflow Lifecycle & Ledger Models
+# =============================================================================
+
+class EngineeringWorkflowEvent(BaseModel):
+    """Immutable, append-only event recorded in the engineering workflow ledger."""
+    model_config = ConfigDict(frozen=True)
+
+    event_id: str = Field(description="Unique deterministic event identifier (wfe_<hex12>)")
+    workflow_id: str = Field(description="Associated workflow identifier")
+    sequence: int = Field(ge=1, description="Strict monotonically increasing 1-based sequence number")
+    from_state: Optional[EngineeringWorkflowState] = Field(default=None, description="Previous state before transition")
+    to_state: EngineeringWorkflowState = Field(description="Target state transitioned to")
+    stage: str = Field(description="Descriptive stage name (e.g. init, intake_validation, analysis, review)")
+    payload: Dict[str, Any] = Field(default_factory=dict, description="Sanitized, secret-redacted event payload")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class EngineeringWorkflow(BaseModel):
+    """Auditable state record for a supervised end-to-end engineering workflow."""
+    model_config = ConfigDict(frozen=True)
+
+    workflow_id: str = Field(description="Unique workflow identifier (wf_eng_<sha12>)")
+    intake_id: str = Field(description="Associated validated intake specification ID")
+    target_repo: str = Field(description="Target repository path or URL")
+    base_commit_sha: str = Field(description="Pinned hexadecimal commit SHA")
+    state: EngineeringWorkflowState = Field(default=EngineeringWorkflowState.CREATED, description="Current lifecycle state")
+    context_id: Optional[str] = Field(default=None, description="Assembled repository context ID")
+    repro_case_id: Optional[str] = Field(default=None, description="Reproduction case ID if reproduction attempted")
+    repair_plan_id: Optional[str] = Field(default=None, description="Repair plan ID if repair planned")
+    verification_attempt_id: Optional[str] = Field(default=None, description="Verification attempt ID")
+    regression_summary: Dict[str, Any] = Field(default_factory=dict, description="Regression evaluation metrics summary")
+    human_decision: Optional[str] = Field(default=None, description="Mandatory human review decision: 'approve' or 'reject'")
+    human_notes: Optional[str] = Field(default=None, description="Auditor review notes")
+    error_message: Optional[str] = Field(default=None, description="Diagnostic error or block explanation")
+    version: int = Field(default=1, ge=1, description="Monotonically increasing version for optimistic concurrency")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

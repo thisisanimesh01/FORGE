@@ -148,11 +148,15 @@ Phase 5 is partitioned into 6 small, independently verifiable milestones:
   - CLI commands in `app/forge/cli.py` (`forge workflow intake create/validate/show` and `forge workflow context build/show`).
 - **Exit Gate Passed**: 26 unit tests in `tests/unit/test_phase5_milestone1.py` passed; 713 regression tests passed; 100% pass on acceptance and benchmark suites.
 
-### Milestone 2: Supervised Workflow State Machine & Transactional Ledger
-- **Objective**: Implement the overarching workflow orchestrator with optimistic concurrency, sequential append-only event auditing, crash resilience, and pause/resume capability.
-- **Inputs**: Validated task specification.
-- **Outputs**: SQLite-persisted `EngineeringWorkflow`, state transition validator, and secret-scrubbed event ledger.
-- **Exit Gate**: State machine invariants verified; illegal transitions and competing version updates rejected; process crash recovery verified.
+### Milestone 2: Supervised Workflow State Machine & Transactional Ledger (Implemented & Verified)
+- **Status**: COMPLETED & VERIFIED
+- **Specification**: [`docs/specs/phase-5-m2-workflow-ledger.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m2-workflow-ledger.md)
+- **Implementation**:
+  - Typed state machine with 19 states and code-level transition guards in `app/forge/workflow/models.py` and `app/forge/workflow/state.py` (`EngineeringWorkflowState`, `validate_workflow_transition`, `ALLOWED_TRANSITIONS`, `RESUMABLE_STATES`, `TERMINAL_STATES`).
+  - Transactional storage schema and optimistic concurrency control in `app/forge/storage/database.py` and `app/forge/storage/store.py` (`workflow_intakes`, `engineering_workflows`, `engineering_workflow_events` with monotonic `version` checking and sequential event integrity).
+  - Supervised lifecycle orchestrator in `app/forge/workflow/orchestrator.py` (`EngineeringWorkflowOrchestrator` supporting `start_workflow`, `resume_workflow`, `review_workflow`).
+  - CLI workflow commands in `app/forge/cli.py` (`forge workflow start`, `forge workflow status`, `forge workflow list`, `forge workflow resume`, `forge workflow review`).
+- **Exit Gate Passed**: 21 unit and integration tests in `tests/unit/test_phase5_milestone2.py` passed; 734 total project tests passed with 0 failures; target repository immutability strictly preserved.
 
 ### Milestone 3: Automated Evidence Chaining from Reproduction to Repair
 - **Objective**: Wire Phase 3 defect reproduction directly into Phase 4 repair planning; ensure ungrounded findings or failed reproductions halt the workflow cleanly without fabricating evidence.

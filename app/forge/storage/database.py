@@ -6,7 +6,7 @@ from typing import Optional
 from forge.config import get_settings
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 INIT_SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -218,6 +218,51 @@ CREATE TABLE IF NOT EXISTS repair_workflow_events (
     FOREIGN KEY(workflow_id) REFERENCES repair_workflows(workflow_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS workflow_intakes (
+    intake_id TEXT PRIMARY KEY,
+    source_type TEXT NOT NULL,
+    target_repo TEXT NOT NULL,
+    base_commit_sha TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    affected_files_json TEXT NOT NULL DEFAULT '[]',
+    intake_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS engineering_workflows (
+    workflow_id TEXT PRIMARY KEY,
+    intake_id TEXT NOT NULL,
+    target_repo TEXT NOT NULL,
+    base_commit_sha TEXT NOT NULL,
+    state TEXT NOT NULL,
+    context_id TEXT,
+    repro_case_id TEXT,
+    repair_plan_id TEXT,
+    verification_attempt_id TEXT,
+    regression_summary_json TEXT NOT NULL DEFAULT '{}',
+    human_decision TEXT,
+    human_notes TEXT,
+    error_message TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    workflow_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(intake_id) REFERENCES workflow_intakes(intake_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS engineering_workflow_events (
+    event_id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(workflow_id) REFERENCES engineering_workflows(workflow_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
@@ -234,6 +279,11 @@ CREATE INDEX IF NOT EXISTS idx_repair_workflows_finding ON repair_workflows(find
 CREATE INDEX IF NOT EXISTS idx_repair_workflows_state ON repair_workflows(state);
 CREATE INDEX IF NOT EXISTS idx_repair_workflow_events_seq ON repair_workflow_events(workflow_id, sequence);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_repair_workflow_events_seq ON repair_workflow_events(workflow_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_workflow_intakes_repo ON workflow_intakes(target_repo);
+CREATE INDEX IF NOT EXISTS idx_eng_workflows_state ON engineering_workflows(state);
+CREATE INDEX IF NOT EXISTS idx_eng_workflows_intake ON engineering_workflows(intake_id);
+CREATE INDEX IF NOT EXISTS idx_eng_workflow_events_seq ON engineering_workflow_events(workflow_id, sequence);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_eng_workflow_events_seq ON engineering_workflow_events(workflow_id, sequence);
 """
 
 
@@ -256,11 +306,12 @@ def init_database(db_path: Optional[Path] = None) -> None:
     try:
         with conn:
             conn.executescript(INIT_SCHEMA_SQL)
-            # Check migration record
-            cur = conn.execute("SELECT version FROM schema_migrations WHERE version = ?", (SCHEMA_VERSION,))
-            if not cur.fetchone():
-                import datetime
-                now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                conn.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", (SCHEMA_VERSION, now_str))
+            # Check migration records
+            import datetime
+            now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            for ver in range(1, SCHEMA_VERSION + 1):
+                cur = conn.execute("SELECT version FROM schema_migrations WHERE version = ?", (ver,))
+                if not cur.fetchone():
+                    conn.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", (ver, now_str))
     finally:
         conn.close()

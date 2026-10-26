@@ -2502,6 +2502,180 @@ def cli_context_show(
         typer.echo(_render_context_markdown(ctx))
 
 
+# =============================================================================
+# Phase 5 Engineering Workflow Lifecycle Commands (Milestone 2)
+# =============================================================================
+
+def _render_eng_workflow_markdown(wf: Any, events: List[Any]) -> str:
+    lines = [
+        f"# Engineering Workflow `{wf.workflow_id}`",
+        f"- **State**: `{wf.state.value}`",
+        f"- **Intake ID**: `{wf.intake_id}`",
+        f"- **Target Repo**: `{wf.target_repo}`",
+        f"- **Pinned Commit**: `{wf.base_commit_sha}`",
+        f"- **Version**: `{wf.version}`",
+    ]
+    if wf.context_id:
+        lines.append(f"- **Context ID**: `{wf.context_id}`")
+    if wf.repro_case_id:
+        lines.append(f"- **Repro Case ID**: `{wf.repro_case_id}`")
+    if wf.repair_plan_id:
+        lines.append(f"- **Repair Plan ID**: `{wf.repair_plan_id}`")
+    if wf.verification_attempt_id:
+        lines.append(f"- **Verification Attempt ID**: `{wf.verification_attempt_id}`")
+    if wf.human_decision:
+        lines.append(f"- **Human Decision**: `{wf.human_decision}`")
+        if wf.human_notes:
+            lines.append(f"- **Human Notes**: {wf.human_notes}")
+    if wf.error_message:
+        lines.append(f"- **Error / Diagnostic**: {wf.error_message}")
+
+    if events:
+        lines.append("\n## Event Ledger Timeline")
+        for ev in events:
+            from_st = ev.from_state.value if ev.from_state else "None"
+            to_st = ev.to_state.value
+            lines.append(f"- `#{ev.sequence:02d}` [{ev.created_at.isoformat()}] `{ev.stage}`: `{from_st}` → `{to_st}`")
+    return "\n".join(lines)
+
+
+@eng_workflow_app.command(name="start")
+def cli_eng_workflow_start(
+    intake_file: Path = typer.Option(..., "--intake", "-i", help="Path to validated intake specification JSON"),
+    repo: Optional[Path] = typer.Option(None, "--repo", "-r", help="Repository path override (defaults to intake target_repo)"),
+    auto_advance: bool = typer.Option(False, "--auto-advance", "-a", help="Automatically advance to INTAKE_VALIDATED and REPO_ANALYZED if context is assembleable"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Initialize an engineering workflow from a validated task intake specification."""
+    from forge.workflow.intake import validate_intake_spec
+    from forge.workflow.models import WorkflowIntakeSpec
+    from forge.workflow.orchestrator import EngineeringWorkflowOrchestrator
+
+    if not intake_file.exists():
+        typer.secho(f"Intake file not found: {intake_file}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        spec = WorkflowIntakeSpec.model_validate_json(intake_file.read_text(encoding="utf-8"))
+        orchestrator = EngineeringWorkflowOrchestrator()
+        wf = orchestrator.start_workflow(intake_spec=spec, target_repo=repo, auto_advance=auto_advance)
+        events = orchestrator.list_events(wf.workflow_id)
+    except Exception as exc:
+        typer.secho(f"Failed to start workflow: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if format.lower() == "json":
+        typer.echo(wf.model_dump_json(indent=2))
+    else:
+        typer.echo(_render_eng_workflow_markdown(wf, events))
+
+
+@eng_workflow_app.command(name="status")
+def cli_eng_workflow_status(
+    workflow_id: str = typer.Argument(..., help="Workflow ID (e.g. wf_eng_...)"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Display current state, history, and metadata of an engineering workflow."""
+    from forge.workflow.orchestrator import EngineeringWorkflowOrchestrator
+
+    orchestrator = EngineeringWorkflowOrchestrator()
+    wf = orchestrator.get_workflow(workflow_id)
+    if not wf:
+        typer.secho(f"Engineering workflow '{workflow_id}' not found.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    events = orchestrator.list_events(workflow_id)
+
+    if format.lower() == "json":
+        typer.echo(wf.model_dump_json(indent=2))
+    else:
+        typer.echo(_render_eng_workflow_markdown(wf, events))
+
+
+@eng_workflow_app.command(name="list")
+def cli_eng_workflow_list(
+    intake_id: Optional[str] = typer.Option(None, "--intake-id", help="Filter by intake ID"),
+    state: Optional[str] = typer.Option(None, "--state", help="Filter by lifecycle state"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """List engineering workflows stored in SQLite."""
+    from forge.workflow.orchestrator import EngineeringWorkflowOrchestrator
+
+    orchestrator = EngineeringWorkflowOrchestrator()
+    workflows = orchestrator.list_workflows(intake_id=intake_id, state=state)
+
+    if format.lower() == "json":
+        import json
+        typer.echo(json.dumps([w.model_dump(mode="json") for w in workflows], indent=2))
+        return
+
+    if not workflows:
+        typer.echo("No engineering workflows found.")
+        return
+
+    typer.echo(f"{'Workflow ID':<26} {'State':<24} {'Intake ID':<20} {'Commit':<12} {'Ver':<5}")
+    typer.echo("-" * 92)
+    for w in workflows:
+        commit_short = w.base_commit_sha[:10] if len(w.base_commit_sha) >= 10 else w.base_commit_sha
+        typer.echo(
+            f"{w.workflow_id:<26} {w.state.value:<24} {w.intake_id:<20} {commit_short:<12} {w.version:<5}"
+        )
+
+
+@eng_workflow_app.command(name="resume")
+def cli_eng_workflow_resume(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to resume"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Safely resume a blocked or paused engineering workflow."""
+    from forge.workflow.orchestrator import EngineeringWorkflowOrchestrator
+
+    orchestrator = EngineeringWorkflowOrchestrator()
+    try:
+        wf = orchestrator.resume_workflow(workflow_id)
+        events = orchestrator.list_events(wf.workflow_id)
+    except Exception as exc:
+        typer.secho(f"Resumption failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if format.lower() == "json":
+        typer.echo(wf.model_dump_json(indent=2))
+    else:
+        typer.echo(_render_eng_workflow_markdown(wf, events))
+
+
+@eng_workflow_app.command(name="review")
+def cli_eng_workflow_review(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to review"),
+    decision: str = typer.Option(..., "--decision", "-d", help="Mandatory review decision: 'approve' or 'reject'"),
+    notes: Optional[str] = typer.Option(None, "--notes", "-n", help="Auditor review notes"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Submit a mandatory human review decision to approve or reject a workflow."""
+    from forge.workflow.models import EngineeringWorkflowState
+    from forge.workflow.orchestrator import EngineeringWorkflowOrchestrator
+
+    orchestrator = EngineeringWorkflowOrchestrator()
+    try:
+        wf = orchestrator.review_workflow(workflow_id=workflow_id, decision=decision, notes=notes)
+        events = orchestrator.list_events(wf.workflow_id)
+    except Exception as exc:
+        typer.secho(f"Review rejected: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    if format.lower() == "json":
+        typer.echo(wf.model_dump_json(indent=2))
+    else:
+        typer.echo(_render_eng_workflow_markdown(wf, events))
+
+    if wf.state == EngineeringWorkflowState.APPROVED:
+        typer.secho("\n[Result] Workflow APPROVED by human operator. Target repo remains unmodified.", fg=typer.colors.GREEN)
+        raise typer.Exit(code=0)
+    else:
+        typer.secho("\n[Result] Workflow REJECTED by human operator.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+
+
 def main() -> None:
     """CLI entry point."""
     app()

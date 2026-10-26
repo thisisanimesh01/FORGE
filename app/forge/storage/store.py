@@ -974,3 +974,378 @@ class ForgeStore:
             ]
         finally:
             conn.close()
+
+    # ---------------------------------------------------------
+    # Engineering Workflows API (Phase 5)
+    # ---------------------------------------------------------
+    def save_workflow_intake(self, spec: Any) -> None:
+        """Persist or update a WorkflowIntakeSpec."""
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO workflow_intakes (
+                        intake_id, source_type, target_repo, base_commit_sha,
+                        title, description, affected_files_json, intake_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        spec.intake_id,
+                        spec.source_type.value,
+                        spec.target_repo,
+                        spec.base_commit_sha,
+                        spec.title,
+                        spec.description,
+                        json.dumps(spec.affected_files),
+                        spec.model_dump_json(),
+                        spec.created_at.isoformat(),
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def get_workflow_intake(self, intake_id: str) -> Optional[Any]:
+        """Fetch a WorkflowIntakeSpec by ID."""
+        from forge.workflow.models import WorkflowIntakeSpec
+
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT intake_json FROM workflow_intakes WHERE intake_id = ?",
+                (intake_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return WorkflowIntakeSpec.model_validate_json(row["intake_json"])
+        finally:
+            conn.close()
+
+    def list_workflow_intakes(self, target_repo: Optional[str] = None) -> List[Any]:
+        """List persisted WorkflowIntakeSpecs, optionally filtered by target_repo."""
+        from forge.workflow.models import WorkflowIntakeSpec
+
+        conn = self._conn()
+        try:
+            query = "SELECT intake_json FROM workflow_intakes WHERE 1=1"
+            params: List[Any] = []
+            if target_repo:
+                query += " AND target_repo = ?"
+                params.append(target_repo)
+            query += " ORDER BY created_at DESC"
+
+            cur = conn.execute(query, tuple(params))
+            rows = cur.fetchall()
+            return [WorkflowIntakeSpec.model_validate_json(r["intake_json"]) for r in rows]
+        finally:
+            conn.close()
+
+    def save_engineering_workflow(self, workflow: Any) -> None:
+        """Persist a new or updated EngineeringWorkflow and record initial event if needed."""
+        now_dt = datetime.now(timezone.utc)
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO engineering_workflows (
+                        workflow_id, intake_id, target_repo, base_commit_sha, state,
+                        context_id, repro_case_id, repair_plan_id, verification_attempt_id,
+                        regression_summary_json, human_decision, human_notes, error_message,
+                        version, workflow_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        workflow.workflow_id,
+                        workflow.intake_id,
+                        workflow.target_repo,
+                        workflow.base_commit_sha,
+                        workflow.state.value,
+                        workflow.context_id,
+                        workflow.repro_case_id,
+                        workflow.repair_plan_id,
+                        workflow.verification_attempt_id,
+                        json.dumps(workflow.regression_summary),
+                        workflow.human_decision,
+                        workflow.human_notes,
+                        workflow.error_message,
+                        workflow.version,
+                        workflow.model_dump_json(),
+                        workflow.created_at.isoformat(),
+                        workflow.updated_at.isoformat(),
+                    ),
+                )
+
+                # Record initial event if not present
+                cur_ev = conn.execute(
+                    "SELECT 1 FROM engineering_workflow_events WHERE workflow_id = ?",
+                    (workflow.workflow_id,),
+                )
+                if not cur_ev.fetchone():
+                    eid = f"wfe_{uuid.uuid4().hex[:12]}"
+                    initial_payload = {
+                        "intake_id": workflow.intake_id,
+                        "target_repo": workflow.target_repo,
+                        "base_commit_sha": workflow.base_commit_sha,
+                    }
+                    clean_payload = json.loads(redact_secrets(json.dumps(initial_payload)))
+                    conn.execute(
+                        """
+                        INSERT INTO engineering_workflow_events (
+                            event_id, workflow_id, sequence, from_state, to_state, stage, payload_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            eid,
+                            workflow.workflow_id,
+                            1,
+                            None,
+                            workflow.state.value,
+                            "init",
+                            json.dumps(clean_payload),
+                            workflow.created_at.isoformat(),
+                        ),
+                    )
+        finally:
+            conn.close()
+
+    def get_engineering_workflow(self, workflow_id: str) -> Optional[Any]:
+        """Fetch an EngineeringWorkflow by ID."""
+        from forge.workflow.models import EngineeringWorkflow
+
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT workflow_json FROM engineering_workflows WHERE workflow_id = ?",
+                (workflow_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return EngineeringWorkflow.model_validate_json(row["workflow_json"])
+        finally:
+            conn.close()
+
+    def list_engineering_workflows(
+        self,
+        intake_id: Optional[str] = None,
+        state: Optional[str] = None,
+    ) -> List[Any]:
+        """List EngineeringWorkflows, optionally filtered by intake_id and/or state."""
+        from forge.workflow.models import EngineeringWorkflow
+
+        conn = self._conn()
+        try:
+            query = "SELECT workflow_json FROM engineering_workflows WHERE 1=1"
+            params: List[Any] = []
+            if intake_id:
+                query += " AND intake_id = ?"
+                params.append(intake_id)
+            if state:
+                query += " AND state = ?"
+                params.append(state)
+            query += " ORDER BY created_at DESC"
+
+            cur = conn.execute(query, tuple(params))
+            rows = cur.fetchall()
+            return [EngineeringWorkflow.model_validate_json(r["workflow_json"]) for r in rows]
+        finally:
+            conn.close()
+
+    def transition_engineering_workflow(
+        self,
+        workflow_id: str,
+        expected_version: Optional[int],
+        target_state: Any,
+        stage: str,
+        payload: Optional[Dict[str, Any]] = None,
+        context_id: Optional[str] = None,
+        repro_case_id: Optional[str] = None,
+        repair_plan_id: Optional[str] = None,
+        verification_attempt_id: Optional[str] = None,
+        regression_summary: Optional[Dict[str, Any]] = None,
+        human_decision: Optional[str] = None,
+        human_notes: Optional[str] = None,
+        error_message: Optional[str] = None,
+        transition_context: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Atomically validate and execute an engineering workflow state transition with optimistic concurrency."""
+        from forge.workflow.models import (
+            EngineeringWorkflow,
+            EngineeringWorkflowState,
+            WorkflowConcurrencyError,
+        )
+        from forge.workflow.state import validate_workflow_transition
+
+        target_enum = (
+            target_state
+            if isinstance(target_state, EngineeringWorkflowState)
+            else EngineeringWorkflowState(str(target_state))
+        )
+
+        conn = self._conn()
+        try:
+            with conn:
+                # 1. Fetch current row
+                cur = conn.execute(
+                    "SELECT * FROM engineering_workflows WHERE workflow_id = ?",
+                    (workflow_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise StoreError(f"Engineering workflow '{workflow_id}' not found.")
+
+                current_version = row["version"]
+                current_state = EngineeringWorkflowState(row["state"])
+
+                # 2. Check optimistic concurrency version
+                if expected_version is not None and current_version != expected_version:
+                    raise WorkflowConcurrencyError(
+                        f"Concurrency conflict on workflow '{workflow_id}': "
+                        f"expected version {expected_version}, but found {current_version}."
+                    )
+
+                # 3. Validate transition guards
+                ctx = dict(transition_context or {})
+                if human_decision is not None:
+                    ctx["human_decision"] = human_decision
+                validate_workflow_transition(current_state, target_enum, context=ctx)
+
+                # 4. Determine next event sequence number and record event
+                cur_seq = conn.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM engineering_workflow_events WHERE workflow_id = ?",
+                    (workflow_id,),
+                )
+                seq = cur_seq.fetchone()[0]
+                eid = f"wfe_{uuid.uuid4().hex[:12]}"
+                clean_payload = json.loads(redact_secrets(json.dumps(payload or {})))
+                now_dt = datetime.now(timezone.utc)
+                now_str = now_dt.isoformat()
+
+                conn.execute(
+                    """
+                    INSERT INTO engineering_workflow_events (
+                        event_id, workflow_id, sequence, from_state, to_state, stage, payload_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        eid,
+                        workflow_id,
+                        seq,
+                        current_state.value,
+                        target_enum.value,
+                        stage,
+                        json.dumps(clean_payload),
+                        now_str,
+                    ),
+                )
+
+                # 5. Build updated record
+                new_version = current_version + 1
+                new_context_id = context_id if context_id is not None else row["context_id"]
+                new_repro_case_id = repro_case_id if repro_case_id is not None else row["repro_case_id"]
+                new_repair_plan_id = repair_plan_id if repair_plan_id is not None else row["repair_plan_id"]
+                new_verification_attempt_id = (
+                    verification_attempt_id if verification_attempt_id is not None else row["verification_attempt_id"]
+                )
+                new_regression_summary = (
+                    regression_summary
+                    if regression_summary is not None
+                    else json.loads(row["regression_summary_json"] or "{}")
+                )
+                new_human_decision = human_decision if human_decision is not None else row["human_decision"]
+                new_human_notes = human_notes if human_notes is not None else row["human_notes"]
+                new_error_message = error_message if error_message is not None else row["error_message"]
+
+                updated_workflow = EngineeringWorkflow(
+                    workflow_id=workflow_id,
+                    intake_id=row["intake_id"],
+                    target_repo=row["target_repo"],
+                    base_commit_sha=row["base_commit_sha"],
+                    state=target_enum,
+                    context_id=new_context_id,
+                    repro_case_id=new_repro_case_id,
+                    repair_plan_id=new_repair_plan_id,
+                    verification_attempt_id=new_verification_attempt_id,
+                    regression_summary=new_regression_summary,
+                    human_decision=new_human_decision,
+                    human_notes=new_human_notes,
+                    error_message=new_error_message,
+                    version=new_version,
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                    updated_at=now_dt,
+                )
+
+                # 6. Update database row with optimistic concurrency check
+                cur_upd = conn.execute(
+                    """
+                    UPDATE engineering_workflows SET
+                        state = ?,
+                        context_id = ?,
+                        repro_case_id = ?,
+                        repair_plan_id = ?,
+                        verification_attempt_id = ?,
+                        regression_summary_json = ?,
+                        human_decision = ?,
+                        human_notes = ?,
+                        error_message = ?,
+                        version = ?,
+                        workflow_json = ?,
+                        updated_at = ?
+                    WHERE workflow_id = ? AND version = ?
+                    """,
+                    (
+                        target_enum.value,
+                        new_context_id,
+                        new_repro_case_id,
+                        new_repair_plan_id,
+                        new_verification_attempt_id,
+                        json.dumps(new_regression_summary),
+                        new_human_decision,
+                        new_human_notes,
+                        new_error_message,
+                        new_version,
+                        updated_workflow.model_dump_json(),
+                        now_str,
+                        workflow_id,
+                        current_version,
+                    ),
+                )
+
+                if cur_upd.rowcount == 0:
+                    raise WorkflowConcurrencyError(
+                        f"Concurrency conflict on workflow '{workflow_id}': "
+                        f"expected version {current_version} update failed."
+                    )
+
+                return updated_workflow
+        finally:
+            conn.close()
+
+    def list_engineering_workflow_events(self, workflow_id: str) -> List[Any]:
+        """Fetch all events for an engineering workflow in strict sequence order."""
+        from forge.workflow.models import EngineeringWorkflowEvent, EngineeringWorkflowState
+
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM engineering_workflow_events WHERE workflow_id = ? ORDER BY sequence ASC",
+                (workflow_id,),
+            )
+            rows = cur.fetchall()
+            return [
+                EngineeringWorkflowEvent(
+                    event_id=r["event_id"],
+                    workflow_id=r["workflow_id"],
+                    sequence=r["sequence"],
+                    from_state=EngineeringWorkflowState(r["from_state"]) if r["from_state"] else None,
+                    to_state=EngineeringWorkflowState(r["to_state"]),
+                    stage=r["stage"],
+                    payload=json.loads(r["payload_json"] or "{}"),
+                    created_at=datetime.fromisoformat(r["created_at"]),
+                )
+                for r in rows
+            ]
+        finally:
+            conn.close()

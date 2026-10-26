@@ -1,6 +1,7 @@
 """FORGE Phase 5: Supervised End-to-End Engineering Workflow package.
 
 Milestone 1: Unified Task Intake & Repository Context Pipeline.
+Milestone 2: Supervised Workflow State Machine & Transactional Ledger.
 """
 
 from forge.workflow.context import (
@@ -25,9 +26,14 @@ from forge.workflow.models import (
     ContextBudgetSummary,
     DiffIntakePayload,
     DirtyRepositoryError,
+    EngineeringWorkflow,
+    EngineeringWorkflowEvent,
+    EngineeringWorkflowState,
     FindingIntakePayload,
+    HumanApprovalRequiredError,
     IntakeSourceType,
     IntakeValidationError,
+    InvalidWorkflowTransitionError,
     IssueIntakePayload,
     RepositoryContext,
     RepositoryRevisionInfo,
@@ -35,8 +41,19 @@ from forge.workflow.models import (
     SourceExcerpt,
     TargetImmutabilityViolationError,
     TestSpecIntakePayload,
+    WorkflowConcurrencyError,
     WorkflowError,
     WorkflowIntakeSpec,
+    WorkflowResumeError,
+)
+from forge.workflow.orchestrator import EngineeringWorkflowOrchestrator
+from forge.workflow.state import (
+    ALLOWED_TRANSITIONS,
+    RESUMABLE_STATES,
+    TERMINAL_STATES,
+    is_resumable_state,
+    is_terminal_state,
+    validate_workflow_transition,
 )
 
 __all__ = [
@@ -47,8 +64,13 @@ __all__ = [
     "DirtyRepositoryError",
     "ContextBudgetExceededError",
     "TargetImmutabilityViolationError",
+    "InvalidWorkflowTransitionError",
+    "WorkflowConcurrencyError",
+    "WorkflowResumeError",
+    "HumanApprovalRequiredError",
     # Enums & Models
     "IntakeSourceType",
+    "EngineeringWorkflowState",
     "RepositoryRevisionInfo",
     "FindingIntakePayload",
     "DiffIntakePayload",
@@ -59,6 +81,8 @@ __all__ = [
     "SourceExcerpt",
     "ContextBudgetSummary",
     "RepositoryContext",
+    "EngineeringWorkflow",
+    "EngineeringWorkflowEvent",
     # Intake Functions
     "resolve_and_pin_revision",
     "compute_intake_id",
@@ -73,4 +97,13 @@ __all__ = [
     "filter_and_rank_symbols",
     "extract_source_excerpts",
     "render_context_prompt",
+    # State Machine & Transition Rules
+    "ALLOWED_TRANSITIONS",
+    "RESUMABLE_STATES",
+    "TERMINAL_STATES",
+    "validate_workflow_transition",
+    "is_resumable_state",
+    "is_terminal_state",
+    # Orchestrator
+    "EngineeringWorkflowOrchestrator",
 ]
