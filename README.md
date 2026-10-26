@@ -20,8 +20,10 @@ FORGE is an enterprise-grade autonomous software engineering intelligence platfo
 Phase 1: Secure Repository Intelligence  ── [COMPLETED] (Milestones 1–7)
 Phase 2: Diff-Aware Intelligent Review   ── [COMPLETED] (Milestones 1–6)
 Phase 3: Defect Reproduction & Verification ── [COMPLETED] (Milestones 1–6)
+Phase 3→4 Transition: Provider Credentials ── [COMPLETED]
 Phase 4: Targeted Autonomous Repair     ── [PLANNED]
 Phase 5: Regression & Safety Verification ── [PLANNED]
+
 ```
 
 ### Phase 1: Secure Repository Intelligence (Completed)
@@ -228,10 +230,15 @@ cp .env.example .env
 
 | Variable | Default | Description |
 |---|---|---|
-| `FORGE_LLM_PROVIDER` | `fake` | Provider: `fake` (offline) or `openai` (real) |
-| `FORGE_LLM_API_KEY` | *(empty)* | API key (never commit) |
-| `FORGE_LLM_MODEL` | `gpt-4o` | Model identifier |
-| `FORGE_LLM_API_BASE` | *(empty)* | Custom endpoint URL (Ollama, Azure, vLLM) |
+| `FORGE_LLM_PROVIDER` | `ollama` | Provider: `ollama` (default local), `groq`, `gemini`, `deepseek`, `openai`, or `fake` (offline) |
+| `FORGE_LLM_MODEL` | *(empty)* | Model identifier override (provider defaults used when empty) |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Base URL for local Ollama server (compatible with Friday convention) |
+| `GROQ_API_KEY` | *(empty)* | API key for Groq Cloud (compatible with Friday convention) |
+| `GEMINI_API_KEY` | *(empty)* | API key for Google Gemini (compatible with Friday convention) |
+| `DEEPSEEK_API_KEY` | *(empty)* | API key for DeepSeek (compatible with Friday convention) |
+| `FORGE_LLM_API_KEY` | *(empty)* | API key for OpenAI provider |
+| `FORGE_ALLOW_CLOUD_FALLBACK` | `false` | Security guard: silent cloud fallback is strictly forbidden |
+| `FORGE_LLM_API_BASE` | *(empty)* | Custom endpoint base URL override (Azure, vLLM, local proxies) |
 | `FORGE_MAX_STEPS` | `10` | Max investigation iterations |
 | `FORGE_DOCKER_IMAGE` | `python:3.11-slim` | Base container image for sandboxed execution |
 
@@ -255,4 +262,6 @@ cp .env.example .env
   - Outcome Classification & Evidence Validation: [`docs/specs/phase-3-milestone-4.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-4.md)
   - Reproduction Reliability & Regression Hardening: [`docs/specs/phase-3-milestone-5.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-5.md)
   - End-to-End Reproduction Acceptance: [`docs/specs/phase-3-milestone-6.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-6.md)
+- Phase 3→4 Transition:
+  - Multi-Provider Configuration & Credential Reuse: [`docs/specs/phase-3-provider-transition.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-provider-transition.md)
 - Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)

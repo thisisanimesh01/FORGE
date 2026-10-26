@@ -18,6 +18,7 @@ from forge.llm.provider import (
 )
 from forge.llm.fake import FakeLLMProvider
 from forge.llm.openai import OpenAICompatibleProvider
+from forge.llm.factory import get_provider, describe_provider
 
 __all__ = [
     "ChatMessage",
@@ -34,4 +35,6 @@ __all__ = [
     "LLMUnavailableError",
     "FakeLLMProvider",
     "OpenAICompatibleProvider",
+    "get_provider",
+    "describe_provider",
 ]

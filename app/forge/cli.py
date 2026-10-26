@@ -81,10 +81,22 @@ def doctor() -> None:
     else:
         typer.echo("  [INFO] Database not yet initialized (run 'forge db init')")
 
-    # Redaction verification
-    test_redact = settings.get_sanitized_dict()
-    typer.echo(f"  [OK] Secret redaction active (Provider: {test_redact['llm_provider']})")
+    # Provider diagnostics
+    from forge.llm.factory import describe_provider
+    provider_info = describe_provider()
+    provider_name = provider_info["provider"]
+    creds_ok = provider_info["credentials_configured"]
+    typer.echo(f"  [OK] Secret redaction active (Provider: {provider_name})")
+    if creds_ok:
+        typer.echo(f"  [OK] LLM Provider '{provider_name}' credentials: configured")
+    else:
+        typer.echo(f"  [WARN] LLM Provider '{provider_name}' credentials: NOT configured (set the required API key)")
+    typer.echo(f"         Model: {provider_info['model'] or '(using provider default)'}")
+    typer.echo(f"         API Base: {provider_info['api_base']}")
+    typer.echo(f"         Network required: {'yes' if provider_info['requires_network'] else 'no (local)'}")
+    typer.echo(f"         Cloud fallback: DISABLED (policy enforced)")
     typer.echo("System is ready for Phase 1 operations.")
+
 
 
 # --- Sandbox commands ---
@@ -581,30 +593,19 @@ def investigate(
         run_id = store.create_run(target=target)
         typer.echo(f"Initialized Investigation Run: {run_id}")
 
-        # Configure LLM provider
-        provider_name = (provider or settings.llm_provider).lower()
-        if provider_name == "fake":
-            llm_inst = FakeLLMProvider(model_name=model or settings.llm_model)
-        elif provider_name in {"openai", "anthropic", "gemini"}:
-            llm_inst = OpenAICompatibleProvider(
-                model=model or settings.llm_model,
-                api_key=settings.llm_api_key,
-                api_base=settings.llm_api_base,
-            )
-            if not llm_inst.is_available():
-                typer.secho(
-                    f"Provider '{provider_name}' is not configured with credentials. Set FORGE_LLM_API_KEY.",
-                    fg=typer.colors.RED,
-                    err=True,
-                )
-                raise typer.Exit(code=1)
-        else:
+        # Configure LLM provider via factory (supports: fake, ollama, groq, gemini, deepseek, openai)
+        from forge.llm.factory import get_provider
+        from forge.llm.provider import LLMUnavailableError
+        try:
+            llm_inst = get_provider(provider_name=provider, model=model)
+        except LLMUnavailableError as exc:
             typer.secho(
-                f"Unknown LLM provider '{provider_name}'. Must be one of: fake, openai, anthropic, gemini.",
+                f"Provider configuration error: {exc}",
                 fg=typer.colors.RED,
                 err=True,
             )
             raise typer.Exit(code=1)
+
 
         tool_reg = ToolRegistry(
             workspace_path=acquired.workspace_path,

@@ -16,6 +16,8 @@ SECRET_PATTERNS = [
     re.compile(r"sk-[a-zA-Z0-9]{20,48}"),
     re.compile(r"xox[baprs]-[a-zA-Z0-9]{10,48}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
+    # Groq keys (gsk_...)
+    re.compile(r"gsk_[a-zA-Z0-9]{20,}"),
 ]
 
 
@@ -50,10 +52,16 @@ class ForgeSettings(BaseSettings):
     )
 
     # Model & Agent configuration
-    llm_provider: str = Field(default="fake", description="LLM provider: fake, openai, anthropic, or gemini")
-    llm_api_key: Optional[str] = Field(default=None, description="API key for LLM provider")
-    llm_model: str = Field(default="gpt-4o", description="Model identifier")
-    llm_api_base: Optional[str] = Field(default=None, description="Custom API endpoint base URL")
+    llm_provider: str = Field(
+        default="fake",
+        description="LLM provider: fake, ollama, groq, gemini, deepseek, or openai",
+    )
+    llm_api_key: Optional[str] = Field(
+        default=None,
+        description="API key for LLM provider (used by openai provider; provider-specific keys override this)",
+    )
+    llm_model: str = Field(default="", description="Model identifier (provider default used when empty)")
+    llm_api_base: Optional[str] = Field(default=None, description="Custom API endpoint base URL override")
 
     # Safety & Resource Limits
     max_steps: int = Field(default=10, description="Maximum agent execution turns per investigation")
@@ -65,11 +73,24 @@ class ForgeSettings(BaseSettings):
     docker_image: str = Field(default="python:3.11-slim", description="Base container image for sandbox execution")
     docker_network_disabled: bool = Field(default=True, description="Enforce no-network execution in containers")
 
+    # Cloud-fallback guard — MUST remain False; no automatic provider switching allowed
+    allow_cloud_fallback: bool = Field(
+        default=False,
+        description="Automatic cloud provider fallback is forbidden by security policy. Must remain False.",
+    )
+
     def get_sanitized_dict(self) -> dict:
-        """Return configuration as dictionary with credentials redacted."""
+        """Return configuration as dictionary with all credentials redacted."""
         raw = self.model_dump()
+        # Redact FORGE-prefixed key
         if raw.get("llm_api_key"):
             raw["llm_api_key"] = "[REDACTED]"
+        # Redact provider-specific keys read from environment (not in settings schema)
+        for env_var in ("GROQ_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY"):
+            val = os.environ.get(env_var, "")
+            raw[env_var.lower()] = "[REDACTED]" if val else "(not set)"
+        # Ollama base URL is not a secret — include it verbatim
+        raw["ollama_base_url"] = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
         return raw
 
 
