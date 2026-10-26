@@ -526,3 +526,42 @@ def test_cli_repair_test_output_file(tmp_path: Path):
     assert out_file.exists()
     content = out_file.read_text(encoding="utf-8")
     assert "ACC01_happy_path_e2e" in content
+
+
+def test_orchestrator_refuses_planning_with_failed_reproduction_evidence(tmp_path: Path):
+    """Orchestrator rejects planning if finding is suspected and attached repro evidence failed."""
+    db_file = tmp_path / "test.db"
+    store = ForgeStore(db_path=db_file)
+    run_id = store.create_run(target="/path/to/repo")
+
+    finding = store.create_finding(
+        run_id=run_id,
+        title="Sample Finding",
+        description="Sample",
+        finding_id="find_fail_repro",
+    )
+    # Finding remains in SUSPECTED state
+    assert finding.lifecycle_state == FindingLifecycleState.SUSPECTED
+
+    # Attach reproduction evidence with status="failed"
+    ev = EvidenceRecord(
+        evidence_id="evi_failed_repro",
+        run_id=run_id,
+        finding_id=finding.finding_id,
+        evidence_type=EvidenceType.REPRODUCTION_RESULT,
+        description="Failed reproduction attempt",
+        content="Defect could not be reproduced",
+        details={"status": "failed"},
+    )
+    store.attach_evidence(ev)
+
+    orch = RepairOrchestrator(store=store)
+    wf = orch.start_workflow(
+        finding_id=finding.finding_id,
+        target_repo=str(tmp_path),
+        base_commit_sha="0" * 40,
+        run_id=run_id,
+    )
+    res = orch.advance(wf.workflow_id, auto_advance=False)
+    assert res.state == RepairWorkflowState.REJECTED
+    assert "lacks verified reproduction evidence" in (res.error_message or "").lower()

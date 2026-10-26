@@ -202,7 +202,16 @@ class RepairOrchestrator:
             )
 
         evidence_list = self.store.list_evidence_for_finding(workflow.finding_id)
-        has_repro = any(e.evidence_type.value == "reproduction_result" for e in evidence_list)
+
+        def _is_valid_repro_evidence(ev: Any) -> bool:
+            if ev.evidence_type.value != "reproduction_result":
+                return False
+            status = str(ev.details.get("status") or ev.details.get("outcome") or "").lower()
+            if status in ("failed", "failing", "error", "unresolved", "not_reproduced", "timeout", "flaky"):
+                return False
+            return True
+
+        has_repro = any(_is_valid_repro_evidence(e) for e in evidence_list)
         is_reproduced = finding.lifecycle_state in (
             FindingLifecycleState.REPRODUCED,
             FindingLifecycleState.ROOT_CAUSED,
