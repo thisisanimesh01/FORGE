@@ -335,10 +335,16 @@ FORGE measures detection accuracy against curated ground-truth fixtures:
 
 ## Sandboxing & Fail-Closed Security Policy
 
-When Docker is unavailable on the host:
-- Execution commands are safely skipped with status `SKIPPED_SANDBOX_UNAVAILABLE`.
-- Host execution fallback is strictly prohibited to guarantee host machine safety.
-- Clear diagnostics are output detailing how to configure Docker for isolated execution.
+FORGE enforces strict container isolation when running code from target repositories:
+- **Network Isolation**: Containers are launched with `--network none`; dynamic calls have zero external network access.
+- **Read-Only Filesystem**: The target workspace is mounted read-only (`--mount type=bind,...,readonly`); repository code cannot mutate host files.
+- **Non-Root Execution**: Runs strictly as UID:GID `1000:1000`.
+- **Privilege Dropping**: Configured with `--security-opt no-new-privileges` and `--cap-drop ALL`.
+- **Fail-Closed Host Protection**: When Docker is unavailable, dynamic execution is marked `SKIPPED_SANDBOX_UNAVAILABLE` (or `BLOCKED`). FORGE strictly refuses to fall back to executing untrusted repository code directly on the host machine.
+- **Real Integration Validation**: Opt-in integration tests verify all isolation boundaries against a live Docker daemon:
+  ```bash
+  FORGE_DOCKER_TESTS=1 pytest tests/integration/test_docker_sandbox_integration.py
+  ```
 
 ---
 
@@ -396,4 +402,5 @@ cp .env.example .env
   - Controlled Repair Orchestration & Lifecycle: [`docs/specs/phase-4-m4-repair-orchestration.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m4-repair-orchestration.md)
   - End-to-End Repair Reliability & Adversarial Testing: [`docs/specs/phase-4-m5-reliability.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m5-reliability.md)
   - Final Acceptance & Release Readiness: [`docs/specs/phase-4-m6-acceptance.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m6-acceptance.md)
+  - Docker Integration Validation & Deterministic Test Repair: [`docs/specs/docker-integration-validation.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/docker-integration-validation.md)
 - Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)

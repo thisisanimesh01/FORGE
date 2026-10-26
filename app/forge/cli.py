@@ -126,7 +126,7 @@ def sandbox_doctor() -> None:
     else:
         typer.secho(f"Runtime Status:   [UNAVAILABLE] {msg}", fg=typer.colors.YELLOW)
         typer.echo("Actionable guidance: To enable isolated test/benchmark execution, start Docker.")
-        typer.echo("Security notice:     FORGE strictly refuses to run repository code directly on host.")
+    typer.echo("Security notice:     FORGE strictly refuses to run repository code directly on host.")
 
 
 @sandbox_app.command(name="check")

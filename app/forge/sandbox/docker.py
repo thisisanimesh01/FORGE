@@ -17,7 +17,7 @@ import shutil
 import subprocess
 
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from forge.config import redact_secrets, get_settings
 from forge.sandbox.models import (
@@ -30,18 +30,24 @@ from forge.sandbox.models import (
 from forge.sandbox.policy import validate_sandbox_request, PolicyViolationError
 
 
+_DEFAULT_BINARY = object()
+
+
 class DockerSandbox:
     """Docker container execution adapter."""
 
     def __init__(
         self,
         docker_image: Optional[str] = None,
-        docker_binary: Optional[str] = None,
+        docker_binary: Any = _DEFAULT_BINARY,
     ):
         settings = get_settings()
         raw_image = docker_image or settings.docker_image
         self.docker_image = self.validate_image(raw_image)
-        self.docker_binary = docker_binary or shutil.which("docker")
+        if docker_binary is _DEFAULT_BINARY:
+            self.docker_binary = shutil.which("docker")
+        else:
+            self.docker_binary = docker_binary
 
     @staticmethod
     def validate_image(image_str: str) -> str:

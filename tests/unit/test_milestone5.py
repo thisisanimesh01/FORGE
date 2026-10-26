@@ -32,6 +32,7 @@ from forge.investigation.loop import InvestigationLoop, InvestigationResult
 from forge.storage.store import ForgeStore
 from forge.storage.database import init_database
 from forge.schemas import EventType
+from forge.sandbox.docker import DockerSandbox
 from forge.cli import app
 
 runner = CliRunner()
@@ -631,14 +632,14 @@ class TestToolRegistry:
         workspace = tmp_path / "workspace"
         workspace.mkdir(parents=True, exist_ok=True)
         store = make_store(tmp_path)
-        reg = ToolRegistry(workspace_path=workspace, store=store, run_id="run_test")
+        sandbox = DockerSandbox(docker_binary=None)
+        reg = ToolRegistry(workspace_path=workspace, store=store, run_id="run_test", sandbox=sandbox)
 
-        # Docker won't be available in test env, should return UNAVAILABLE status
+        # Docker is unavailable in this test, should return UNAVAILABLE status
         result = reg.execute_tool("run_sandbox_check", {"command": ["pytest", "--collect-only"]})
         parsed = json.loads(result)
-        # May be UNAVAILABLE (no docker) or REJECTED (policy), both are safe
-        assert parsed["status"] in ["unavailable", "rejected", "succeeded", "failed"]
-        assert "isolation_established" in parsed
+        assert parsed["status"] == "unavailable"
+        assert parsed["isolation_established"] is False
 
     def test_tool_output_is_redacted(self, tmp_path: Path):
         """Secrets in tool outputs are redacted before returning."""

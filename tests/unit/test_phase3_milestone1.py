@@ -258,8 +258,9 @@ def test_cli_sandbox_check_valid_and_invalid(tmp_path: Path):
     assert "explicitly forbidden" in res_invalid.output
 
 
-def test_cli_sandbox_reproduce_fails_closed_when_docker_unavailable(tmp_path: Path):
+def test_cli_sandbox_reproduce_fails_closed_when_docker_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """CLI forge sandbox reproduce returns clean fail-closed status when Docker is absent."""
+    monkeypatch.setattr("forge.sandbox.docker.shutil.which", lambda _: None)
     contract = {
         "request_id": "req_repro_cli",
         "finding_id": "find_cli",

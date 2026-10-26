@@ -438,6 +438,16 @@ def test_cli_sandbox_doctor():
     assert "refuses to run repository code directly on host" in result.output
 
 
+def test_cli_sandbox_doctor_unavailable(monkeypatch: pytest.MonkeyPatch):
+    """Test forge sandbox doctor output when Docker daemon is unavailable."""
+    monkeypatch.setattr("forge.sandbox.docker.shutil.which", lambda _: None)
+    result = runner.invoke(app, ["sandbox", "doctor"])
+    assert result.exit_code == 0
+    assert "FORGE Sandbox Diagnostics" in result.output
+    assert "[UNAVAILABLE]" in result.output
+    assert "refuses to run repository code directly on host" in result.output
+
+
 def test_cli_doctor_includes_sandbox_and_static_distinction():
     """Test updated forge doctor clearly distinguishes static vs sandbox vs runtime availability."""
     result = runner.invoke(app, ["doctor"])

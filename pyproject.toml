@@ -35,3 +35,6 @@ testpaths = ["tests"]
 norecursedirs = [".*", "fixtures", "tests/fixtures"]
 pythonpath = ["app"]
 addopts = "-v"
+markers = [
+    "docker: opt-in real Docker integration tests (requires running Docker daemon)",
+]
