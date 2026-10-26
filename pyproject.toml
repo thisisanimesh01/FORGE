@@ -32,5 +32,6 @@ where = ["app"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = [".*", "fixtures", "tests/fixtures"]
 pythonpath = ["app"]
 addopts = "-v"

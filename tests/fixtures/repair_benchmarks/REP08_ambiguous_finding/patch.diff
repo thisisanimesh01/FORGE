@@ -1,0 +1,6 @@
+--- a/src/ambiguous.py
++++ b/src/ambiguous.py
+@@ -1,2 +1,2 @@
+ def format_output(value):
+-    return str(value).strip()
++    return str(value).strip().lower()

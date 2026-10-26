@@ -1,0 +1,36 @@
+{
+  "fixture_id": "REP07_clean_control",
+  "name": "Clean Math Utility Control",
+  "description": "Valid, tested math helper function. False-positive finding should not result in code mutation.",
+  "category": "clean_control",
+  "target_file": "src/math_clean.py",
+  "base_commit_sha": "a1b2c3d4e5f67890",
+  "severity": "low",
+  "expected": {
+    "has_defect": false,
+    "expected_outcome": "repair_rejected",
+    "expected_plan_valid": false,
+    "requires_evidence": false,
+    "allow_no_fix": true,
+    "test_oracle_command": ["pytest", "tests/test_math.py"]
+  },
+  "constraints": {
+    "allowed_files": ["src/math_clean.py"],
+    "max_lines": 5,
+    "max_hunks": 1,
+    "max_bytes": 1024,
+    "forbidden_tokens": [],
+    "required_tokens": ["def safe_divide"]
+  },
+  "scripted_response": {
+    "root_cause": "No defect detected; function operates according to specification.",
+    "proposed_change": "No mutation required.",
+    "target_file": "src/math_clean.py",
+    "expected_behavior": "safe_divide returns quotient or default when denominator is 0.",
+    "regression_risks": [],
+    "verification_plan": "pytest tests/test_math.py",
+    "confidence": 0.99,
+    "uncertainty_notes": "Clean control fixture.",
+    "unified_diff": ""
+  }
+}

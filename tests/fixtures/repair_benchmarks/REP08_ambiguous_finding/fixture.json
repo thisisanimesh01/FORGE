@@ -1,0 +1,36 @@
+{
+  "fixture_id": "REP08_ambiguous_finding",
+  "name": "Ambiguous Finding with Unspecified Requirements",
+  "description": "Finding claims calculation is suboptimal without specifying expected behavior or test oracle.",
+  "category": "ambiguous_finding",
+  "target_file": "src/ambiguous.py",
+  "base_commit_sha": "a1b2c3d4e5f67890",
+  "severity": "low",
+  "expected": {
+    "has_defect": true,
+    "expected_outcome": "inconclusive",
+    "expected_plan_valid": false,
+    "requires_evidence": true,
+    "allow_no_fix": true,
+    "test_oracle_command": ["pytest", "tests/test_ambiguous.py"]
+  },
+  "constraints": {
+    "allowed_files": ["src/ambiguous.py"],
+    "max_lines": 10,
+    "max_hunks": 1,
+    "max_bytes": 1024,
+    "forbidden_tokens": [],
+    "required_tokens": []
+  },
+  "scripted_response": {
+    "root_cause": "Requirements are ambiguous; unable to determine authoritative expected value.",
+    "proposed_change": "No change proposed pending clarification.",
+    "target_file": "src/ambiguous.py",
+    "expected_behavior": "Unknown expected behavior.",
+    "regression_risks": ["Risk of introducing behavioral discrepancies"],
+    "verification_plan": "pytest tests/test_ambiguous.py",
+    "confidence": 0.4,
+    "uncertainty_notes": "Ambiguous defect report lacking reproduction oracle.",
+    "unified_diff": "--- a/src/ambiguous.py\n+++ b/src/ambiguous.py\n@@ -1,2 +1,2 @@\n def format_output(value):\n-    return str(value).strip()\n+    return str(value).strip().lower()\n"
+  }
+}

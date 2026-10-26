@@ -1,0 +1,6 @@
+--- a/src/pricing.py
++++ b/src/pricing.py
+@@ -1,2 +1,2 @@
+ def calculate_discounted_price(price: float, discount: float) -> float:
+-    return discount - price
++    return max(0.0, price - discount)

@@ -22,14 +22,15 @@ Phase 2: Diff-Aware Intelligent Review   ── [COMPLETED] (Milestones 1–6)
 Phase 3: Defect Reproduction & Verification ── [COMPLETED] (Milestones 1–6)
 Pre-Phase 4: Local Ollama & Multi-Provider LLM Integration ── [COMPLETED]
 Phase 4 Readiness & Sandbox Gate        ── [COMPLETED]
-Phase 4: Targeted Autonomous Repair     ── [IN PROGRESS] (Milestones 1–2 Completed)
+Phase 4: Targeted Autonomous Repair     ── [IN PROGRESS] (Milestones 1–3 Completed)
 Phase 5: Regression & Safety Verification ── [PLANNED]
 ```
 
 ### Phase 4: Targeted Autonomous Repair (In Progress)
 - **M1 — Evidence-Grounded Repair Planning & Patch Generation (Implemented)**: Converts calibrated findings and verified reproduction evidence into structured, bounded repair plans and candidate unified diffs. Enforces strict evidence grounding (ungrounded findings rejected), prompt-injection mitigation via untrusted context framing, protected file immunity (`AGENTS.md`, `README.md`, `.gitignore`, `pyproject.toml`, `.github/*`), strict size budgeting ($\le 100$ lines, $\le 5$ hunks, $\le 1$ file, $\le 20$ KB), target repository immutability, mandatory human approval gates, and SQLite persistence.
 - **M2 — Isolated Patch Application & Verification (Implemented)**: Safely applies validated candidate patches in isolated disposable scratch workspaces and verifies them against independent test reproduction oracles inside the Docker container sandbox boundary. Features a pure-Python AST-verifying diff applier, tamper detection (SHA256 mismatch rejection), command allowlisting and shell injection defense, fail-closed host protection (`SANDBOX_UNAVAILABLE` when Docker is absent without executing code on the host), deterministic outcome taxonomy (`REPAIR_VERIFIED`, `REPAIR_FAILED`, `BROKEN_BUILD`, `REGRESSION_DETECTED`, `TIMEOUT`, `INCONCLUSIVE`), SQLite attempt persistence (`repair_attempts`), and CLI commands (`forge repair verify`, `forge repair attempts`).
-- **M3 — Repair Assessment & Human Approval Gate (Planned)**: Multi-candidate ranking, human approval CLI workflows, and exportable patch bundles.
+- **M3 — Repair Quality & Regression Benchmarking (Implemented)**: Deterministic, offline benchmark suite evaluating repair-plan quality, patch validation, and verification classification across 11 representative defect categories (syntax errors, incorrect logic, boundary conditions, missing validation, exception handling, security-sensitive mistakes, clean controls, ambiguous findings, insufficient evidence, adversarial instructions, and regression-inducing patches). Features independent ground truth, honest denominators (`None` / `N/A` for empty classes), secret redaction, and CLI integration (`forge benchmark repair` and `forge repair benchmark`).
+- **M4 — Repair Assessment & Human Approval Gate (Planned)**: Multi-candidate ranking, human approval CLI workflows, and exportable patch bundles.
 - **Strict Boundary Notice**: **Automated modification of target repositories, autonomous git commits, branch pushes, pull requests, merges, and deployments remain strictly FORBIDDEN.**
 
 ### Phase 4 Readiness & Sandbox Gate (Completed)
@@ -128,6 +129,27 @@ forge repair verify plans/plan_find_01.json --repo /path/to/repo --command "pyte
 # List historical verification attempts for a repair plan
 forge repair attempts rpl_find_01_a1b2c3d4_7e3b9a1d
 forge repair attempts rpl_find_01_a1b2c3d4_7e3b9a1d --format json
+```
+
+### Repair Quality & Regression Benchmarking (Phase 4 Milestone 3)
+```bash
+# Run full offline repair quality benchmark suite (Markdown report)
+forge benchmark repair
+
+# Run using the repair command alias
+forge repair benchmark
+
+# Export benchmark results as formatted JSON
+forge benchmark repair --format json
+
+# Filter for a specific fixture category
+forge benchmark repair --fixture REP01_syntax_error
+
+# Export benchmark report to file
+forge benchmark repair --output reports/repair_benchmark_report.md
+
+# Opt-in live provider evaluation (requires explicit provider flag)
+forge benchmark repair --mode provider --provider ollama --model qwen2.5-coder:7b
 ```
 
 ### Isolated Defect Reproduction Contracts (Phase 3 Milestone 1)
@@ -326,4 +348,5 @@ cp .env.example .env
 - Phase 4 Specifications:
   - Evidence-Grounded Repair Planning & Patch Generation: [`docs/specs/phase-4-m1-repair-planning.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m1-repair-planning.md)
   - Isolated Patch Application & Verification: [`docs/specs/phase-4-m2-patch-verification.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m2-patch-verification.md)
+  - Repair Quality & Regression Benchmarking: [`docs/specs/phase-4-m3-repair-benchmarks.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m3-repair-benchmarks.md)
 - Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)

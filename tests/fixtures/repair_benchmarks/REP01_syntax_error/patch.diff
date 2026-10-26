@@ -1,0 +1,6 @@
+--- a/src/parser.py
++++ b/src/parser.py
+@@ -1,2 +1,2 @@
+-def parse_tokens(text)
++def parse_tokens(text):
+     return text.split()

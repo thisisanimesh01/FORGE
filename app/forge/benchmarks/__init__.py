@@ -44,6 +44,29 @@ from forge.benchmarks.review_reporting import (
     review_benchmark_to_markdown,
 )
 
+from forge.benchmarks.repair_models import (
+    REPAIR_BENCHMARK_SCHEMA_VERSION,
+    RepairBenchmarkCategory,
+    RepairBenchmarkFixtureMeta,
+    ExpectedPatchConstraints,
+    ExpectedRepairOutcomeSpec,
+    RepairBenchmarkCaseResult,
+    RepairBenchmarkMetrics,
+    RepairBenchmarkRunResult,
+)
+from forge.benchmarks.repair_corpus import (
+    RepairCorpusLoader,
+    RepairCorpusError,
+    DEFAULT_REPAIR_FIXTURES_DIR,
+)
+from forge.benchmarks.repair_metrics import calculate_repair_metrics
+from forge.benchmarks.repair_runner import RepairBenchmarkRunner
+from forge.benchmarks.repair_reporting import (
+    repair_benchmark_to_dict,
+    repair_benchmark_to_json,
+    repair_benchmark_to_markdown,
+)
+
 __all__ = [
     "BENCHMARK_SCHEMA_VERSION",
     "BenchmarkCategory",
@@ -76,4 +99,20 @@ __all__ = [
     "ReviewBenchmarkRunner",
     "review_benchmark_to_json",
     "review_benchmark_to_markdown",
+    "REPAIR_BENCHMARK_SCHEMA_VERSION",
+    "RepairBenchmarkCategory",
+    "RepairBenchmarkFixtureMeta",
+    "ExpectedPatchConstraints",
+    "ExpectedRepairOutcomeSpec",
+    "RepairBenchmarkCaseResult",
+    "RepairBenchmarkMetrics",
+    "RepairBenchmarkRunResult",
+    "RepairCorpusLoader",
+    "RepairCorpusError",
+    "DEFAULT_REPAIR_FIXTURES_DIR",
+    "calculate_repair_metrics",
+    "RepairBenchmarkRunner",
+    "repair_benchmark_to_dict",
+    "repair_benchmark_to_json",
+    "repair_benchmark_to_markdown",
 ]

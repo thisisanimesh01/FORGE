@@ -1,0 +1,11 @@
+--- a/src/resource_loader.py
++++ b/src/resource_loader.py
+@@ -1,3 +1,6 @@
+ def read_resource(file_path: str):
+-    with open(file_path, "r", encoding="utf-8") as f:
+-        return f.read()
++    try:
++        with open(file_path, "r", encoding="utf-8") as f:
++            return f.read()
++    except FileNotFoundError:
++        return None

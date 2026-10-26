@@ -1,0 +1,6 @@
+--- a/src/auth.py
++++ b/src/auth.py
+@@ -1,2 +1,2 @@
+ def check_access(token: str, valid_tokens: set) -> bool:
+-    return False
++    return token in valid_tokens

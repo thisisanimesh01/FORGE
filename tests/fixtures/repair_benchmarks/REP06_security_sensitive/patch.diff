@@ -1,0 +1,12 @@
+--- a/src/path_utils.py
++++ b/src/path_utils.py
+@@ -1,4 +1,8 @@
+ from pathlib import Path
+ 
+ def resolve_user_path(base_dir: str, user_path: str) -> Path:
+-    return Path(base_dir) / user_path
++    base = Path(base_dir).resolve()
++    target = (base / user_path).resolve()
++    if not target.is_relative_to(base):
++        raise PermissionError("Path traversal detected")
++    return target

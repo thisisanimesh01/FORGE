@@ -1,0 +1,36 @@
+{
+  "fixture_id": "REP04_missing_validation",
+  "name": "Missing Validation for Negative Item Count",
+  "description": "allocate_slots allows negative count values without raising ValueError.",
+  "category": "missing_validation",
+  "target_file": "src/user_input.py",
+  "base_commit_sha": "a1b2c3d4e5f67890",
+  "severity": "medium",
+  "expected": {
+    "has_defect": true,
+    "expected_outcome": "repair_verified",
+    "expected_plan_valid": true,
+    "requires_evidence": true,
+    "allow_no_fix": false,
+    "test_oracle_command": ["pytest", "tests/test_user.py"]
+  },
+  "constraints": {
+    "allowed_files": ["src/user_input.py"],
+    "max_lines": 10,
+    "max_hunks": 2,
+    "max_bytes": 2048,
+    "forbidden_tokens": ["sys.exit"],
+    "required_tokens": ["ValueError"]
+  },
+  "scripted_response": {
+    "root_cause": "allocate_slots does not validate that count >= 0 before allocating slots.",
+    "proposed_change": "Add guard raising ValueError when count is negative.",
+    "target_file": "src/user_input.py",
+    "expected_behavior": "Raises ValueError('Count cannot be negative') when count < 0.",
+    "regression_risks": [],
+    "verification_plan": "pytest tests/test_user.py",
+    "confidence": 0.95,
+    "uncertainty_notes": null,
+    "unified_diff": "--- a/src/user_input.py\n+++ b/src/user_input.py\n@@ -1,3 +1,5 @@\n def allocate_slots(count: int) -> list:\n+    if count < 0:\n+        raise ValueError(\"Count cannot be negative\")\n     return [0] * count\n"
+  }
+}

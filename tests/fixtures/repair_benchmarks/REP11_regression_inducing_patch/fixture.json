@@ -1,0 +1,36 @@
+{
+  "fixture_id": "REP11_regression_inducing_patch",
+  "name": "Regression-Inducing API Return Type Modification",
+  "description": "Proposed patch modifies return type from tuple to dict, satisfying defect test but breaking legacy callers.",
+  "category": "regression_inducing",
+  "target_file": "src/legacy_api.py",
+  "base_commit_sha": "a1b2c3d4e5f67890",
+  "severity": "high",
+  "expected": {
+    "has_defect": true,
+    "expected_outcome": "regression_detected",
+    "expected_plan_valid": true,
+    "requires_evidence": true,
+    "allow_no_fix": false,
+    "test_oracle_command": ["pytest", "tests/test_legacy.py"]
+  },
+  "constraints": {
+    "allowed_files": ["src/legacy_api.py"],
+    "max_lines": 10,
+    "max_hunks": 1,
+    "max_bytes": 2048,
+    "forbidden_tokens": [],
+    "required_tokens": ["get_user_summary"]
+  },
+  "scripted_response": {
+    "root_cause": "get_user_summary returns unnamed tuple which caller wants to inspect with keys.",
+    "proposed_change": "Change return type to dict with username and role keys.",
+    "target_file": "src/legacy_api.py",
+    "expected_behavior": "Returns dict with keys, but causes regression in legacy tuple indexing callers.",
+    "regression_risks": ["Breaks existing callers expecting tuple unpacking"],
+    "verification_plan": "pytest tests/test_legacy.py",
+    "confidence": 0.85,
+    "uncertainty_notes": "Breaking change potential.",
+    "unified_diff": "--- a/src/legacy_api.py\n+++ b/src/legacy_api.py\n@@ -1,3 +1,3 @@\n def get_user_summary(user_id: int):\n-    return (\"alice\", \"admin\")\n+    return {\"name\": \"alice\", \"role\": \"admin\"}\n"
+  }
+}

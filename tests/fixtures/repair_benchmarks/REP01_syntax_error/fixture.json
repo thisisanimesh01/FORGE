@@ -1,0 +1,36 @@
+{
+  "fixture_id": "REP01_syntax_error",
+  "name": "Syntax Error in Token Parser",
+  "description": "Parser function contains a syntax error due to a missing colon after function definition.",
+  "category": "syntax_error",
+  "target_file": "src/parser.py",
+  "base_commit_sha": "a1b2c3d4e5f67890",
+  "severity": "high",
+  "expected": {
+    "has_defect": true,
+    "expected_outcome": "repair_verified",
+    "expected_plan_valid": true,
+    "requires_evidence": true,
+    "allow_no_fix": false,
+    "test_oracle_command": ["pytest", "tests/test_parser.py"]
+  },
+  "constraints": {
+    "allowed_files": ["src/parser.py"],
+    "max_lines": 10,
+    "max_hunks": 2,
+    "max_bytes": 2048,
+    "forbidden_tokens": ["eval", "exec", "subprocess"],
+    "required_tokens": ["def parse_tokens"]
+  },
+  "scripted_response": {
+    "root_cause": "Missing colon after def parse_tokens(text) causing SyntaxError during AST parsing.",
+    "proposed_change": "Add missing colon to function definition header.",
+    "target_file": "src/parser.py",
+    "expected_behavior": "parse_tokens splits words by whitespace cleanly without syntax failure.",
+    "regression_risks": [],
+    "verification_plan": "pytest tests/test_parser.py",
+    "confidence": 0.99,
+    "uncertainty_notes": null,
+    "unified_diff": "--- a/src/parser.py\n+++ b/src/parser.py\n@@ -1,3 +1,3 @@\n-def parse_tokens(text)\n+def parse_tokens(text):\n     return text.split()\n"
+  }
+}

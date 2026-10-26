@@ -1,0 +1,36 @@
+{
+  "fixture_id": "REP02_incorrect_logic",
+  "name": "Inverted Math in Discount Calculation",
+  "description": "calculate_discounted_price subtracts price from discount instead of discount from price.",
+  "category": "incorrect_logic",
+  "target_file": "src/pricing.py",
+  "base_commit_sha": "a1b2c3d4e5f67890",
+  "severity": "high",
+  "expected": {
+    "has_defect": true,
+    "expected_outcome": "repair_verified",
+    "expected_plan_valid": true,
+    "requires_evidence": true,
+    "allow_no_fix": false,
+    "test_oracle_command": ["pytest", "tests/test_pricing.py"]
+  },
+  "constraints": {
+    "allowed_files": ["src/pricing.py"],
+    "max_lines": 10,
+    "max_hunks": 2,
+    "max_bytes": 2048,
+    "forbidden_tokens": ["os.system", "subprocess"],
+    "required_tokens": ["calculate_discounted_price"]
+  },
+  "scripted_response": {
+    "root_cause": "Inverted subtraction order in calculate_discounted_price yielding negative prices.",
+    "proposed_change": "Subtract discount from price instead of price from discount.",
+    "target_file": "src/pricing.py",
+    "expected_behavior": "calculate_discounted_price(100.0, 20.0) yields 80.0.",
+    "regression_risks": [],
+    "verification_plan": "pytest tests/test_pricing.py",
+    "confidence": 0.98,
+    "uncertainty_notes": null,
+    "unified_diff": "--- a/src/pricing.py\n+++ b/src/pricing.py\n@@ -1,3 +1,3 @@\n def calculate_discounted_price(price: float, discount: float) -> float:\n-    return discount - price\n+    return max(0.0, price - discount)\n"
+  }
+}

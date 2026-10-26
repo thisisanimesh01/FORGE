@@ -951,6 +951,73 @@ def benchmark_review(
         raise typer.Exit(code=1)
 
 
+@benchmark_app.command(name="repair")
+def benchmark_repair(
+    mode: str = typer.Option("offline", "--mode", "-m", help="Evaluation mode: offline or provider/llm"),
+    fixture_filter: Optional[str] = typer.Option(None, "--fixture", "-f", help="Filter for specific fixture ID"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Opt-in LLM provider override (fake, ollama, ollama_cloud, groq, gemini, deepseek)"),
+    model: Optional[str] = typer.Option(None, "--model", help="LLM model override"),
+    output_format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+    output_path: Optional[str] = typer.Option(None, "--output", "-o", help="Optional file path to export benchmark results"),
+) -> None:
+    """Execute repair quality benchmarks evaluating repair-plan quality, patch validation, and verification classification."""
+    from forge.benchmarks.repair_corpus import RepairCorpusLoader
+    from forge.benchmarks.repair_runner import RepairBenchmarkRunner
+    from forge.benchmarks.repair_reporting import repair_benchmark_to_json, repair_benchmark_to_markdown
+    from forge.llm.factory import get_provider
+    from forge.llm.provider import LLMUnavailableError
+
+    m = mode.lower()
+    if m not in {"offline", "provider", "llm"}:
+        typer.secho(f"Invalid mode '{mode}'. Choose 'offline' or 'provider'.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    llm_inst = None
+    provider_label = "offline_fake"
+    model_label = "forge-evaluator-v1"
+
+    if m in {"provider", "llm"} or provider:
+        if not provider:
+            typer.secho("Provider evaluation mode requires explicit provider selection (--provider).", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        typer.echo(f"[Notice] Provider evaluation active: Provider '{provider}', Model '{model or 'default'}'. Network access and external charges may apply.")
+        try:
+            llm_inst = get_provider(provider_name=provider, model=model)
+            provider_label = provider
+            model_label = model or (llm_inst.model if hasattr(llm_inst, "model") else "default")
+        except LLMUnavailableError as exc:
+            typer.secho(f"Provider configuration error: {exc}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+
+    loader = RepairCorpusLoader()
+    runner = RepairBenchmarkRunner(loader=loader)
+    result = runner.run_suite(
+        mode=m,
+        fixture_filter=fixture_filter,
+        provider=llm_inst,
+        provider_name=provider_label,
+        model_name=model_label,
+    )
+
+    is_json = output_format.lower() == "json"
+    rendered = repair_benchmark_to_json(result) if is_json else repair_benchmark_to_markdown(result)
+
+    if output_path:
+        out_p = Path(output_path).resolve()
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(rendered, encoding="utf-8")
+        if not is_json:
+            typer.echo(rendered)
+            typer.secho(f"\nRepair benchmark results exported to: {out_p}", fg=typer.colors.GREEN)
+        else:
+            typer.echo(rendered)
+    else:
+        typer.echo(rendered)
+
+    if result.metrics.failed_cases > 0:
+        raise typer.Exit(code=1)
+
+
 # --- Code Review Command ---
 
 
@@ -1830,6 +1897,26 @@ def repair_attempts(
             f"{a.attempt_id:<30} {a.attempt_number:<4} {a.outcome.value:<20} "
             f"{a.pre_repro_outcome.value:<15} {a.post_repro_outcome.value:<15} {dur_str:<10}"
         )
+
+
+@repair_app.command(name="benchmark")
+def repair_benchmark_alias(
+    mode: str = typer.Option("offline", "--mode", "-m", help="Evaluation mode: offline or provider/llm"),
+    fixture_filter: Optional[str] = typer.Option(None, "--fixture", "-f", help="Filter for specific fixture ID"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Opt-in LLM provider override"),
+    model: Optional[str] = typer.Option(None, "--model", help="LLM model override"),
+    output_format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+    output_path: Optional[str] = typer.Option(None, "--output", "-o", help="Optional file path to export benchmark results"),
+) -> None:
+    """Execute the repair quality benchmark suite (alias for 'forge benchmark repair')."""
+    benchmark_repair(
+        mode=mode,
+        fixture_filter=fixture_filter,
+        provider=provider,
+        model=model,
+        output_format=output_format,
+        output_path=output_path,
+    )
 
 
 def main() -> None:

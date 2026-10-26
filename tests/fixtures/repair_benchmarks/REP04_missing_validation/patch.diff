@@ -1,0 +1,7 @@
+--- a/src/user_input.py
++++ b/src/user_input.py
+@@ -1,2 +1,4 @@
+ def allocate_slots(count: int) -> list:
++    if count < 0:
++        raise ValueError("Count cannot be negative")
+     return [0] * count

@@ -1,0 +1,36 @@
+{
+  "fixture_id": "REP03_boundary_condition",
+  "name": "Off-by-One Loop Boundary in Array Search",
+  "description": "Linear search iterates past array end, raising IndexError on final loop index.",
+  "category": "boundary_condition",
+  "target_file": "src/search.py",
+  "base_commit_sha": "a1b2c3d4e5f67890",
+  "severity": "high",
+  "expected": {
+    "has_defect": true,
+    "expected_outcome": "repair_verified",
+    "expected_plan_valid": true,
+    "requires_evidence": true,
+    "allow_no_fix": false,
+    "test_oracle_command": ["pytest", "tests/test_search.py"]
+  },
+  "constraints": {
+    "allowed_files": ["src/search.py"],
+    "max_lines": 10,
+    "max_hunks": 2,
+    "max_bytes": 2048,
+    "forbidden_tokens": ["while True"],
+    "required_tokens": ["def find_element"]
+  },
+  "scripted_response": {
+    "root_cause": "Loop upper bound uses range(len(items) + 1), accessing out-of-bounds index.",
+    "proposed_change": "Change upper bound to range(len(items)).",
+    "target_file": "src/search.py",
+    "expected_behavior": "find_element returns element index or -1 without raising IndexError.",
+    "regression_risks": [],
+    "verification_plan": "pytest tests/test_search.py",
+    "confidence": 0.99,
+    "uncertainty_notes": null,
+    "unified_diff": "--- a/src/search.py\n+++ b/src/search.py\n@@ -2,3 +2,3 @@\n def find_element(items, target):\n-    for i in range(len(items) + 1):\n+    for i in range(len(items)):\n         if items[i] == target:\n"
+  }
+}

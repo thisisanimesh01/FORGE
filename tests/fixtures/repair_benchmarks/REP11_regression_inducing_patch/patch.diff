@@ -1,0 +1,6 @@
+--- a/src/legacy_api.py
++++ b/src/legacy_api.py
+@@ -1,2 +1,2 @@
+ def get_user_summary(user_id: int):
+-    return ("alice", "admin")
++    return {"name": "alice", "role": "admin"}
