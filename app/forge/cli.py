@@ -4,10 +4,10 @@ import json
 import shutil
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 import typer
 from forge import __version__
-from forge.config import get_settings
+from forge.config import get_settings, redact_secrets
 
 app = typer.Typer(
     name="forge",
@@ -24,6 +24,8 @@ policy_app = typer.Typer(help="CI review policy check and enforcement commands."
 repro_app = typer.Typer(help="Reproduction case management and execution commands.")
 plan_app = typer.Typer(help="Deterministic reproduction plan generation, validation, and execution commands.")
 repair_app = typer.Typer(help="Evidence-grounded repair planning and patch candidate commands.")
+workflow_app = typer.Typer(help="Controlled repair orchestration workflow commands.")
+repair_app.add_typer(workflow_app, name="workflow")
 app.add_typer(db_app, name="db")
 app.add_typer(findings_app, name="findings")
 app.add_typer(sandbox_app, name="sandbox")
@@ -1917,6 +1919,252 @@ def repair_benchmark_alias(
         output_format=output_format,
         output_path=output_path,
     )
+
+
+# =============================================================================
+# Controlled Repair Orchestration Workflow CLI Commands (Phase 4 M4)
+# =============================================================================
+
+def _render_workflow_markdown(workflow: Any, events: List[Any]) -> str:
+    """Render a comprehensive, human-readable Markdown status report for a workflow."""
+    from forge.repair.orchestrator_models import RepairWorkflowState
+
+    lines = [
+        "# FORGE Controlled Repair Workflow Report",
+        f"- **Workflow ID**: `{workflow.workflow_id}`",
+        f"- **Finding ID**: `{workflow.finding_id}`",
+        f"- **State**: `{workflow.state.value.upper()}`",
+        f"- **Target Repo**: `{workflow.target_repo}`",
+        f"- **Base Commit**: `{workflow.base_commit_sha[:10]}...`",
+        f"- **Dry Run**: `{'YES (Plan-only / No execution)' if workflow.dry_run else 'NO (Verification active)'}`",
+        f"- **Sandbox Available**: `{'YES' if workflow.sandbox_available else 'NO (BLOCKED / Fail-closed)'}`",
+    ]
+    if workflow.plan_id:
+        lines.append(f"- **Plan ID**: `{workflow.plan_id}`")
+    if workflow.patch_digest:
+        lines.append(f"- **Patch Digest**: `{workflow.patch_digest[:16]}...`")
+    if workflow.outcome:
+        lines.append(f"- **Verification Outcome**: `{workflow.outcome.value.upper()}`")
+    if workflow.human_decision:
+        lines.append(f"- **Human Decision**: `{workflow.human_decision.upper()}`")
+    if workflow.human_notes:
+        lines.append(f"- **Human Notes**: {workflow.human_notes}")
+    if workflow.error_message:
+        lines.append(f"- **Diagnostic Message**: {workflow.error_message}")
+
+    lines.extend([
+        "",
+        "## Stage Event History",
+        "",
+        "| Seq | Stage | From State | To State | Timestamp |",
+        "|---|---|---|---|---|",
+    ])
+    for e in events:
+        from_str = e.from_state.value.upper() if e.from_state else "-"
+        lines.append(
+            f"| `{e.sequence}` | `{e.stage}` | `{from_str}` | `{e.to_state.value.upper()}` | `{e.created_at.strftime('%H:%M:%S')}` |"
+        )
+
+    lines.extend(["", "## Status & Action Guidance"])
+    if workflow.state == RepairWorkflowState.AWAITING_HUMAN_REVIEW:
+        lines.append("> [!IMPORTANT]")
+        lines.append("> Patch candidate is verified or plan validated. Explicit human review is required.")
+        lines.append(f"> Run: `forge repair workflow review {workflow.workflow_id} --decision approve` or `--decision reject`.")
+    elif workflow.state == RepairWorkflowState.BLOCKED:
+        lines.append("> [!WARNING]")
+        lines.append(f"> Workflow is BLOCKED: {workflow.error_message or 'Sandbox unavailable or revision mismatch'}.")
+        lines.append(f"> To resume once unblocked: `forge repair workflow resume {workflow.workflow_id}`.")
+    elif workflow.state == RepairWorkflowState.APPROVED:
+        lines.append("> [!NOTE]")
+        lines.append("> Repair has been APPROVED by human operator. Target repository remains strictly unmodified (audit-only policy enforced).")
+    elif workflow.state == RepairWorkflowState.REJECTED:
+        lines.append("> [!NOTE]")
+        lines.append("> Repair workflow was REJECTED.")
+    elif workflow.state == RepairWorkflowState.FAILED:
+        lines.append("> [!WARNING]")
+        lines.append(f"> Verification FAILED: {workflow.error_message or 'Defect remained reproducible or regression detected'}.")
+
+    return redact_secrets("\n".join(lines))
+
+
+@workflow_app.command(name="start")
+def workflow_start(
+    finding_id: str = typer.Argument(..., help="Finding ID to orchestrate repair for"),
+    repo: str = typer.Option(".", "--repo", "-r", help="Target repository directory path"),
+    commit: Optional[str] = typer.Option(None, "--commit", "-c", help="Pinned base commit revision"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Plan-only mode; skips sandboxed verification execution"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider override"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="LLM model override"),
+    force: bool = typer.Option(False, "--force", help="Force new workflow even if active workflow exists"),
+    format: str = typer.Option("markdown", "--format", "-f", help="Output format: markdown or json"),
+) -> None:
+    """Start an auditable, resumable repair workflow from an audited finding."""
+    from forge.repair.orchestrator import RepairOrchestrator
+    from forge.repair.orchestrator_models import RepairWorkflowState
+    from forge.repair.planner import RepairPlanner
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    store = ForgeStore(db_path=settings.db_path)
+    planner = RepairPlanner(provider_name=provider, model_name=model)
+    orchestrator = RepairOrchestrator(store=store, planner=planner)
+
+    try:
+        wf = orchestrator.start_workflow(
+            finding_id=finding_id,
+            target_repo=repo,
+            base_commit_sha=commit,
+            dry_run=dry_run,
+            force=force,
+        )
+        # Advance through stages
+        wf = orchestrator.advance(wf.workflow_id, auto_advance=True)
+    except Exception as exc:
+        typer.secho(f"Workflow initialization error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    events = store.list_repair_workflow_events(wf.workflow_id)
+
+    if format.lower() == "json":
+        typer.echo(wf.model_dump_json(indent=2))
+    else:
+        typer.echo(_render_workflow_markdown(wf, events))
+
+    if wf.state in (RepairWorkflowState.APPROVED, RepairWorkflowState.VERIFIED, RepairWorkflowState.AWAITING_HUMAN_REVIEW):
+        raise typer.Exit(code=0)
+    elif wf.state in (RepairWorkflowState.FAILED, RepairWorkflowState.REJECTED):
+        raise typer.Exit(code=1)
+    elif wf.state == RepairWorkflowState.BLOCKED:
+        raise typer.Exit(code=3)
+    else:
+        raise typer.Exit(code=0)
+
+
+@workflow_app.command(name="status")
+def workflow_status(
+    workflow_id: str = typer.Argument(..., help="Repair workflow run ID to inspect"),
+    format: str = typer.Option("markdown", "--format", "-f", help="Output format: markdown or json"),
+) -> None:
+    """Show detailed status, pinned context, and audit history for a repair workflow."""
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    store = ForgeStore(db_path=settings.db_path)
+    wf = store.get_repair_workflow(workflow_id)
+
+    if not wf:
+        typer.secho(f"Repair workflow '{workflow_id}' not found.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    events = store.list_repair_workflow_events(workflow_id)
+
+    if format.lower() == "json":
+        typer.echo(wf.model_dump_json(indent=2))
+    else:
+        typer.echo(_render_workflow_markdown(wf, events))
+
+
+@workflow_app.command(name="list")
+def workflow_list(
+    finding_id: Optional[str] = typer.Option(None, "--finding-id", "-r", help="Filter workflows by finding ID"),
+    state: Optional[str] = typer.Option(None, "--state", "-s", help="Filter workflows by state"),
+    format: str = typer.Option("table", "--format", "-f", help="Output format: table or json"),
+) -> None:
+    """List historical repair workflows stored in SQLite."""
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    store = ForgeStore(db_path=settings.db_path)
+    workflows = store.list_repair_workflows(finding_id=finding_id, state=state)
+
+    if not workflows:
+        typer.echo("No repair workflows found.")
+        return
+
+    if format.lower() == "json":
+        typer.echo(json.dumps([w.model_dump() for w in workflows], default=str, indent=2))
+        return
+
+    typer.echo(f"{'Workflow ID':<35} {'Finding ID':<18} {'State':<22} {'DryRun':<8} {'Outcome':<18}")
+    typer.echo("-" * 105)
+    for w in workflows:
+        outcome_str = w.outcome.value if w.outcome else "-"
+        dry_str = "YES" if w.dry_run else "NO"
+        typer.echo(f"{w.workflow_id:<35} {w.finding_id:<18} {w.state.value:<22} {dry_str:<8} {outcome_str:<18}")
+
+
+@workflow_app.command(name="resume")
+def workflow_resume(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to resume from blocked or interrupted state"),
+    format: str = typer.Option("markdown", "--format", "-f", help="Output format: markdown or json"),
+) -> None:
+    """Resume an eligible blocked or interrupted repair workflow."""
+    from forge.repair.orchestrator import RepairOrchestrator
+    from forge.repair.orchestrator_models import RepairWorkflowState
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    store = ForgeStore(db_path=settings.db_path)
+    orchestrator = RepairOrchestrator(store=store)
+
+    try:
+        wf = orchestrator.resume_workflow(workflow_id, auto_advance=True)
+    except Exception as exc:
+        typer.secho(f"Resume failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    events = store.list_repair_workflow_events(wf.workflow_id)
+
+    if format.lower() == "json":
+        typer.echo(wf.model_dump_json(indent=2))
+    else:
+        typer.echo(_render_workflow_markdown(wf, events))
+
+    if wf.state in (RepairWorkflowState.APPROVED, RepairWorkflowState.VERIFIED, RepairWorkflowState.AWAITING_HUMAN_REVIEW):
+        raise typer.Exit(code=0)
+    elif wf.state in (RepairWorkflowState.FAILED, RepairWorkflowState.REJECTED):
+        raise typer.Exit(code=1)
+    elif wf.state == RepairWorkflowState.BLOCKED:
+        raise typer.Exit(code=3)
+    else:
+        raise typer.Exit(code=0)
+
+
+@workflow_app.command(name="review")
+def workflow_review(
+    workflow_id: str = typer.Argument(..., help="Workflow ID in awaiting_human_review state"),
+    decision: str = typer.Option(..., "--decision", "-d", help="Review decision: approve or reject"),
+    notes: Optional[str] = typer.Option(None, "--notes", "-n", help="Review justification or audit notes"),
+    format: str = typer.Option("markdown", "--format", "-f", help="Output format: markdown or json"),
+) -> None:
+    """Submit an explicit human review decision (approve or reject) for a verified patch."""
+    from forge.repair.orchestrator import RepairOrchestrator
+    from forge.repair.orchestrator_models import RepairWorkflowState
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    store = ForgeStore(db_path=settings.db_path)
+    orchestrator = RepairOrchestrator(store=store)
+
+    try:
+        wf = orchestrator.review_workflow(workflow_id=workflow_id, decision=decision, notes=notes)
+    except Exception as exc:
+        typer.secho(f"Review rejected: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    events = store.list_repair_workflow_events(wf.workflow_id)
+
+    if format.lower() == "json":
+        typer.echo(wf.model_dump_json(indent=2))
+    else:
+        typer.echo(_render_workflow_markdown(wf, events))
+
+    if wf.state == RepairWorkflowState.APPROVED:
+        typer.echo("\n[Result] Workflow APPROVED by human operator. Target repo remains unmodified.")
+        raise typer.Exit(code=0)
+    else:
+        typer.echo("\n[Result] Workflow REJECTED by human operator.")
+        raise typer.Exit(code=1)
 
 
 def main() -> None:

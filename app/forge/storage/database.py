@@ -181,6 +181,43 @@ CREATE TABLE IF NOT EXISTS repair_attempts (
     FOREIGN KEY(plan_id) REFERENCES repair_plans(plan_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS repair_workflows (
+    workflow_id TEXT PRIMARY KEY,
+    finding_id TEXT NOT NULL,
+    run_id TEXT,
+    target_repo TEXT NOT NULL,
+    base_commit_sha TEXT NOT NULL,
+    policy_version TEXT NOT NULL DEFAULT 'v1',
+    state TEXT NOT NULL,
+    plan_id TEXT,
+    patch_digest TEXT,
+    dry_run INTEGER NOT NULL DEFAULT 0,
+    sandbox_available INTEGER NOT NULL DEFAULT 1,
+    outcome TEXT,
+    verification_attempt_id TEXT,
+    human_decision TEXT,
+    human_notes TEXT,
+    error_message TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    workflow_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(finding_id) REFERENCES findings(finding_id) ON DELETE CASCADE,
+    FOREIGN KEY(plan_id) REFERENCES repair_plans(plan_id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS repair_workflow_events (
+    event_id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(workflow_id) REFERENCES repair_workflows(workflow_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
@@ -193,6 +230,10 @@ CREATE INDEX IF NOT EXISTS idx_reproduction_classifications_case ON reproduction
 CREATE INDEX IF NOT EXISTS idx_repair_plans_finding ON repair_plans(finding_id);
 CREATE INDEX IF NOT EXISTS idx_repair_attempts_plan ON repair_attempts(plan_id, attempt_number);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_repair_attempts_plan_num ON repair_attempts(plan_id, attempt_number);
+CREATE INDEX IF NOT EXISTS idx_repair_workflows_finding ON repair_workflows(finding_id);
+CREATE INDEX IF NOT EXISTS idx_repair_workflows_state ON repair_workflows(state);
+CREATE INDEX IF NOT EXISTS idx_repair_workflow_events_seq ON repair_workflow_events(workflow_id, sequence);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_repair_workflow_events_seq ON repair_workflow_events(workflow_id, sequence);
 """
 
 

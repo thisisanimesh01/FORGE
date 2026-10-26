@@ -643,3 +643,334 @@ class ForgeStore:
             ]
         finally:
             conn.close()
+
+    # ---------------------------------------------------------
+    # Repair Workflows API (Phase 4 M4)
+    # ---------------------------------------------------------
+    def save_repair_workflow(self, record: Any) -> None:
+        """Persist or insert an initial repair workflow record."""
+        from forge.repair.orchestrator_models import RepairWorkflowRecord
+
+        rec = record if isinstance(record, RepairWorkflowRecord) else RepairWorkflowRecord.model_validate(record)
+        rec_json = rec.model_dump_json()
+
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO repair_workflows (
+                        workflow_id, finding_id, run_id, target_repo, base_commit_sha,
+                        policy_version, state, plan_id, patch_digest, dry_run,
+                        sandbox_available, outcome, verification_attempt_id,
+                        human_decision, human_notes, error_message, version,
+                        workflow_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(workflow_id) DO UPDATE SET
+                        state = excluded.state,
+                        plan_id = excluded.plan_id,
+                        patch_digest = excluded.patch_digest,
+                        dry_run = excluded.dry_run,
+                        sandbox_available = excluded.sandbox_available,
+                        outcome = excluded.outcome,
+                        verification_attempt_id = excluded.verification_attempt_id,
+                        human_decision = excluded.human_decision,
+                        human_notes = excluded.human_notes,
+                        error_message = excluded.error_message,
+                        version = excluded.version,
+                        workflow_json = excluded.workflow_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        rec.workflow_id,
+                        rec.finding_id,
+                        rec.run_id,
+                        rec.target_repo,
+                        rec.base_commit_sha,
+                        rec.policy_version,
+                        rec.state.value,
+                        rec.plan_id,
+                        rec.patch_digest,
+                        1 if rec.dry_run else 0,
+                        1 if rec.sandbox_available else 0,
+                        rec.outcome.value if rec.outcome else None,
+                        rec.verification_attempt_id,
+                        rec.human_decision,
+                        rec.human_notes,
+                        rec.error_message,
+                        rec.version,
+                        rec_json,
+                        rec.created_at.isoformat(),
+                        rec.updated_at.isoformat(),
+                    ),
+                )
+
+                # Record initial CREATED event if no event exists for this workflow
+                cur_ev = conn.execute(
+                    "SELECT 1 FROM repair_workflow_events WHERE workflow_id = ?",
+                    (rec.workflow_id,),
+                )
+                if not cur_ev.fetchone():
+                    eid = f"wfe_{uuid.uuid4().hex[:12]}"
+                    initial_payload = {
+                        "finding_id": rec.finding_id,
+                        "target_repo": rec.target_repo,
+                        "base_commit_sha": rec.base_commit_sha,
+                        "dry_run": rec.dry_run,
+                        "policy_version": rec.policy_version,
+                    }
+                    clean_payload = json.loads(redact_secrets(json.dumps(initial_payload)))
+                    conn.execute(
+                        """
+                        INSERT INTO repair_workflow_events (
+                            event_id, workflow_id, sequence, from_state, to_state, stage, payload_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            eid,
+                            rec.workflow_id,
+                            1,
+                            None,
+                            rec.state.value,
+                            "init",
+                            json.dumps(clean_payload),
+                            rec.created_at.isoformat(),
+                        ),
+                    )
+        finally:
+            conn.close()
+
+    def get_repair_workflow(self, workflow_id: str) -> Optional[Any]:
+        """Retrieve a repair workflow by ID."""
+        from forge.repair.orchestrator_models import RepairWorkflowRecord
+
+        conn = self._conn()
+        try:
+            cur = conn.execute("SELECT workflow_json FROM repair_workflows WHERE workflow_id = ?", (workflow_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            return RepairWorkflowRecord.model_validate_json(row["workflow_json"])
+        finally:
+            conn.close()
+
+    def list_repair_workflows(
+        self,
+        finding_id: Optional[str] = None,
+        state: Optional[str] = None,
+    ) -> List[Any]:
+        """List repair workflows, optionally filtered by finding_id and/or state."""
+        from forge.repair.orchestrator_models import RepairWorkflowRecord
+
+        conn = self._conn()
+        try:
+            query = "SELECT workflow_json FROM repair_workflows WHERE 1=1"
+            params: List[Any] = []
+            if finding_id:
+                query += " AND finding_id = ?"
+                params.append(finding_id)
+            if state:
+                query += " AND state = ?"
+                params.append(state)
+            query += " ORDER BY created_at DESC"
+
+            cur = conn.execute(query, tuple(params))
+            rows = cur.fetchall()
+            return [RepairWorkflowRecord.model_validate_json(r["workflow_json"]) for r in rows]
+        finally:
+            conn.close()
+
+    def transition_repair_workflow(
+        self,
+        workflow_id: str,
+        expected_from_state: Optional[Any],
+        target_state: Any,
+        stage: str,
+        payload: Optional[Dict[str, Any]] = None,
+        plan_id: Optional[str] = None,
+        patch_digest: Optional[str] = None,
+        outcome: Optional[Any] = None,
+        verification_attempt_id: Optional[str] = None,
+        human_decision: Optional[str] = None,
+        human_notes: Optional[str] = None,
+        error_message: Optional[str] = None,
+        sandbox_available: Optional[bool] = None,
+    ) -> Any:
+        """Atomically validate and execute a repair workflow state transition."""
+        from forge.repair.orchestrator_models import (
+            InvalidWorkflowTransitionError,
+            RepairWorkflowEvent,
+            RepairWorkflowRecord,
+            RepairWorkflowState,
+            WorkflowConcurrencyError,
+            validate_workflow_transition,
+        )
+        from forge.repair.contracts import RepairOutcome
+
+        target_enum = RepairWorkflowState(target_state) if isinstance(target_state, str) else target_state
+        now_dt = datetime.now(timezone.utc)
+        now_str = now_dt.isoformat()
+
+        conn = self._conn()
+        try:
+            with conn:
+                cur = conn.execute("SELECT * FROM repair_workflows WHERE workflow_id = ?", (workflow_id,))
+                row = cur.fetchone()
+                if not row:
+                    raise KeyError(f"Repair workflow '{workflow_id}' not found")
+
+                current_state = RepairWorkflowState(row["state"])
+                current_version = row["version"]
+
+                # 1. State machine validation
+                validate_workflow_transition(current_state, target_enum)
+
+                # 2. Concurrency check if expected_from_state was given
+                if expected_from_state is not None:
+                    exp_enum = RepairWorkflowState(expected_from_state) if isinstance(expected_from_state, str) else expected_from_state
+                    if current_state != exp_enum:
+                        raise WorkflowConcurrencyError(
+                            f"Workflow '{workflow_id}' concurrency conflict: expected state '{exp_enum.value}', "
+                            f"but current state is '{current_state.value}'"
+                        )
+
+                # 3. Determine new values
+                new_plan_id = plan_id if plan_id is not None else row["plan_id"]
+                new_patch_digest = patch_digest if patch_digest is not None else row["patch_digest"]
+                new_outcome = outcome.value if isinstance(outcome, RepairOutcome) else (outcome if outcome is not None else row["outcome"])
+                new_att_id = verification_attempt_id if verification_attempt_id is not None else row["verification_attempt_id"]
+                new_decision = human_decision if human_decision is not None else row["human_decision"]
+                new_notes = human_notes if human_notes is not None else row["human_notes"]
+                new_err = error_message if error_message is not None else row["error_message"]
+                new_sandbox = (1 if sandbox_available else 0) if sandbox_available is not None else row["sandbox_available"]
+                new_version = current_version + 1
+
+                # 4. Record append-only event in sequence
+                cur_seq = conn.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM repair_workflow_events WHERE workflow_id = ?",
+                    (workflow_id,),
+                )
+                seq = cur_seq.fetchone()[0]
+                eid = f"wfe_{uuid.uuid4().hex[:12]}"
+                clean_payload = json.loads(redact_secrets(json.dumps(payload or {})))
+
+                conn.execute(
+                    """
+                    INSERT INTO repair_workflow_events (
+                        event_id, workflow_id, sequence, from_state, to_state, stage, payload_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        eid,
+                        workflow_id,
+                        seq,
+                        current_state.value,
+                        target_enum.value,
+                        stage,
+                        json.dumps(clean_payload),
+                        now_str,
+                    ),
+                )
+
+                # 5. Build updated record
+                updated_rec = RepairWorkflowRecord(
+                    workflow_id=workflow_id,
+                    finding_id=row["finding_id"],
+                    run_id=row["run_id"],
+                    target_repo=row["target_repo"],
+                    base_commit_sha=row["base_commit_sha"],
+                    policy_version=row["policy_version"],
+                    state=target_enum,
+                    plan_id=new_plan_id,
+                    patch_digest=new_patch_digest,
+                    dry_run=bool(row["dry_run"]),
+                    sandbox_available=bool(new_sandbox),
+                    outcome=RepairOutcome(new_outcome) if new_outcome else None,
+                    verification_attempt_id=new_att_id,
+                    human_decision=new_decision,
+                    human_notes=new_notes,
+                    error_message=new_err,
+                    version=new_version,
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                    updated_at=now_dt,
+                )
+
+                # 6. Update database row
+                conn.execute(
+                    """
+                    UPDATE repair_workflows SET
+                        state = ?,
+                        plan_id = ?,
+                        patch_digest = ?,
+                        sandbox_available = ?,
+                        outcome = ?,
+                        verification_attempt_id = ?,
+                        human_decision = ?,
+                        human_notes = ?,
+                        error_message = ?,
+                        version = ?,
+                        workflow_json = ?,
+                        updated_at = ?
+                    WHERE workflow_id = ?
+                    """,
+                    (
+                        target_enum.value,
+                        new_plan_id,
+                        new_patch_digest,
+                        new_sandbox,
+                        new_outcome,
+                        new_att_id,
+                        new_decision,
+                        new_notes,
+                        new_err,
+                        new_version,
+                        updated_rec.model_dump_json(),
+                        now_str,
+                        workflow_id,
+                    ),
+                )
+
+                # 7. Mirror run event if run_id is linked
+                if row["run_id"]:
+                    self._append_event_locked(
+                        conn,
+                        row["run_id"],
+                        EventType.REPAIR_WORKFLOW_STATE_TRANSITIONED,
+                        {
+                            "workflow_id": workflow_id,
+                            "from_state": current_state.value,
+                            "to_state": target_enum.value,
+                            "stage": stage,
+                        },
+                    )
+
+                return updated_rec
+        finally:
+            conn.close()
+
+    def list_repair_workflow_events(self, workflow_id: str) -> List[Any]:
+        """Fetch all events for a repair workflow in strict sequence order."""
+        from forge.repair.orchestrator_models import RepairWorkflowEvent, RepairWorkflowState
+
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_workflow_events WHERE workflow_id = ? ORDER BY sequence ASC",
+                (workflow_id,),
+            )
+            rows = cur.fetchall()
+            return [
+                RepairWorkflowEvent(
+                    event_id=r["event_id"],
+                    workflow_id=r["workflow_id"],
+                    sequence=r["sequence"],
+                    from_state=RepairWorkflowState(r["from_state"]) if r["from_state"] else None,
+                    to_state=RepairWorkflowState(r["to_state"]),
+                    stage=r["stage"],
+                    payload=json.loads(r["payload_json"] or "{}"),
+                    created_at=datetime.fromisoformat(r["created_at"]),
+                )
+                for r in rows
+            ]
+        finally:
+            conn.close()

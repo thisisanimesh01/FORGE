@@ -41,11 +41,23 @@ from forge.repair.verifier import (
     prepare_disposable_workspace,
     validate_verification_command,
 )
+from forge.repair.orchestrator_models import (
+    ALLOWED_WORKFLOW_TRANSITIONS,
+    InvalidWorkflowTransitionError,
+    RepairWorkflowEvent,
+    RepairWorkflowRecord,
+    RepairWorkflowState,
+    WorkflowConcurrencyError,
+    validate_workflow_transition,
+)
+from forge.repair.orchestrator import RepairOrchestrator
 
 __all__ = [
+    "ALLOWED_WORKFLOW_TRANSITIONS",
     "AutonomousMutationForbiddenError",
     "BudgetExceededError",
     "HumanApprovalRequiredError",
+    "InvalidWorkflowTransitionError",
     "PatchApplicationError",
     "PatchCandidate",
     "PatchValidationResult",
@@ -56,6 +68,7 @@ __all__ = [
     "RepairEvaluationPrePost",
     "RepairLifecycleState",
     "RepairModelResponseSchema",
+    "RepairOrchestrator",
     "RepairOutcome",
     "RepairPlan",
     "RepairPlanStatus",
@@ -64,8 +77,12 @@ __all__ = [
     "RepairSafetyError",
     "RepairVerificationResult",
     "RepairVerifier",
+    "RepairWorkflowEvent",
+    "RepairWorkflowRecord",
+    "RepairWorkflowState",
     "ScopeContainmentError",
     "StaleBaseRevisionError",
+    "WorkflowConcurrencyError",
     "WorkspaceImmutabilityError",
     "apply_unified_diff_to_file",
     "assert_human_approval_gate",
@@ -76,5 +93,6 @@ __all__ = [
     "sanitize_patch_content",
     "validate_base_sha",
     "validate_verification_command",
+    "validate_workflow_transition",
     "verify_workspace_containment",
 ]
