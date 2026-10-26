@@ -158,6 +158,29 @@ CREATE TABLE IF NOT EXISTS repair_plans (
     FOREIGN KEY(finding_id) REFERENCES findings(finding_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS repair_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL,
+    finding_id TEXT NOT NULL,
+    run_id TEXT,
+    base_commit_sha TEXT NOT NULL,
+    patch_digest TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    pre_repro_outcome TEXT NOT NULL,
+    post_repro_outcome TEXT NOT NULL,
+    exit_code INTEGER,
+    duration_ms REAL NOT NULL DEFAULT 0.0,
+    sandbox_available INTEGER NOT NULL DEFAULT 1,
+    oracle_verified INTEGER NOT NULL DEFAULT 1,
+    diagnostic_message TEXT,
+    isolation_details_json TEXT NOT NULL DEFAULT '{}',
+    stdout_excerpt TEXT NOT NULL DEFAULT '',
+    stderr_excerpt TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(plan_id) REFERENCES repair_plans(plan_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
@@ -168,6 +191,8 @@ CREATE INDEX IF NOT EXISTS idx_reproduction_attempts_case ON reproduction_attemp
 CREATE UNIQUE INDEX IF NOT EXISTS uq_reproduction_attempts_case_num ON reproduction_attempts(case_id, attempt_number);
 CREATE INDEX IF NOT EXISTS idx_reproduction_classifications_case ON reproduction_classifications(case_id);
 CREATE INDEX IF NOT EXISTS idx_repair_plans_finding ON repair_plans(finding_id);
+CREATE INDEX IF NOT EXISTS idx_repair_attempts_plan ON repair_attempts(plan_id, attempt_number);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_repair_attempts_plan_num ON repair_attempts(plan_id, attempt_number);
 """
 
 

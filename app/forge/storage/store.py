@@ -544,3 +544,102 @@ class ForgeStore:
             return [RepairPlan.model_validate_json(r["plan_json"]) for r in rows]
         finally:
             conn.close()
+
+    def get_next_repair_attempt_number(self, plan_id: str) -> int:
+        """Get the next sequential attempt number for a repair plan."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM repair_attempts WHERE plan_id = ?",
+                (plan_id,),
+            )
+            return cur.fetchone()[0]
+        finally:
+            conn.close()
+
+    def save_repair_attempt(self, attempt: Any) -> None:
+        """Persist a repair attempt record in SQLite."""
+        from forge.repair.models import RepairAttemptRecord
+
+        att = attempt if isinstance(attempt, RepairAttemptRecord) else RepairAttemptRecord.model_validate(attempt)
+        iso_details = json.dumps(att.isolation_details)
+
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO repair_attempts (
+                        attempt_id, plan_id, attempt_number, finding_id, run_id,
+                        base_commit_sha, patch_digest, outcome, pre_repro_outcome,
+                        post_repro_outcome, exit_code, duration_ms, sandbox_available,
+                        oracle_verified, diagnostic_message, isolation_details_json,
+                        stdout_excerpt, stderr_excerpt, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        att.attempt_id,
+                        att.plan_id,
+                        att.attempt_number,
+                        att.finding_id,
+                        att.run_id,
+                        att.base_commit_sha,
+                        att.patch_digest,
+                        att.outcome.value,
+                        att.pre_repro_outcome.value,
+                        att.post_repro_outcome.value,
+                        att.exit_code,
+                        att.duration_ms,
+                        1 if att.sandbox_available else 0,
+                        1 if att.oracle_verified else 0,
+                        att.diagnostic_message,
+                        iso_details,
+                        att.stdout_excerpt,
+                        att.stderr_excerpt,
+                        att.created_at.isoformat(),
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def list_repair_attempts(self, plan_id: str) -> List[Any]:
+        """List all repair attempts for a plan in chronological order."""
+        from forge.repair.models import RepairAttemptRecord
+        from forge.repair.contracts import RepairOutcome
+        from forge.sandbox.contracts import ReproductionOutcome
+
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                """
+                SELECT * FROM repair_attempts WHERE plan_id = ? ORDER BY attempt_number ASC
+                """,
+                (plan_id,),
+            )
+            rows = cur.fetchall()
+            return [
+                RepairAttemptRecord(
+                    attempt_id=r["attempt_id"],
+                    plan_id=r["plan_id"],
+                    attempt_number=r["attempt_number"],
+                    finding_id=r["finding_id"],
+                    run_id=r["run_id"],
+                    base_commit_sha=r["base_commit_sha"],
+                    patch_digest=r["patch_digest"],
+                    outcome=RepairOutcome(r["outcome"]),
+                    pre_repro_outcome=ReproductionOutcome(r["pre_repro_outcome"]),
+                    post_repro_outcome=ReproductionOutcome(r["post_repro_outcome"]),
+                    exit_code=r["exit_code"],
+                    duration_ms=r["duration_ms"],
+                    sandbox_available=bool(r["sandbox_available"]),
+                    oracle_verified=bool(r["oracle_verified"]),
+                    diagnostic_message=r["diagnostic_message"],
+                    isolation_details=json.loads(r["isolation_details_json"] or "{}"),
+                    stdout_excerpt=r["stdout_excerpt"],
+                    stderr_excerpt=r["stderr_excerpt"],
+                    created_at=datetime.fromisoformat(r["created_at"]),
+                )
+                for r in rows
+            ]
+        finally:
+            conn.close()

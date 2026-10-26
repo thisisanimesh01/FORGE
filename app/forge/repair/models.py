@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from forge.repair.contracts import PatchCandidate, PatchValidationResult, RepairBudget
+from forge.repair.contracts import PatchCandidate, PatchValidationResult, RepairBudget, RepairOutcome
+from forge.sandbox.contracts import ReproductionOutcome
 
 
 class RepairPlanStatus(str, Enum):
@@ -135,3 +136,46 @@ class RepairPlan(BaseModel):
         if not v:
             raise ValueError("require_human_approval cannot be disabled; human approval gate is mandatory")
         return v
+
+
+class RepairAttemptRecord(BaseModel):
+    """Immutable audit record for a single patch application and verification attempt."""
+    model_config = ConfigDict(frozen=True)
+
+    attempt_id: str = Field(description="Unique identifier for this attempt")
+    plan_id: str = Field(description="Associated repair plan ID")
+    attempt_number: int = Field(ge=1, description="Sequential attempt number for this plan")
+    finding_id: str = Field(description="Associated finding ID")
+    run_id: Optional[str] = Field(default=None, description="Associated run ID")
+    base_commit_sha: str = Field(description="Pinned base commit revision under test")
+    patch_digest: str = Field(description="SHA256 digest of candidate patch")
+    outcome: RepairOutcome = Field(description="Classified repair outcome")
+    pre_repro_outcome: ReproductionOutcome = Field(description="Pre-patch defect reproduction outcome")
+    post_repro_outcome: ReproductionOutcome = Field(description="Post-patch defect reproduction outcome")
+    exit_code: Optional[int] = Field(default=None, description="Observed process exit code")
+    duration_ms: float = Field(default=0.0, ge=0.0, description="Execution duration in milliseconds")
+    sandbox_available: bool = Field(default=True, description="Whether isolated container sandbox was available")
+    oracle_verified: bool = Field(default=True, description="Whether verification was backed by verified oracle")
+    diagnostic_message: Optional[str] = Field(default=None, description="Sanitized diagnostic message")
+    isolation_details: Dict[str, Any] = Field(default_factory=dict, description="Metadata describing sandbox boundary")
+    stdout_excerpt: str = Field(default="", description="Sanitized and bounded standard output excerpt")
+    stderr_excerpt: str = Field(default="", description="Sanitized and bounded standard error excerpt")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Timestamp")
+
+
+class RepairVerificationResult(BaseModel):
+    """High-level outcome of an isolated patch verification execution."""
+    model_config = ConfigDict(frozen=True)
+
+    plan_id: str = Field(description="Associated repair plan ID")
+    attempt_id: str = Field(description="Associated repair attempt ID")
+    outcome: RepairOutcome = Field(description="Deterministic classified repair outcome")
+    diagnostic: str = Field(description="Explanatory diagnostic of verification outcome")
+    pre_repro_outcome: ReproductionOutcome = Field(description="Observed pre-patch reproduction outcome")
+    post_repro_outcome: ReproductionOutcome = Field(description="Observed post-patch reproduction outcome")
+    patch_applied: bool = Field(description="Whether patch candidate was applied cleanly in workspace")
+    syntax_valid: bool = Field(description="Whether post-patch syntax was valid (e.g. AST parsed)")
+    sandbox_available: bool = Field(description="Whether isolated container execution was available")
+    oracle_verified: bool = Field(description="Whether verification oracle was present and verified")
+    attempt_record: Optional[RepairAttemptRecord] = Field(default=None, description="Detailed attempt record")
+    completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Completion timestamp")

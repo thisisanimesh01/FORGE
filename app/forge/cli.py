@@ -1726,6 +1726,112 @@ def repair_list(
         typer.echo(f"{p.plan_id:<35} {p.finding_id:<20} {p.target_file[:24]:<25} {p.status.value:<12}")
 
 
+@repair_app.command(name="verify")
+def repair_verify(
+    plan_ref: str = typer.Argument(..., help="Plan ID or path to plan JSON file"),
+    repo: str = typer.Option(".", "--repo", "-r", help="Target repository directory path"),
+    scratch: Optional[Path] = typer.Option(None, "--scratch", help="Scratch directory parent for disposable workspace"),
+    command: Optional[str] = typer.Option(None, "--command", "-c", help="Explicit verification command (e.g. 'pytest tests/test_defect.py')"),
+    format: str = typer.Option("markdown", "--format", "-f", help="Output format: markdown or json"),
+) -> None:
+    """Safely apply a repair plan's candidate patch in an isolated scratch workspace and verify it."""
+    from forge.repair.contracts import RepairOutcome
+    from forge.repair.models import RepairPlan
+    from forge.repair.verifier import RepairVerifier
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    store = ForgeStore(db_path=settings.db_path)
+    target_path = Path(repo).resolve()
+
+    if not target_path.exists():
+        typer.secho(f"Error: Target repository path '{repo}' does not exist.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    plan: Optional[RepairPlan] = None
+    ref_path = Path(plan_ref)
+
+    if ref_path.is_file():
+        try:
+            plan = RepairPlan.model_validate_json(ref_path.read_text())
+        except Exception as e:
+            typer.secho(f"Error reading plan JSON file: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=2)
+    else:
+        plan = store.get_repair_plan(plan_ref)
+
+    if not plan:
+        typer.secho(f"Repair plan '{plan_ref}' not found in store or filesystem.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    verifier = RepairVerifier()
+    cmd_args = command.split() if command else None
+
+    res = verifier.verify_plan(
+        plan=plan,
+        target_repo=target_path,
+        store=store,
+        scratch_parent=scratch,
+        verification_command=cmd_args,
+    )
+
+    if format.lower() == "json":
+        typer.echo(res.model_dump_json(indent=2))
+    else:
+        typer.echo(f"Repair Verification: {res.plan_id}")
+        typer.echo(f"  Attempt ID:        {res.attempt_id}")
+        typer.echo(f"  Outcome:           {res.outcome.value.upper()}")
+        typer.echo(f"  Patch Applied:     {'YES' if res.patch_applied else 'NO'}")
+        typer.echo(f"  Syntax Valid:      {'YES' if res.syntax_valid else 'NO'}")
+        typer.echo(f"  Sandbox Available: {'YES' if res.sandbox_available else 'NO (BLOCKED)'}")
+        typer.echo(f"  Oracle Verified:   {'YES' if res.oracle_verified else 'NO'}")
+        typer.echo(f"  Pre-Repro Outcome: {res.pre_repro_outcome.value}")
+        typer.echo(f"  Post-Repro Outcome:{res.post_repro_outcome.value}")
+        typer.echo(f"  Diagnostic:        {res.diagnostic}")
+
+    # Standardized exit codes
+    if res.outcome == RepairOutcome.REPAIR_VERIFIED:
+        raise typer.Exit(code=0)
+    elif res.outcome in (RepairOutcome.REPAIR_FAILED, RepairOutcome.REGRESSION_DETECTED, RepairOutcome.BROKEN_BUILD):
+        raise typer.Exit(code=1)
+    elif res.outcome == RepairOutcome.REPAIR_REJECTED:
+        raise typer.Exit(code=2)
+    elif res.outcome == RepairOutcome.SANDBOX_UNAVAILABLE:
+        raise typer.Exit(code=3)
+    else:  # TIMEOUT, INCONCLUSIVE, FLAKY
+        raise typer.Exit(code=4)
+
+
+@repair_app.command(name="attempts")
+def repair_attempts(
+    plan_id: str = typer.Argument(..., help="Plan ID to inspect attempt history for"),
+    format: str = typer.Option("table", "--format", "-f", help="Output format: table or json"),
+) -> None:
+    """List historical patch application and verification attempts for a repair plan."""
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    store = ForgeStore(db_path=settings.db_path)
+    attempts = store.list_repair_attempts(plan_id=plan_id)
+
+    if not attempts:
+        typer.echo(f"No verification attempts found for plan '{plan_id}'.")
+        return
+
+    if format.lower() == "json":
+        typer.echo(json.dumps([a.model_dump() for a in attempts], default=str, indent=2))
+        return
+
+    typer.echo(f"{'Attempt ID':<30} {'#':<4} {'Outcome':<20} {'Pre-Repro':<15} {'Post-Repro':<15} {'Duration':<10}")
+    typer.echo("-" * 98)
+    for a in attempts:
+        dur_str = f"{a.duration_ms:.1f}ms"
+        typer.echo(
+            f"{a.attempt_id:<30} {a.attempt_number:<4} {a.outcome.value:<20} "
+            f"{a.pre_repro_outcome.value:<15} {a.post_repro_outcome.value:<15} {dur_str:<10}"
+        )
+
+
 def main() -> None:
     """CLI entry point."""
     app()

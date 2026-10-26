@@ -27,21 +27,31 @@ from forge.repair.contracts import (
 from forge.repair.models import (
     PlanValidationResult,
     ProtectedPathPolicy,
+    RepairAttemptRecord,
     RepairModelResponseSchema,
     RepairPlan,
     RepairPlanStatus,
+    RepairVerificationResult,
 )
 from forge.repair.planner import RepairPlanner
+from forge.repair.verifier import (
+    PatchApplicationError,
+    RepairVerifier,
+    apply_unified_diff_to_file,
+    prepare_disposable_workspace,
+    validate_verification_command,
+)
 
 __all__ = [
     "AutonomousMutationForbiddenError",
     "BudgetExceededError",
     "HumanApprovalRequiredError",
+    "PatchApplicationError",
     "PatchCandidate",
     "PatchValidationResult",
     "PlanValidationResult",
     "ProtectedPathPolicy",
-    "RepairAuditRecord",
+    "RepairAttemptRecord",
     "RepairBudget",
     "RepairEvaluationPrePost",
     "RepairLifecycleState",
@@ -52,14 +62,19 @@ __all__ = [
     "RepairPlanner",
     "RepairSafetyContract",
     "RepairSafetyError",
+    "RepairVerificationResult",
+    "RepairVerifier",
     "ScopeContainmentError",
     "StaleBaseRevisionError",
     "WorkspaceImmutabilityError",
+    "apply_unified_diff_to_file",
     "assert_human_approval_gate",
     "compute_patch_sha256",
     "evaluate_repair_outcome",
     "parse_and_validate_unified_diff",
+    "prepare_disposable_workspace",
     "sanitize_patch_content",
     "validate_base_sha",
+    "validate_verification_command",
     "verify_workspace_containment",
 ]

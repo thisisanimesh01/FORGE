@@ -22,13 +22,13 @@ Phase 2: Diff-Aware Intelligent Review   ── [COMPLETED] (Milestones 1–6)
 Phase 3: Defect Reproduction & Verification ── [COMPLETED] (Milestones 1–6)
 Pre-Phase 4: Local Ollama & Multi-Provider LLM Integration ── [COMPLETED]
 Phase 4 Readiness & Sandbox Gate        ── [COMPLETED]
-Phase 4: Targeted Autonomous Repair     ── [IN PROGRESS] (Milestone 1 Completed)
+Phase 4: Targeted Autonomous Repair     ── [IN PROGRESS] (Milestones 1–2 Completed)
 Phase 5: Regression & Safety Verification ── [PLANNED]
 ```
 
 ### Phase 4: Targeted Autonomous Repair (In Progress)
 - **M1 — Evidence-Grounded Repair Planning & Patch Generation (Implemented)**: Converts calibrated findings and verified reproduction evidence into structured, bounded repair plans and candidate unified diffs. Enforces strict evidence grounding (ungrounded findings rejected), prompt-injection mitigation via untrusted context framing, protected file immunity (`AGENTS.md`, `README.md`, `.gitignore`, `pyproject.toml`, `.github/*`), strict size budgeting ($\le 100$ lines, $\le 5$ hunks, $\le 1$ file, $\le 20$ KB), target repository immutability, mandatory human approval gates, and SQLite persistence.
-- **M2 — Patch Evaluation & Regression Verification (Planned)**: Sandboxed application of candidate patches inside isolated Docker containers to evaluate pre/post defect status and verify absence of test regressions.
+- **M2 — Isolated Patch Application & Verification (Implemented)**: Safely applies validated candidate patches in isolated disposable scratch workspaces and verifies them against independent test reproduction oracles inside the Docker container sandbox boundary. Features a pure-Python AST-verifying diff applier, tamper detection (SHA256 mismatch rejection), command allowlisting and shell injection defense, fail-closed host protection (`SANDBOX_UNAVAILABLE` when Docker is absent without executing code on the host), deterministic outcome taxonomy (`REPAIR_VERIFIED`, `REPAIR_FAILED`, `BROKEN_BUILD`, `REGRESSION_DETECTED`, `TIMEOUT`, `INCONCLUSIVE`), SQLite attempt persistence (`repair_attempts`), and CLI commands (`forge repair verify`, `forge repair attempts`).
 - **M3 — Repair Assessment & Human Approval Gate (Planned)**: Multi-candidate ranking, human approval CLI workflows, and exportable patch bundles.
 - **Strict Boundary Notice**: **Automated modification of target repositories, autonomous git commits, branch pushes, pull requests, merges, and deployments remain strictly FORBIDDEN.**
 
@@ -100,7 +100,7 @@ forge doctor
 forge sandbox doctor
 ```
 
-### Evidence-Grounded Repair Planning & Patch Candidates (Phase 4 Milestone 1)
+### Evidence-Grounded Repair Planning & Isolated Verification (Phase 4 Milestones 1–2)
 ```bash
 # Generate a bounded repair plan and candidate patch from an audited finding
 forge repair plan find_01 --repo /path/to/repo --commit a1b2c3d4e5f6 --provider ollama
@@ -118,6 +118,16 @@ forge repair validate plans/plan_find_01.json
 # List historical repair plans stored in SQLite
 forge repair list
 forge repair list --finding-id find_01
+
+# Safely apply a candidate patch in an isolated scratch workspace and verify inside sandbox
+forge repair verify rpl_find_01_a1b2c3d4_7e3b9a1d --repo /path/to/repo
+
+# Verify a plan JSON file with custom verification command and JSON output
+forge repair verify plans/plan_find_01.json --repo /path/to/repo --command "pytest tests/test_parser.py" --format json
+
+# List historical verification attempts for a repair plan
+forge repair attempts rpl_find_01_a1b2c3d4_7e3b9a1d
+forge repair attempts rpl_find_01_a1b2c3d4_7e3b9a1d --format json
 ```
 
 ### Isolated Defect Reproduction Contracts (Phase 3 Milestone 1)
@@ -315,4 +325,5 @@ cp .env.example .env
   - Phase 4 Readiness & Sandbox Gate: [`docs/specs/phase-4-readiness.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-readiness.md)
 - Phase 4 Specifications:
   - Evidence-Grounded Repair Planning & Patch Generation: [`docs/specs/phase-4-m1-repair-planning.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m1-repair-planning.md)
+  - Isolated Patch Application & Verification: [`docs/specs/phase-4-m2-patch-verification.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m2-patch-verification.md)
 - Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)

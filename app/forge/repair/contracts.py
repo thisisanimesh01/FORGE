@@ -77,6 +77,9 @@ class RepairOutcome(str, Enum):
     REGRESSION_DETECTED = "regression_detected" # Unrelated existing tests or baseline checks failed
     SANDBOX_UNAVAILABLE = "sandbox_unavailable" # Container sandbox unavailable; fail-closed without host execution
     REPAIR_REJECTED = "repair_rejected"        # Patch rejected by scope, size, or policy validator
+    INCONCLUSIVE = "inconclusive"              # Oracle absent or verification result cannot be confirmed
+    TIMEOUT = "timeout"                        # Verification execution exceeded duration quota
+    FLAKY = "flaky"                            # Inconsistent outcomes across retries
 
 
 # =============================================================================
@@ -392,12 +395,32 @@ def evaluate_repair_outcome(
     post_outcome: ReproductionOutcome,
     baseline_checks_passed: bool,
     sandbox_healthy: bool,
+    oracle_present: bool = True,
+    oracle_verified: bool = True,
 ) -> Tuple[RepairOutcome, str]:
     """Deterministically classify repair outcome based on pre/post reproduction and baseline status."""
     if not sandbox_healthy:
         return (
             RepairOutcome.SANDBOX_UNAVAILABLE,
             "Container sandbox is unavailable; cannot safely evaluate repair in isolated environment",
+        )
+
+    if not oracle_present or not oracle_verified:
+        return (
+            RepairOutcome.INCONCLUSIVE,
+            "Verification is inconclusive: independent test or oracle was absent or unverified",
+        )
+
+    if post_outcome == ReproductionOutcome.TIMEOUT:
+        return (
+            RepairOutcome.TIMEOUT,
+            "Verification execution exceeded timeout quota",
+        )
+
+    if post_outcome == ReproductionOutcome.FLAKY:
+        return (
+            RepairOutcome.FLAKY,
+            "Flaky verification outcome detected across execution retries",
         )
 
     if not baseline_checks_passed:
@@ -422,11 +445,10 @@ def evaluate_repair_outcome(
             ReproductionOutcome.UNRELATED_FAILURE,
             ReproductionOutcome.FAILED,
             ReproductionOutcome.RESOURCE_EXHAUSTED,
-            ReproductionOutcome.TIMEOUT,
         ):
             return (
                 RepairOutcome.BROKEN_BUILD,
-                f"Broken build: post-patch reproduction crashed or timed out ({post_outcome.value})",
+                f"Broken build: post-patch reproduction crashed ({post_outcome.value})",
             )
 
     return (
