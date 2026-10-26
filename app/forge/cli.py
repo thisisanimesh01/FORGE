@@ -1237,6 +1237,7 @@ def plan_validate(
 @plan_app.command(name="show")
 def plan_show(
     plan_file: str = typer.Argument(..., help="Path to plan JSON file"),
+    format: str = typer.Option("text", "--format", "-f", help="Output format: text or json"),
 ) -> None:
     """Show human-readable plan details.
 
@@ -1255,6 +1256,10 @@ def plan_show(
     except Exception as exc:
         typer.secho(f"Failed to load plan: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
+
+    if format.lower() == "json":
+        typer.echo(json.dumps(plan.model_dump(mode="json"), indent=2))
+        return
 
     typer.echo(f"Plan ID:          {plan.plan_id}")
     typer.echo(f"Plan Version:     {plan.plan_version}")
@@ -1293,6 +1298,7 @@ def plan_run(
     workspace: str = typer.Option(..., "--workspace", "-w", help="Absolute path to the repository workspace"),
     finding_id: Optional[str] = typer.Option(None, "--finding", "-f", help="Finding ID to attach execution evidence to"),
     run_id: Optional[str] = typer.Option(None, "--run-id", help="Audit run ID (required when finding_id is set)"),
+    format: str = typer.Option("text", "--format", "-f", help="Output format: text or json"),
 ) -> None:
     """Validate a reproduction plan and execute it via the reproduction harness.
 
@@ -1353,9 +1359,10 @@ def plan_run(
 
     # 3. Execute via harness (fail-closed when Docker unavailable)
     harness = ReproductionHarness()
-    typer.echo(f"Executing plan '{plan.plan_id}' against workspace: {ws_path}")
-    typer.echo(f"  Strategy: {plan.strategy.value}")
-    typer.echo(f"  Command:  {' '.join(plan.command.args)}")
+    if format.lower() != "json":
+        typer.echo(f"Executing plan '{plan.plan_id}' against workspace: {ws_path}")
+        typer.echo(f"  Strategy: {plan.strategy.value}")
+        typer.echo(f"  Command:  {' '.join(plan.command.args)}")
 
     res = harness.execute(request, ws_path)
 
@@ -1381,11 +1388,26 @@ def plan_run(
     classifier = ReproductionOutcomeClassifier()
     classification = classifier.classify_attempt(temp_attempt, plan=plan)
 
-    typer.echo(f"\nClassified Outcome: {classification.outcome.value.upper()}")
-    typer.echo(f"Reason Code:        {classification.reason_code.value}")
-    typer.echo(f"Explanation:        {classification.explanation}")
-    if res.exit_code is not None:
-        typer.echo(f"Exit Code:          {res.exit_code}")
+    if format.lower() == "json":
+        payload = {
+            "plan_id": plan.plan_id,
+            "finding_id": plan.finding_id,
+            "outcome": classification.outcome.value,
+            "reason_code": classification.reason_code.value,
+            "explanation": classification.explanation,
+            "exit_code": res.exit_code,
+            "is_reproduced": classification.is_reproduced,
+            "duration_ms": res.duration_ms,
+            "matched_patterns": res.matched_patterns,
+            "classification": classification.model_dump(mode="json"),
+        }
+        typer.echo(json.dumps(payload, indent=2))
+    else:
+        typer.echo(f"\nClassified Outcome: {classification.outcome.value.upper()}")
+        typer.echo(f"Reason Code:        {classification.reason_code.value}")
+        typer.echo(f"Explanation:        {classification.explanation}")
+        if res.exit_code is not None:
+            typer.echo(f"Exit Code:          {res.exit_code}")
 
     # 5. Map classified outcome to exit code
     if classification.outcome == ClassificationOutcome.REPRODUCED:
@@ -1395,7 +1417,8 @@ def plan_run(
     elif classification.outcome == ClassificationOutcome.INVALID_PLAN:
         raise typer.Exit(code=2)
     elif classification.outcome == ClassificationOutcome.ENVIRONMENT_BLOCKED:
-        typer.secho("Sandbox unavailable — execution blocked (Docker not found).", fg=typer.colors.YELLOW, err=True)
+        if format.lower() != "json":
+            typer.secho("Sandbox unavailable — execution blocked (Docker not found).", fg=typer.colors.YELLOW, err=True)
         raise typer.Exit(code=3)
     elif classification.outcome in {ClassificationOutcome.INCONCLUSIVE, ClassificationOutcome.FLAKY, ClassificationOutcome.TIMEOUT}:
         raise typer.Exit(code=4)
