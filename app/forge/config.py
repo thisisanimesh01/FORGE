@@ -54,7 +54,7 @@ class ForgeSettings(BaseSettings):
     # Model & Agent configuration
     llm_provider: str = Field(
         default="fake",
-        description="LLM provider: fake, ollama, groq, gemini, deepseek, or openai",
+        description="LLM provider: fake, ollama, ollama_cloud, groq, gemini, deepseek, or openai",
     )
     llm_api_key: Optional[str] = Field(
         default=None,
@@ -78,6 +78,11 @@ class ForgeSettings(BaseSettings):
         default="",
         description="API key for DeepSeek",
         validation_alias=AliasChoices("DEEPSEEK_API_KEY", "DEEPSEEK_API", "FORGE_DEEPSEEK_API_KEY"),
+    )
+    ollama_api_key: str = Field(
+        default="",
+        description="API key for Ollama Cloud",
+        validation_alias=AliasChoices("OLLAMA_API_KEY", "FORGE_OLLAMA_API_KEY"),
     )
     ollama_base_url: str = Field(
         default="http://localhost:11434",
@@ -104,7 +109,7 @@ class ForgeSettings(BaseSettings):
     def get_sanitized_dict(self) -> dict:
         """Return configuration as dictionary with all credentials redacted."""
         raw = self.model_dump()
-        for k in ("llm_api_key", "groq_api_key", "gemini_api_key", "deepseek_api_key"):
+        for k in ("llm_api_key", "groq_api_key", "gemini_api_key", "deepseek_api_key", "ollama_api_key"):
             if raw.get(k):
                 raw[k] = "[REDACTED]"
             else:

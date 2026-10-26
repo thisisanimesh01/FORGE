@@ -80,6 +80,31 @@ class TestGetProvider:
             provider = get_provider(provider_name="ollama")
         assert "192.168.1.10" in provider.api_base
 
+    def test_ollama_cloud_provider_requires_api_key(self):
+        """Ollama Cloud raises LLMUnavailableError when OLLAMA_API_KEY is missing."""
+        clean = dict(os.environ)
+        clean["OLLAMA_API_KEY"] = ""
+        clean["FORGE_LLM_API_KEY"] = ""
+        with patch.dict(os.environ, clean, clear=True):
+            with pytest.raises(LLMUnavailableError, match="OLLAMA_API_KEY"):
+                get_provider(provider_name="ollama_cloud")
+
+    def test_ollama_cloud_provider_with_api_key(self):
+        """Ollama Cloud builds successfully when OLLAMA_API_KEY is set."""
+        with _env(OLLAMA_API_KEY="ollama_secret_cloud_key"):
+            provider = get_provider(provider_name="ollama_cloud")
+        assert isinstance(provider, OpenAICompatibleProvider)
+        assert provider.api_base == "https://ollama.com/v1"
+        assert provider.api_key == "ollama_secret_cloud_key"
+
+    def test_ollama_cloud_hyphen_alias(self):
+        """Hyphenated provider name 'ollama-cloud' resolves correctly."""
+        with _env(OLLAMA_API_KEY="ollama_secret_cloud_key"):
+            provider = get_provider(provider_name="ollama-cloud")
+        assert isinstance(provider, OpenAICompatibleProvider)
+        assert provider.api_base == "https://ollama.com/v1"
+
+
     def test_groq_provider_requires_api_key(self):
         """Groq raises LLMUnavailableError when GROQ_API_KEY is missing."""
         clean = dict(os.environ)
@@ -175,6 +200,12 @@ class TestProviderModelDefaults:
             provider = get_provider(provider_name="ollama")
         assert provider.model == _DEFAULT_MODELS["ollama"]
 
+    def test_ollama_cloud_default_model(self):
+        with _env(OLLAMA_API_KEY="test_key", FORGE_LLM_MODEL=""):
+            provider = get_provider(provider_name="ollama_cloud")
+        assert provider.model == _DEFAULT_MODELS["ollama_cloud"]
+        assert provider.model == "gemma4:cloud"
+
     def test_groq_default_model(self):
         with _env(GROQ_API_KEY="gsk_fake_key", FORGE_LLM_MODEL=""):
             provider = get_provider(provider_name="groq")
@@ -221,6 +252,14 @@ class TestCloudFallbackPrevention:
         # Verify no FakeLLMProvider was silently returned
         # (test passes by virtue of the exception being raised above)
 
+    def test_ollama_cloud_distinct_from_local_ollama(self):
+        """Local ollama and ollama_cloud are distinct; missing cloud key does not route locally."""
+        clean = dict(os.environ)
+        clean["OLLAMA_API_KEY"] = ""
+        with patch.dict(os.environ, clean, clear=True):
+            with pytest.raises(LLMUnavailableError, match="OLLAMA_API_KEY"):
+                get_provider(provider_name="ollama_cloud")
+
     def test_config_allow_cloud_fallback_defaults_false(self):
         """ForgeSettings.allow_cloud_fallback must default to False."""
         settings = ForgeSettings()
@@ -264,6 +303,15 @@ class TestDescribeProvider:
         assert info["provider"] == "ollama"
         assert info["requires_network"] is False
         assert info["credentials_configured"] is True  # No key needed
+
+    def test_ollama_cloud_describe(self):
+        with _env(OLLAMA_API_KEY="cloud_test_secret"):
+            info = describe_provider("ollama_cloud")
+        assert info["provider"] == "ollama_cloud"
+        assert info["requires_network"] is True
+        assert info["credentials_configured"] is True
+        assert "https://ollama.com/v1" in info["api_base"]
+        assert "cloud_test_secret" not in str(info)
 
     def test_groq_describe_no_key_configured(self):
         clean = dict(os.environ)
@@ -342,17 +390,19 @@ class TestSecretRedaction:
         assert "sk-supersecret" not in str(sanitized)
 
     def test_forge_settings_redacts_provider_specific_keys(self):
-        """get_sanitized_dict() redacts GROQ_API_KEY, GEMINI_API_KEY, DEEPSEEK_API_KEY."""
+        """get_sanitized_dict() redacts GROQ_API_KEY, GEMINI_API_KEY, DEEPSEEK_API_KEY, OLLAMA_API_KEY."""
         with _env(
             GROQ_API_KEY="gsk_fakefakefakefakefakefakefakefakefakefakefakefakefakefake",
             GEMINI_API_KEY="AIza_fakefake",
             DEEPSEEK_API_KEY="sk-fakedeepseekkey",
+            OLLAMA_API_KEY="ollama_secret_cloud_key_value",
         ):
             settings = ForgeSettings()
             sanitized = settings.get_sanitized_dict()
         assert sanitized.get("groq_api_key") == "[REDACTED]"
         assert sanitized.get("gemini_api_key") == "[REDACTED]"
         assert sanitized.get("deepseek_api_key") == "[REDACTED]"
+        assert sanitized.get("ollama_api_key") == "[REDACTED]"
 
     def test_forge_settings_unset_key_shown_as_not_set(self):
         """Keys that are not set appear as '(not set)' rather than empty."""
@@ -363,10 +413,13 @@ class TestSecretRedaction:
         clean["GEMINI_API"] = ""
         clean["DEEPSEEK_API_KEY"] = ""
         clean["DEEPSEEK_API"] = ""
+        clean["OLLAMA_API_KEY"] = ""
         with patch.dict(os.environ, clean, clear=True):
             settings = ForgeSettings()
             sanitized = settings.get_sanitized_dict()
         assert sanitized.get("groq_api_key") == "(not set)"
+        assert sanitized.get("ollama_api_key") == "(not set)"
+
 
 
 

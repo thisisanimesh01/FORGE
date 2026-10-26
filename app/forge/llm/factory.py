@@ -51,6 +51,7 @@ from forge.llm.provider import LLMProvider, LLMUnavailableError
 _DEFAULT_MODELS: dict[str, str] = {
     "fake": "forge-fake-model",
     "ollama": "llama3",
+    "ollama_cloud": "gemma4:cloud",
     "groq": "llama-3.3-70b-versatile",
     "gemini": "gemini-2.0-flash",
     "deepseek": "deepseek-chat",
@@ -59,6 +60,7 @@ _DEFAULT_MODELS: dict[str, str] = {
 
 #: Base URL for each cloud provider's OpenAI-compatible endpoint.
 _DEFAULT_BASE_URLS: dict[str, str] = {
+    "ollama_cloud": "https://ollama.com/v1",
     "groq": "https://api.groq.com/openai/v1",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
     "deepseek": "https://api.deepseek.com/v1",
@@ -96,7 +98,7 @@ def get_provider(
     from forge.config import get_settings
 
     settings = get_settings()
-    resolved_provider = (provider_name or settings.llm_provider or "fake").lower().strip()
+    resolved_provider = (provider_name or settings.llm_provider or "fake").lower().strip().replace("-", "_")
 
     if resolved_provider == "fake":
         resolved_model = model or settings.llm_model or _DEFAULT_MODELS["fake"]
@@ -104,6 +106,9 @@ def get_provider(
 
     if resolved_provider == "ollama":
         return _build_ollama_provider(model=model, settings=settings)
+
+    if resolved_provider == "ollama_cloud":
+        return _build_ollama_cloud_provider(model=model, settings=settings)
 
     if resolved_provider == "groq":
         return _build_groq_provider(model=model, settings=settings)
@@ -119,9 +124,10 @@ def get_provider(
 
     raise LLMUnavailableError(
         f"Unknown LLM provider '{resolved_provider}'. "
-        "Supported providers: fake, ollama, groq, gemini, deepseek, openai. "
+        "Supported providers: fake, ollama, ollama_cloud, groq, gemini, deepseek, openai. "
         "Set FORGE_LLM_PROVIDER to one of these values."
     )
+
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +157,28 @@ def _build_ollama_provider(model, settings) -> OpenAICompatibleProvider:
         api_base=api_base,
     )
     return provider
+
+
+def _build_ollama_cloud_provider(model, settings) -> OpenAICompatibleProvider:
+    """Build an Ollama Cloud provider (hosted at https://ollama.com/v1)."""
+    api_key = (
+        getattr(settings, "ollama_api_key", None)
+        or os.environ.get("OLLAMA_API_KEY")
+        or ""
+    ).strip()
+    if not api_key:
+        raise LLMUnavailableError(
+            "Ollama Cloud provider requires OLLAMA_API_KEY to be set. "
+            "Add it to your .env file or environment. "
+            "No automatic fallback is performed."
+        )
+    api_base = settings.llm_api_base or _DEFAULT_BASE_URLS["ollama_cloud"]
+    resolved_model = model or settings.llm_model or _DEFAULT_MODELS["ollama_cloud"]
+    return OpenAICompatibleProvider(
+        api_key=api_key,
+        model=resolved_model,
+        api_base=api_base,
+    )
 
 
 def _build_groq_provider(model, settings) -> OpenAICompatibleProvider:
@@ -257,7 +285,7 @@ def describe_provider(provider_name: Optional[str] = None) -> dict:
     from forge.config import get_settings
 
     settings = get_settings()
-    resolved = (provider_name or settings.llm_provider or "fake").lower().strip()
+    resolved = (provider_name or settings.llm_provider or "fake").lower().strip().replace("-", "_")
 
     if resolved == "fake":
         return {
@@ -279,6 +307,7 @@ def describe_provider(provider_name: Optional[str] = None) -> dict:
         }
 
     key_checks = {
+        "ollama_cloud": bool(getattr(settings, "ollama_api_key", None) or os.environ.get("OLLAMA_API_KEY")),
         "groq": bool(getattr(settings, "groq_api_key", None) or os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_API") or settings.llm_api_key),
         "gemini": bool(getattr(settings, "gemini_api_key", None) or os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API") or settings.llm_api_key),
         "deepseek": bool(getattr(settings, "deepseek_api_key", None) or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API") or settings.llm_api_key),
