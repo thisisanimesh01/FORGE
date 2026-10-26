@@ -22,9 +22,15 @@ Phase 2: Diff-Aware Intelligent Review   ── [COMPLETED] (Milestones 1–6)
 Phase 3: Defect Reproduction & Verification ── [COMPLETED] (Milestones 1–6)
 Pre-Phase 4: Local Ollama & Multi-Provider LLM Integration ── [COMPLETED]
 Phase 4 Readiness & Sandbox Gate        ── [COMPLETED]
-Phase 4: Targeted Autonomous Repair     ── [NOT STARTED]
+Phase 4: Targeted Autonomous Repair     ── [IN PROGRESS] (Milestone 1 Completed)
 Phase 5: Regression & Safety Verification ── [PLANNED]
 ```
+
+### Phase 4: Targeted Autonomous Repair (In Progress)
+- **M1 — Evidence-Grounded Repair Planning & Patch Generation (Implemented)**: Converts calibrated findings and verified reproduction evidence into structured, bounded repair plans and candidate unified diffs. Enforces strict evidence grounding (ungrounded findings rejected), prompt-injection mitigation via untrusted context framing, protected file immunity (`AGENTS.md`, `README.md`, `.gitignore`, `pyproject.toml`, `.github/*`), strict size budgeting ($\le 100$ lines, $\le 5$ hunks, $\le 1$ file, $\le 20$ KB), target repository immutability, mandatory human approval gates, and SQLite persistence.
+- **M2 — Patch Evaluation & Regression Verification (Planned)**: Sandboxed application of candidate patches inside isolated Docker containers to evaluate pre/post defect status and verify absence of test regressions.
+- **M3 — Repair Assessment & Human Approval Gate (Planned)**: Multi-candidate ranking, human approval CLI workflows, and exportable patch bundles.
+- **Strict Boundary Notice**: **Automated modification of target repositories, autonomous git commits, branch pushes, pull requests, merges, and deployments remain strictly FORBIDDEN.**
 
 ### Phase 4 Readiness & Sandbox Gate (Completed)
 - **Container Sandbox & Host Isolation Audit**: Complete audit of container sandbox boundaries (`DockerSandbox`, `ReproductionHarness`). Verified that when Docker is absent (`shutil.which("docker") is None`), FORGE fails closed with `SKIPPED_SANDBOX_UNAVAILABLE` and strictly refuses to execute target repository code directly on the host.
@@ -92,6 +98,26 @@ forge doctor
 
 # Inspect sandbox runtime health, container configuration, and isolation limits
 forge sandbox doctor
+```
+
+### Evidence-Grounded Repair Planning & Patch Candidates (Phase 4 Milestone 1)
+```bash
+# Generate a bounded repair plan and candidate patch from an audited finding
+forge repair plan find_01 --repo /path/to/repo --commit a1b2c3d4e5f6 --provider ollama
+
+# Generate plan and export full structured JSON artifact
+forge repair plan find_01 --output plans/plan_find_01.json --format json
+
+# Inspect an existing repair plan and unified diff patch candidate
+forge repair show plans/plan_find_01.json
+forge repair show rpl_find_01_a1b2c3d4_7e3b9a1d
+
+# Validate an existing repair plan offline against safety, scope, and budget rules
+forge repair validate plans/plan_find_01.json
+
+# List historical repair plans stored in SQLite
+forge repair list
+forge repair list --finding-id find_01
 ```
 
 ### Isolated Defect Reproduction Contracts (Phase 3 Milestone 1)
@@ -287,4 +313,6 @@ cp .env.example .env
   - Ollama Cloud Provider Integration: [`docs/specs/ollama-cloud-provider.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/ollama-cloud-provider.md)
   - Removal of OpenAI API Provider: [`docs/specs/remove-openai-provider.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/remove-openai-provider.md)
   - Phase 4 Readiness & Sandbox Gate: [`docs/specs/phase-4-readiness.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-readiness.md)
+- Phase 4 Specifications:
+  - Evidence-Grounded Repair Planning & Patch Generation: [`docs/specs/phase-4-m1-repair-planning.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m1-repair-planning.md)
 - Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)

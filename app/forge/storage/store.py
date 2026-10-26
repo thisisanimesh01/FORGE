@@ -464,3 +464,83 @@ class ForgeStore:
             ]
         finally:
             conn.close()
+
+    # ---------------------------------------------------------
+    # Repair Plans API
+    # ---------------------------------------------------------
+    def save_repair_plan(self, plan: Any) -> None:
+        """Persist or update a repair plan in SQLite."""
+        from forge.repair.models import RepairPlan
+
+        plan_model = plan if isinstance(plan, RepairPlan) else RepairPlan.model_validate(plan)
+        now = datetime.now(timezone.utc).isoformat()
+        plan_json = plan_model.model_dump_json()
+        val_json = plan_model.validation.model_dump_json() if plan_model.validation else "{}"
+        diff_text = plan_model.patch_candidate.unified_diff if plan_model.patch_candidate else None
+
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO repair_plans (
+                        plan_id, finding_id, run_id, base_commit_sha, target_repo,
+                        status, target_file, plan_json, patch_diff, validation_json,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(plan_id) DO UPDATE SET
+                        status = excluded.status,
+                        plan_json = excluded.plan_json,
+                        patch_diff = excluded.patch_diff,
+                        validation_json = excluded.validation_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        plan_model.plan_id,
+                        plan_model.finding_id,
+                        plan_model.run_id,
+                        plan_model.base_commit_sha,
+                        plan_model.target_repo,
+                        plan_model.status.value,
+                        plan_model.target_file,
+                        plan_json,
+                        diff_text,
+                        val_json,
+                        plan_model.created_at.isoformat(),
+                        now,
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def get_repair_plan(self, plan_id: str) -> Optional[Any]:
+        """Retrieve a repair plan by ID."""
+        from forge.repair.models import RepairPlan
+
+        conn = self._conn()
+        try:
+            cur = conn.execute("SELECT plan_json FROM repair_plans WHERE plan_id = ?", (plan_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            return RepairPlan.model_validate_json(row["plan_json"])
+        finally:
+            conn.close()
+
+    def list_repair_plans(self, finding_id: Optional[str] = None) -> List[Any]:
+        """List repair plans, optionally filtered by finding_id."""
+        from forge.repair.models import RepairPlan
+
+        conn = self._conn()
+        try:
+            if finding_id:
+                cur = conn.execute(
+                    "SELECT plan_json FROM repair_plans WHERE finding_id = ? ORDER BY created_at DESC",
+                    (finding_id,),
+                )
+            else:
+                cur = conn.execute("SELECT plan_json FROM repair_plans ORDER BY created_at DESC")
+            rows = cur.fetchall()
+            return [RepairPlan.model_validate_json(r["plan_json"]) for r in rows]
+        finally:
+            conn.close()

@@ -142,6 +142,22 @@ CREATE TABLE IF NOT EXISTS reproduction_classifications (
     FOREIGN KEY(case_id) REFERENCES reproduction_cases(case_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS repair_plans (
+    plan_id TEXT PRIMARY KEY,
+    finding_id TEXT NOT NULL,
+    run_id TEXT,
+    base_commit_sha TEXT NOT NULL,
+    target_repo TEXT NOT NULL,
+    status TEXT NOT NULL,
+    target_file TEXT NOT NULL,
+    plan_json TEXT NOT NULL,
+    patch_diff TEXT,
+    validation_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(finding_id) REFERENCES findings(finding_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
@@ -151,6 +167,7 @@ CREATE INDEX IF NOT EXISTS idx_reproduction_cases_finding ON reproduction_cases(
 CREATE INDEX IF NOT EXISTS idx_reproduction_attempts_case ON reproduction_attempts(case_id, attempt_number);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_reproduction_attempts_case_num ON reproduction_attempts(case_id, attempt_number);
 CREATE INDEX IF NOT EXISTS idx_reproduction_classifications_case ON reproduction_classifications(case_id);
+CREATE INDEX IF NOT EXISTS idx_repair_plans_finding ON repair_plans(finding_id);
 """
 
 

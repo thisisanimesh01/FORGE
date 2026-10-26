@@ -24,6 +24,14 @@ from forge.repair.contracts import (
     validate_base_sha,
     verify_workspace_containment,
 )
+from forge.repair.models import (
+    PlanValidationResult,
+    ProtectedPathPolicy,
+    RepairModelResponseSchema,
+    RepairPlan,
+    RepairPlanStatus,
+)
+from forge.repair.planner import RepairPlanner
 
 __all__ = [
     "AutonomousMutationForbiddenError",
@@ -31,11 +39,17 @@ __all__ = [
     "HumanApprovalRequiredError",
     "PatchCandidate",
     "PatchValidationResult",
+    "PlanValidationResult",
+    "ProtectedPathPolicy",
     "RepairAuditRecord",
     "RepairBudget",
     "RepairEvaluationPrePost",
     "RepairLifecycleState",
+    "RepairModelResponseSchema",
     "RepairOutcome",
+    "RepairPlan",
+    "RepairPlanStatus",
+    "RepairPlanner",
     "RepairSafetyContract",
     "RepairSafetyError",
     "ScopeContainmentError",

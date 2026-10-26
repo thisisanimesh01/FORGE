@@ -23,6 +23,7 @@ benchmark_app = typer.Typer(help="Benchmark evaluation commands.")
 policy_app = typer.Typer(help="CI review policy check and enforcement commands.")
 repro_app = typer.Typer(help="Reproduction case management and execution commands.")
 plan_app = typer.Typer(help="Deterministic reproduction plan generation, validation, and execution commands.")
+repair_app = typer.Typer(help="Evidence-grounded repair planning and patch candidate commands.")
 app.add_typer(db_app, name="db")
 app.add_typer(findings_app, name="findings")
 app.add_typer(sandbox_app, name="sandbox")
@@ -30,6 +31,7 @@ app.add_typer(benchmark_app, name="benchmark")
 app.add_typer(policy_app, name="policy")
 app.add_typer(repro_app, name="repro")
 app.add_typer(plan_app, name="plan")
+app.add_typer(repair_app, name="repair")
 
 
 
@@ -1498,6 +1500,230 @@ def plan_classify(
     if outcome == ClassificationOutcome.INVALID_PLAN:
         raise typer.Exit(code=2)
 
+
+# =============================================================================
+# Repair Planning & Patch Generation CLI Commands (Phase 4 M1)
+# =============================================================================
+
+@repair_app.command(name="plan")
+def repair_plan(
+    finding_id: str = typer.Argument(..., help="Finding ID to generate repair plan for"),
+    repo: str = typer.Option(".", "--repo", "-r", help="Target repository directory path"),
+    commit: Optional[str] = typer.Option(None, "--commit", "-c", help="Pinned base commit revision"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider (fake, ollama, groq, etc.)"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="LLM model identifier override"),
+    scratch: Optional[Path] = typer.Option(None, "--scratch", help="Isolated scratch workspace directory"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="File path to save repair plan JSON"),
+    format: str = typer.Option("markdown", "--format", "-f", help="Output format: markdown or json"),
+) -> None:
+    """Generate an evidence-grounded, bounded repair plan and patch candidate."""
+    from forge.repair.models import RepairPlanStatus
+    from forge.repair.planner import RepairPlanner
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    store = ForgeStore(db_path=settings.db_path)
+    target_path = Path(repo).resolve()
+
+    if not target_path.exists():
+        typer.secho(f"Error: Target repository path '{repo}' does not exist.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    planner = RepairPlanner(
+        provider_name=provider,
+        model_name=model,
+    )
+
+    plan = planner.plan_repair(
+        finding_id=finding_id,
+        target_repo=target_path,
+        base_commit_sha=commit,
+        scratch_workspace_path=scratch,
+        store=store,
+    )
+
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(plan.model_dump_json(indent=2))
+
+    if format.lower() == "json":
+        typer.echo(plan.model_dump_json(indent=2))
+    else:
+        typer.echo(f"Repair Plan: {plan.plan_id}")
+        typer.echo(f"  Finding ID:     {plan.finding_id}")
+        typer.echo(f"  Target File:    {plan.target_file}")
+        typer.echo(f"  Base Commit:    {plan.base_commit_sha[:10]}...")
+        typer.echo(f"  Status:         {plan.status.value.upper()}")
+        typer.echo(f"  Confidence:     {plan.confidence:.2f}")
+        typer.echo(f"  Approval Gate:  {'REQUIRED' if plan.require_human_approval else 'OPTIONAL'}")
+        typer.echo(f"  Root Cause:     {plan.root_cause}")
+        typer.echo(f"  Proposed Fix:   {plan.proposed_change}")
+        typer.echo(f"  Verification:   {plan.verification_plan}")
+
+        if plan.regression_risks:
+            typer.echo(f"  Regression Risks: {', '.join(plan.regression_risks)}")
+
+        if plan.validation and plan.validation.violations:
+            typer.echo("  Violations:")
+            for v in plan.validation.violations:
+                typer.echo(f"    - {v}")
+
+        if plan.patch_candidate:
+            typer.echo(f"\n--- Candidate Patch ({plan.patch_candidate.patch_id}) ---")
+            typer.echo(f"Hunks: {plan.patch_candidate.hunk_count} | +{plan.patch_candidate.added_lines} / -{plan.patch_candidate.removed_lines} lines")
+            typer.echo(plan.patch_candidate.unified_diff)
+
+    if plan.status == RepairPlanStatus.BLOCKED:
+        raise typer.Exit(code=3)
+    elif plan.status == RepairPlanStatus.REJECTED:
+        raise typer.Exit(code=1)
+
+
+@repair_app.command(name="show")
+def repair_show(
+    plan_ref: str = typer.Argument(..., help="Plan ID or path to plan JSON file"),
+    format: str = typer.Option("markdown", "--format", "-f", help="Output format: markdown or json"),
+) -> None:
+    """Display an existing repair plan and candidate patch."""
+    from forge.repair.models import RepairPlan
+    from forge.storage.store import ForgeStore
+
+    plan: Optional[RepairPlan] = None
+    ref_path = Path(plan_ref)
+
+    if ref_path.is_file():
+        try:
+            plan = RepairPlan.model_validate_json(ref_path.read_text())
+        except Exception as e:
+            typer.secho(f"Error reading plan JSON file: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+    else:
+        settings = get_settings()
+        store = ForgeStore(db_path=settings.db_path)
+        plan = store.get_repair_plan(plan_ref)
+
+    if not plan:
+        typer.secho(f"Repair plan '{plan_ref}' not found.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if format.lower() == "json":
+        typer.echo(plan.model_dump_json(indent=2))
+        return
+
+    typer.echo(f"Repair Plan: {plan.plan_id}")
+    typer.echo(f"  Finding ID:     {plan.finding_id}")
+    typer.echo(f"  Target File:    {plan.target_file}")
+    typer.echo(f"  Base Revision:  {plan.base_commit_sha}")
+    typer.echo(f"  Status:         {plan.status.value.upper()}")
+    typer.echo(f"  Confidence:     {plan.confidence:.2f}")
+    typer.echo(f"  Human Approval: {'REQUIRED' if plan.require_human_approval else 'DISABLED'}")
+    typer.echo(f"  Root Cause:     {plan.root_cause}")
+    typer.echo(f"  Proposed Fix:   {plan.proposed_change}")
+    typer.echo(f"  Verification:   {plan.verification_plan}")
+
+    if plan.patch_candidate:
+        typer.echo(f"\n--- Unified Diff Candidate ({plan.patch_candidate.patch_id}) ---")
+        typer.echo(plan.patch_candidate.unified_diff)
+
+
+@repair_app.command(name="validate")
+def repair_validate(
+    plan_ref: str = typer.Argument(..., help="Plan ID or path to plan JSON file"),
+    format: str = typer.Option("markdown", "--format", "-f", help="Output format: markdown or json"),
+) -> None:
+    """Validate an existing repair plan and patch candidate offline against security bounds."""
+    from forge.repair.contracts import RepairBudget, RepairSafetyContract, parse_and_validate_unified_diff
+    from forge.repair.models import ProtectedPathPolicy, RepairPlan
+    from forge.storage.store import ForgeStore
+
+    plan: Optional[RepairPlan] = None
+    ref_path = Path(plan_ref)
+
+    if ref_path.is_file():
+        try:
+            plan = RepairPlan.model_validate_json(ref_path.read_text())
+        except Exception as e:
+            typer.secho(f"Error reading plan file: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=2)
+    else:
+        settings = get_settings()
+        store = ForgeStore(db_path=settings.db_path)
+        plan = store.get_repair_plan(plan_ref)
+
+    if not plan:
+        typer.secho(f"Repair plan '{plan_ref}' not found.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    violations: List[str] = []
+
+    # Check protected path
+    is_prot, prot_msg = ProtectedPathPolicy.is_protected(plan.target_file)
+    if is_prot:
+        violations.append(f"Target file '{plan.target_file}' is protected: {prot_msg}")
+
+    # Check patch if present
+    if plan.patch_candidate:
+        contract = RepairSafetyContract(
+            contract_id=f"rep_val_{plan.plan_id}",
+            finding_id=plan.finding_id,
+            base_commit_sha=plan.base_commit_sha,
+            target_repo_path=Path(plan.target_repo),
+            scratch_workspace_path=Path(plan.target_repo).parent / f"scratch_{plan.finding_id}",
+            allowed_files=[plan.target_file],
+            budget=RepairBudget(),
+        )
+        is_diff_valid, diff_violations, _ = parse_and_validate_unified_diff(
+            contract, plan.patch_candidate.unified_diff
+        )
+        if not is_diff_valid:
+            violations.extend(diff_violations)
+    else:
+        violations.append("Plan does not contain a patch candidate")
+
+    is_valid = len(violations) == 0
+
+    if format.lower() == "json":
+        typer.echo(json.dumps({
+            "plan_id": plan.plan_id,
+            "is_valid": is_valid,
+            "violations": violations,
+        }, indent=2))
+    else:
+        typer.echo(f"Repair Plan Validation: {plan.plan_id}")
+        typer.echo(f"  Valid:       {'YES' if is_valid else 'NO'}")
+        if violations:
+            typer.echo("  Violations:")
+            for v in violations:
+                typer.echo(f"    - {v}")
+
+    if not is_valid:
+        raise typer.Exit(code=1)
+
+
+@repair_app.command(name="list")
+def repair_list(
+    finding_id: Optional[str] = typer.Option(None, "--finding-id", "-r", help="Filter plans by finding ID"),
+    format: str = typer.Option("table", "--format", "-f", help="Output format: table or json"),
+) -> None:
+    """List historical repair plans stored in SQLite."""
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    store = ForgeStore(db_path=settings.db_path)
+    plans = store.list_repair_plans(finding_id=finding_id)
+
+    if not plans:
+        typer.echo("No repair plans found.")
+        return
+
+    if format.lower() == "json":
+        typer.echo(json.dumps([p.model_dump() for p in plans], default=str, indent=2))
+        return
+
+    typer.echo(f"{'Plan ID':<35} {'Finding ID':<20} {'Target File':<25} {'Status':<12}")
+    typer.echo("-" * 92)
+    for p in plans:
+        typer.echo(f"{p.plan_id:<35} {p.finding_id:<20} {p.target_file[:24]:<25} {p.status.value:<12}")
 
 
 def main() -> None:
