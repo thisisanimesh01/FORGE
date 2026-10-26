@@ -20,11 +20,16 @@ FORGE is an enterprise-grade autonomous software engineering intelligence platfo
 Phase 1: Secure Repository Intelligence  ── [COMPLETED] (Milestones 1–7)
 Phase 2: Diff-Aware Intelligent Review   ── [COMPLETED] (Milestones 1–6)
 Phase 3: Defect Reproduction & Verification ── [COMPLETED] (Milestones 1–6)
-Phase 3→4 Transition: Provider Credentials ── [COMPLETED]
-Phase 4: Targeted Autonomous Repair     ── [PLANNED]
+Pre-Phase 4: Local Ollama & Multi-Provider LLM Integration ── [COMPLETED]
+Phase 4: Targeted Autonomous Repair     ── [NOT STARTED]
 Phase 5: Regression & Safety Verification ── [PLANNED]
-
 ```
+
+### Pre-Phase 4: Local Ollama & Multi-Provider LLM Integration (Completed)
+- **Local Ollama Runtime**: Default local execution via Ollama (`http://localhost:11434/v1`) with zero cloud credential requirements. Hardware resource analysis (8 GB M1, 13 GiB available disk) establishing suitability of compact coding models (`qwen2.5-coder:1.5b` or `llama3.2:3b`).
+- **Multi-Cloud Integration**: Standard `httpx` OpenAI-compatible support for Groq (`GROQ_API_KEY` / `GROQ_API`), Google Gemini (`GEMINI_API_KEY` / `GEMINI_API`), DeepSeek (`DEEPSEEK_API_KEY` / `DEEPSEEK_API`), and OpenAI (`FORGE_LLM_API_KEY`) with zero extra SDK dependencies.
+- **Fail-Secure Architecture**: Strict cloud fallback prohibition (`FORGE_ALLOW_CLOUD_FALLBACK=false`), bounded transient 5xx retries, typed rate-limit and authentication error mapping, and automated token scrubbing.
+
 
 ### Phase 1: Secure Repository Intelligence (Completed)
 - **M1 — Architecture Baseline & Workspace Isolation**: Safe HTTPS/local repository acquisition, path traversal guards, and git hook suppression.
@@ -262,6 +267,7 @@ cp .env.example .env
   - Outcome Classification & Evidence Validation: [`docs/specs/phase-3-milestone-4.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-4.md)
   - Reproduction Reliability & Regression Hardening: [`docs/specs/phase-3-milestone-5.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-5.md)
   - End-to-End Reproduction Acceptance: [`docs/specs/phase-3-milestone-6.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-6.md)
-- Phase 3→4 Transition:
+- Phase 3→4 Transition & Pre-Phase 4:
   - Multi-Provider Configuration & Credential Reuse: [`docs/specs/phase-3-provider-transition.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-provider-transition.md)
+  - Local Ollama & Multi-Provider LLM Integration: [`docs/specs/pre-phase-4-llm-providers.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/pre-phase-4-llm-providers.md)
 - Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)

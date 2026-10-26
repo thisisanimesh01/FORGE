@@ -30,6 +30,7 @@ class OpenAICompatibleProvider:
         model: Optional[str] = None,
         api_base: Optional[str] = None,
         timeout_seconds: float = 60.0,
+        max_retries: int = 1,
         http_client: Optional[httpx.Client] = None,
     ):
         settings = get_settings()
@@ -38,6 +39,7 @@ class OpenAICompatibleProvider:
         raw_base = api_base or settings.llm_api_base or "https://api.openai.com/v1"
         self.api_base = raw_base.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.max_retries = max(0, max_retries)
         self._custom_client = http_client
 
     def is_available(self) -> bool:
@@ -128,13 +130,24 @@ class OpenAICompatibleProvider:
         payload = self._build_payload(request)
         client = self._get_client()
 
-        try:
-            resp = client.post(endpoint, json=payload, headers=headers)
-        except httpx.TimeoutException as exc:
-            raise LLMUnavailableError(f"LLM request timed out after {self.timeout_seconds}s: {exc}")
-        except httpx.RequestError as exc:
-            sanitized_err = redact_secrets(str(exc))
-            raise LLMUnavailableError(f"Network error connecting to LLM provider at {self.api_base}: {sanitized_err}")
+        total_attempts = 1 + self.max_retries
+        resp: Optional[httpx.Response] = None
+
+        for attempt in range(total_attempts):
+            try:
+                resp = client.post(endpoint, json=payload, headers=headers)
+                if resp.status_code >= 500 and attempt < total_attempts - 1:
+                    continue
+                break
+            except httpx.TimeoutException as exc:
+                if attempt == total_attempts - 1:
+                    raise LLMUnavailableError(f"LLM request timed out after {self.timeout_seconds}s: {exc}")
+            except httpx.RequestError as exc:
+                if attempt == total_attempts - 1:
+                    sanitized_err = redact_secrets(str(exc))
+                    raise LLMUnavailableError(f"Network error connecting to LLM provider at {self.api_base}: {sanitized_err}")
+
+        assert resp is not None  # Guard for type-checker
 
         # Handle HTTP error status codes
         if resp.status_code == 401 or resp.status_code == 403:

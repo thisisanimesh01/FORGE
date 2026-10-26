@@ -131,9 +131,9 @@ def get_provider(
 
 def _build_ollama_provider(model, settings) -> OpenAICompatibleProvider:
     """Build an Ollama provider (local, no API key required)."""
-    # Ollama uses its own env var name to match Friday's convention.
     ollama_base = (
-        os.environ.get("OLLAMA_BASE_URL")
+        getattr(settings, "ollama_base_url", None)
+        or os.environ.get("OLLAMA_BASE_URL")
         or settings.llm_api_base
         or "http://localhost:11434"
     ).rstrip("/")
@@ -156,7 +156,9 @@ def _build_ollama_provider(model, settings) -> OpenAICompatibleProvider:
 def _build_groq_provider(model, settings) -> OpenAICompatibleProvider:
     """Build a Groq Cloud provider."""
     api_key = (
-        os.environ.get("GROQ_API_KEY")
+        getattr(settings, "groq_api_key", None)
+        or os.environ.get("GROQ_API_KEY")
+        or os.environ.get("GROQ_API")
         or settings.llm_api_key
         or ""
     ).strip()
@@ -178,7 +180,9 @@ def _build_groq_provider(model, settings) -> OpenAICompatibleProvider:
 def _build_gemini_provider(model, settings) -> OpenAICompatibleProvider:
     """Build a Gemini provider using Google's OpenAI-compatible shim."""
     api_key = (
-        os.environ.get("GEMINI_API_KEY")
+        getattr(settings, "gemini_api_key", None)
+        or os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GEMINI_API")
         or settings.llm_api_key
         or ""
     ).strip()
@@ -200,7 +204,9 @@ def _build_gemini_provider(model, settings) -> OpenAICompatibleProvider:
 def _build_deepseek_provider(model, settings) -> OpenAICompatibleProvider:
     """Build a DeepSeek provider."""
     api_key = (
-        os.environ.get("DEEPSEEK_API_KEY")
+        getattr(settings, "deepseek_api_key", None)
+        or os.environ.get("DEEPSEEK_API_KEY")
+        or os.environ.get("DEEPSEEK_API")
         or settings.llm_api_key
         or ""
     ).strip()
@@ -263,7 +269,7 @@ def describe_provider(provider_name: Optional[str] = None) -> dict:
         }
 
     if resolved == "ollama":
-        base = os.environ.get("OLLAMA_BASE_URL") or settings.llm_api_base or "http://localhost:11434"
+        base = getattr(settings, "ollama_base_url", None) or os.environ.get("OLLAMA_BASE_URL") or settings.llm_api_base or "http://localhost:11434"
         return {
             "provider": "ollama",
             "model": settings.llm_model or _DEFAULT_MODELS["ollama"],
@@ -272,14 +278,13 @@ def describe_provider(provider_name: Optional[str] = None) -> dict:
             "requires_network": False,        # Local by default
         }
 
-    key_vars = {
-        "groq": "GROQ_API_KEY",
-        "gemini": "GEMINI_API_KEY",
-        "deepseek": "DEEPSEEK_API_KEY",
-        "openai": "FORGE_LLM_API_KEY",
+    key_checks = {
+        "groq": bool(getattr(settings, "groq_api_key", None) or os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_API") or settings.llm_api_key),
+        "gemini": bool(getattr(settings, "gemini_api_key", None) or os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API") or settings.llm_api_key),
+        "deepseek": bool(getattr(settings, "deepseek_api_key", None) or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API") or settings.llm_api_key),
+        "openai": bool(settings.llm_api_key),
     }
-    key_env = key_vars.get(resolved, "FORGE_LLM_API_KEY")
-    key_set = bool((os.environ.get(key_env) or settings.llm_api_key or "").strip())
+    key_set = key_checks.get(resolved, False)
     base = settings.llm_api_base or _DEFAULT_BASE_URLS.get(resolved, "unknown")
 
     return {

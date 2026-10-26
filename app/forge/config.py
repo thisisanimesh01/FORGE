@@ -4,7 +4,7 @@ import os
 import re
 from pathlib import Path
 from typing import List, Optional
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -63,6 +63,28 @@ class ForgeSettings(BaseSettings):
     llm_model: str = Field(default="", description="Model identifier (provider default used when empty)")
     llm_api_base: Optional[str] = Field(default=None, description="Custom API endpoint base URL override")
 
+    # Per-provider credentials and configuration (supports *_API_KEY and *_API conventions)
+    groq_api_key: str = Field(
+        default="",
+        description="API key for Groq Cloud",
+        validation_alias=AliasChoices("GROQ_API_KEY", "GROQ_API", "FORGE_GROQ_API_KEY"),
+    )
+    gemini_api_key: str = Field(
+        default="",
+        description="API key for Google Gemini",
+        validation_alias=AliasChoices("GEMINI_API_KEY", "GEMINI_API", "FORGE_GEMINI_API_KEY"),
+    )
+    deepseek_api_key: str = Field(
+        default="",
+        description="API key for DeepSeek",
+        validation_alias=AliasChoices("DEEPSEEK_API_KEY", "DEEPSEEK_API", "FORGE_DEEPSEEK_API_KEY"),
+    )
+    ollama_base_url: str = Field(
+        default="http://localhost:11434",
+        description="Base URL for local Ollama server",
+        validation_alias=AliasChoices("OLLAMA_BASE_URL", "FORGE_OLLAMA_BASE_URL"),
+    )
+
     # Safety & Resource Limits
     max_steps: int = Field(default=10, description="Maximum agent execution turns per investigation")
     step_timeout_seconds: int = Field(default=60, description="Timeout in seconds per tool execution")
@@ -82,16 +104,14 @@ class ForgeSettings(BaseSettings):
     def get_sanitized_dict(self) -> dict:
         """Return configuration as dictionary with all credentials redacted."""
         raw = self.model_dump()
-        # Redact FORGE-prefixed key
-        if raw.get("llm_api_key"):
-            raw["llm_api_key"] = "[REDACTED]"
-        # Redact provider-specific keys read from environment (not in settings schema)
-        for env_var in ("GROQ_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY"):
-            val = os.environ.get(env_var, "")
-            raw[env_var.lower()] = "[REDACTED]" if val else "(not set)"
-        # Ollama base URL is not a secret — include it verbatim
-        raw["ollama_base_url"] = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        for k in ("llm_api_key", "groq_api_key", "gemini_api_key", "deepseek_api_key"):
+            if raw.get(k):
+                raw[k] = "[REDACTED]"
+            else:
+                raw[k] = "(not set)"
+        raw["ollama_base_url"] = self.ollama_base_url
         return raw
+
 
 
 def get_settings() -> ForgeSettings:

@@ -82,8 +82,11 @@ class TestGetProvider:
 
     def test_groq_provider_requires_api_key(self):
         """Groq raises LLMUnavailableError when GROQ_API_KEY is missing."""
-        env_without_groq = {k: v for k, v in os.environ.items() if k not in ("GROQ_API_KEY", "FORGE_LLM_API_KEY")}
-        with patch.dict(os.environ, env_without_groq, clear=True):
+        clean = dict(os.environ)
+        clean["GROQ_API_KEY"] = ""
+        clean["GROQ_API"] = ""
+        clean["FORGE_LLM_API_KEY"] = ""
+        with patch.dict(os.environ, clean, clear=True):
             with pytest.raises(LLMUnavailableError, match="GROQ_API_KEY"):
                 get_provider(provider_name="groq")
 
@@ -96,8 +99,11 @@ class TestGetProvider:
 
     def test_gemini_provider_requires_api_key(self):
         """Gemini raises LLMUnavailableError when GEMINI_API_KEY is missing."""
-        env_without_gemini = {k: v for k, v in os.environ.items() if k not in ("GEMINI_API_KEY", "FORGE_LLM_API_KEY")}
-        with patch.dict(os.environ, env_without_gemini, clear=True):
+        clean = dict(os.environ)
+        clean["GEMINI_API_KEY"] = ""
+        clean["GEMINI_API"] = ""
+        clean["FORGE_LLM_API_KEY"] = ""
+        with patch.dict(os.environ, clean, clear=True):
             with pytest.raises(LLMUnavailableError, match="GEMINI_API_KEY"):
                 get_provider(provider_name="gemini")
 
@@ -110,8 +116,11 @@ class TestGetProvider:
 
     def test_deepseek_provider_requires_api_key(self):
         """DeepSeek raises LLMUnavailableError when DEEPSEEK_API_KEY is missing."""
-        env_without_deepseek = {k: v for k, v in os.environ.items() if k not in ("DEEPSEEK_API_KEY", "FORGE_LLM_API_KEY")}
-        with patch.dict(os.environ, env_without_deepseek, clear=True):
+        clean = dict(os.environ)
+        clean["DEEPSEEK_API_KEY"] = ""
+        clean["DEEPSEEK_API"] = ""
+        clean["FORGE_LLM_API_KEY"] = ""
+        with patch.dict(os.environ, clean, clear=True):
             with pytest.raises(LLMUnavailableError, match="DEEPSEEK_API_KEY"):
                 get_provider(provider_name="deepseek")
 
@@ -124,8 +133,9 @@ class TestGetProvider:
 
     def test_openai_provider_requires_api_key(self):
         """OpenAI raises LLMUnavailableError when FORGE_LLM_API_KEY is missing."""
-        env_without_oai = {k: v for k, v in os.environ.items() if k != "FORGE_LLM_API_KEY"}
-        with patch.dict(os.environ, env_without_oai, clear=True):
+        clean = dict(os.environ)
+        clean["FORGE_LLM_API_KEY"] = ""
+        with patch.dict(os.environ, clean, clear=True):
             with pytest.raises(LLMUnavailableError, match="FORGE_LLM_API_KEY"):
                 get_provider(provider_name="openai")
 
@@ -201,8 +211,11 @@ class TestCloudFallbackPrevention:
 
     def test_missing_key_raises_not_falls_back(self):
         """Missing Groq key must raise, not silently fall back to fake or another provider."""
-        env_clean = {k: v for k, v in os.environ.items() if k not in ("GROQ_API_KEY", "FORGE_LLM_API_KEY")}
-        with patch.dict(os.environ, env_clean, clear=True):
+        clean = dict(os.environ)
+        clean["GROQ_API_KEY"] = ""
+        clean["GROQ_API"] = ""
+        clean["FORGE_LLM_API_KEY"] = ""
+        with patch.dict(os.environ, clean, clear=True):
             with pytest.raises(LLMUnavailableError):
                 get_provider(provider_name="groq")
         # Verify no FakeLLMProvider was silently returned
@@ -221,9 +234,12 @@ class TestCloudFallbackPrevention:
         # The setting is loaded correctly
         assert settings.allow_cloud_fallback is True
         # But the factory still raises for a provider with missing credentials.
-        env_without_groq = {k: v for k, v in os.environ.items() if k not in ("GROQ_API_KEY", "FORGE_LLM_API_KEY")}
-        env_without_groq["FORGE_ALLOW_CLOUD_FALLBACK"] = "true"
-        with patch.dict(os.environ, env_without_groq, clear=True):
+        clean = dict(os.environ)
+        clean["GROQ_API_KEY"] = ""
+        clean["GROQ_API"] = ""
+        clean["FORGE_LLM_API_KEY"] = ""
+        clean["FORGE_ALLOW_CLOUD_FALLBACK"] = "true"
+        with patch.dict(os.environ, clean, clear=True):
             with pytest.raises(LLMUnavailableError):
                 get_provider(provider_name="groq")
 
@@ -250,8 +266,11 @@ class TestDescribeProvider:
         assert info["credentials_configured"] is True  # No key needed
 
     def test_groq_describe_no_key_configured(self):
-        env_without_groq = {k: v for k, v in os.environ.items() if k not in ("GROQ_API_KEY", "FORGE_LLM_API_KEY")}
-        with patch.dict(os.environ, env_without_groq, clear=True):
+        clean = dict(os.environ)
+        clean["GROQ_API_KEY"] = ""
+        clean["GROQ_API"] = ""
+        clean["FORGE_LLM_API_KEY"] = ""
+        with patch.dict(os.environ, clean, clear=True):
             info = describe_provider("groq")
         assert info["provider"] == "groq"
         assert info["credentials_configured"] is False
@@ -337,12 +356,18 @@ class TestSecretRedaction:
 
     def test_forge_settings_unset_key_shown_as_not_set(self):
         """Keys that are not set appear as '(not set)' rather than empty."""
-        env_clean = {k: v for k, v in os.environ.items()
-                     if k not in ("GROQ_API_KEY", "GEMINI_API_KEY", "DEEPSEEK_API_KEY")}
-        with patch.dict(os.environ, env_clean, clear=True):
+        clean = dict(os.environ)
+        clean["GROQ_API_KEY"] = ""
+        clean["GROQ_API"] = ""
+        clean["GEMINI_API_KEY"] = ""
+        clean["GEMINI_API"] = ""
+        clean["DEEPSEEK_API_KEY"] = ""
+        clean["DEEPSEEK_API"] = ""
+        with patch.dict(os.environ, clean, clear=True):
             settings = ForgeSettings()
             sanitized = settings.get_sanitized_dict()
         assert sanitized.get("groq_api_key") == "(not set)"
+
 
 
 # ---------------------------------------------------------------------------
@@ -457,3 +482,93 @@ class TestOpenAICompatibleProviderEndpoints:
         with _env(OLLAMA_BASE_URL="http://localhost:11434/v1"):
             provider = get_provider(provider_name="ollama")
         assert not provider.api_base.endswith("/v1/v1")
+
+    def test_groq_api_alias_accepted(self):
+        """GROQ_API alias is accepted when GROQ_API_KEY is not set."""
+        with patch.dict(os.environ, {"GROQ_API": "gsk_alias_key"}, clear=False):
+            # Remove GROQ_API_KEY if present
+            clean = {k: v for k, v in os.environ.items() if k != "GROQ_API_KEY"}
+            clean["GROQ_API"] = "gsk_alias_key"
+            with patch.dict(os.environ, clean, clear=True):
+                provider = get_provider(provider_name="groq")
+        assert isinstance(provider, OpenAICompatibleProvider)
+        assert provider.api_key == "gsk_alias_key"
+
+    def test_gemini_api_alias_accepted(self):
+        """GEMINI_API alias is accepted when GEMINI_API_KEY is not set."""
+        clean = {k: v for k, v in os.environ.items() if k != "GEMINI_API_KEY"}
+        clean["GEMINI_API"] = "AIza_alias_key"
+        with patch.dict(os.environ, clean, clear=True):
+            provider = get_provider(provider_name="gemini")
+        assert isinstance(provider, OpenAICompatibleProvider)
+        assert provider.api_key == "AIza_alias_key"
+
+    def test_deepseek_api_alias_accepted(self):
+        """DEEPSEEK_API alias is accepted when DEEPSEEK_API_KEY is not set."""
+        clean = {k: v for k, v in os.environ.items() if k != "DEEPSEEK_API_KEY"}
+        clean["DEEPSEEK_API"] = "sk-deepseek-alias"
+        with patch.dict(os.environ, clean, clear=True):
+            provider = get_provider(provider_name="deepseek")
+        assert isinstance(provider, OpenAICompatibleProvider)
+        assert provider.api_key == "sk-deepseek-alias"
+
+
+# ---------------------------------------------------------------------------
+# 9. Bounded retries
+# ---------------------------------------------------------------------------
+
+class TestBoundedRetries:
+    """Verify bounded retry behavior for transient errors."""
+
+    def test_transient_500_retried_and_succeeds(self):
+        import httpx
+        from forge.llm.models import LLMRequest, ChatMessage, MessageRole
+
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(500, json={"error": "server error"})
+            return httpx.Response(200, json={
+                "choices": [{"message": {"content": "recovered", "role": "assistant"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            })
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(transport=transport)
+        provider = OpenAICompatibleProvider(
+            api_key="sk-test",
+            http_client=client,
+            max_retries=1,
+        )
+
+        req = LLMRequest(messages=[ChatMessage(role=MessageRole.USER, content="hi")])
+        resp = provider.generate(req)
+        assert resp.content == "recovered"
+        assert calls == 2
+
+    def test_persistent_500_raises_after_max_retries(self):
+        import httpx
+        from forge.llm.models import LLMRequest, ChatMessage, MessageRole
+
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(503, json={"error": "service unavailable"})
+
+        transport = httpx.MockTransport(handler)
+        client = httpx.Client(transport=transport)
+        provider = OpenAICompatibleProvider(
+            api_key="sk-test",
+            http_client=client,
+            max_retries=1,
+        )
+
+        req = LLMRequest(messages=[ChatMessage(role=MessageRole.USER, content="hi")])
+        with pytest.raises(LLMUnavailableError, match="service error"):
+            provider.generate(req)
+        assert calls == 2
