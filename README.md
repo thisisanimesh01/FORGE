@@ -23,8 +23,20 @@ Phase 3: Defect Reproduction & Verification ── [COMPLETED] (Milestones 1–6
 Pre-Phase 4: Local Ollama & Multi-Provider LLM Integration ── [COMPLETED]
 Phase 4 Readiness & Sandbox Gate        ── [COMPLETED]
 Phase 4: Targeted Autonomous Repair     ── [COMPLETED] (Milestones 1–6)
-Phase 5: Regression & Safety Verification ── [PLANNED]
+Phase 5: Supervised End-to-End Engineering Workflow ── [IN PROGRESS] (Kickoff & Architecture Completed)
+Phase 6: Autonomous Release & Production Hardening  ── [PLANNED]
 ```
+
+### Phase 5: Supervised End-to-End Engineering Workflow (In Progress — Kickoff Completed)
+- **Kickoff & Architectural Foundation (Completed)**: Unifies repository acquisition, diff review, defect reproduction, and bounded repair verification into a supervised defect-to-verified-fix workflow. Codifies a 17-state typed state machine (`CREATED` through `AWAITING_HUMAN_REVIEW` to terminal `APPROVED` / `REJECTED`), transactional event ledger, cryptographic revision pinning, fail-closed container boundaries (`SANDBOX_UNAVAILABLE`), honest outcome taxonomy (`NOT_REPRODUCED`, `FLAKY`, `BROKEN_BUILD`, `REGRESSION_DETECTED`), and an exportable certified Engineering Dossier (`patch.diff`, verification proof, SARIF).
+- **Milestone Sequence (Roadmap)**:
+  - *M1 — Unified Task Intake & Repository Context Pipeline*: Standardized intake contracts, base commit SHA pinning, and AST-scoped context extraction.
+  - *M2 — Supervised Workflow State Machine & Transactional Ledger*: Resumable orchestrator, optimistic concurrency control, and secret-scrubbed audit ledger.
+  - *M3 — Automated Evidence Chaining from Reproduction to Repair*: Direct forwarding of validated reproduction evidence to bounded repair planning.
+  - *M4 — Multi-Check Regression & Safety Verification*: Multi-stage container verification covering targeted test, baseline test suite, static linting, and security analysis (`bandit`).
+  - *M5 — Certified Engineering Dossier & Operator Export*: Operator-approved export containing `patch.diff`, cryptographic integrity digests, SARIF findings, and application runbook.
+  - *M6 — End-to-End Workflow Acceptance, Reliability & Release*: Comprehensive 10-domain acceptance corpus, adversarial stress tests, and formal release readiness.
+- **Strict Boundary Notice**: Target repository immutability is strictly enforced. Autonomous git commits, branch pushes, pull requests, merges, and deployments remain strictly forbidden. Automated workflow strictly halts at `AWAITING_HUMAN_REVIEW`.
 
 ### Phase 4: Targeted Autonomous Repair (Completed)
 - **M1 — Evidence-Grounded Repair Planning & Patch Generation (Implemented)**: Converts calibrated findings and verified reproduction evidence into structured, bounded repair plans and candidate unified diffs. Enforces strict evidence grounding (ungrounded findings rejected), prompt-injection mitigation via untrusted context framing, protected file immunity (`AGENTS.md`, `README.md`, `.gitignore`, `pyproject.toml`, `.github/*`), strict size budgeting ($\le 100$ lines, $\le 5$ hunks, $\le 1$ file, $\le 20$ KB), target repository immutability, mandatory human approval gates, and SQLite persistence.
@@ -403,4 +415,6 @@ cp .env.example .env
   - End-to-End Repair Reliability & Adversarial Testing: [`docs/specs/phase-4-m5-reliability.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m5-reliability.md)
   - Final Acceptance & Release Readiness: [`docs/specs/phase-4-m6-acceptance.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m6-acceptance.md)
   - Docker Integration Validation & Deterministic Test Repair: [`docs/specs/docker-integration-validation.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/docker-integration-validation.md)
+- Phase 5 Specifications:
+  - Supervised End-to-End Engineering Workflow Architecture & Roadmap: [`docs/specs/phase-5-roadmap.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-roadmap.md)
 - Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)
