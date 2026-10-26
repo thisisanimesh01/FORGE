@@ -218,21 +218,52 @@ class ReproductionPlanValidator:
                 break
 
         # ------------------------------------------------------------------ #
-        # 9. Symlink-escape check (when workspace_path is provided)
+        # 9. Symlink-escape and containment check (when workspace_path is provided)
         # ------------------------------------------------------------------ #
-        if workspace_path is not None and workspace_path.is_absolute():
-            cwd_candidate = workspace_path / norm_cwd
+        if workspace_path is not None:
             try:
-                resolved_cwd = cwd_candidate.resolve()
                 resolved_ws = workspace_path.resolve()
-                if not str(resolved_cwd).startswith(str(resolved_ws)):
+                cwd_candidate = (workspace_path / norm_cwd).resolve()
+                if not cwd_candidate.is_relative_to(resolved_ws):
                     violations.append(
-                        f"Resolved working directory '{resolved_cwd}' escapes workspace "
+                        f"Resolved working directory '{cwd_candidate}' escapes workspace "
                         f"'{resolved_ws}' (possible symlink escape)."
                     )
-            except OSError:
-                # Path doesn't exist yet — this is acceptable for pre-execution validation
+            except (OSError, ValueError):
+                # Path doesn't exist yet — acceptable for pre-execution validation
                 pass
+
+            # Check arguments for symlinks escaping workspace
+            for idx, arg in enumerate(args[1:], start=1):
+                if not arg.startswith("-") and ("/" in arg or "\\" in arg or arg):
+                    try:
+                        resolved_ws = workspace_path.resolve()
+                        arg_candidate = workspace_path / norm_cwd / arg
+                        if arg_candidate.is_symlink():
+                            resolved_arg = arg_candidate.resolve()
+                            if not resolved_arg.is_relative_to(resolved_ws):
+                                violations.append(
+                                    f"Argument at index {idx} '{arg}' is a symlink resolving "
+                                    f"to '{resolved_arg}' outside workspace '{resolved_ws}'."
+                                )
+                    except (OSError, ValueError):
+                        pass
+
+            # Stale revision detection against actual workspace if workspace is a git repository
+            if (workspace_path / ".git").exists() and plan.commit_sha:
+                from forge.repository.acquisition import run_git_command
+
+                try:
+                    cmd_res = run_git_command(["rev-parse", "HEAD"], cwd=workspace_path, timeout_seconds=5)
+                    if cmd_res.returncode == 0:
+                        obs_sha = cmd_res.stdout.strip().lower()
+                        exp_sha = plan.commit_sha.strip().lower()
+                        if not obs_sha.startswith(exp_sha) and not exp_sha.startswith(obs_sha):
+                            violations.append(
+                                f"Workspace revision '{obs_sha}' does not match plan pinned commit '{exp_sha}' (stale revision mismatch)."
+                            )
+                except Exception:
+                    pass
 
         # ------------------------------------------------------------------ #
         # 10. Commit SHA present and non-empty

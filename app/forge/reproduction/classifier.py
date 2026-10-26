@@ -282,7 +282,12 @@ class ReproductionOutcomeClassifier:
         # ------------------------------------------------------------------ #
         # Precedence 4: Execution Integrity & Evidence Quality
         # ------------------------------------------------------------------ #
-        if is_interrupted:
+        has_interrupted_signal = (
+            is_interrupted
+            or attempt.cleanup_status == "interrupted"
+            or (attempt.diagnostic_message is not None and "interrupted" in attempt.diagnostic_message.lower())
+        )
+        if has_interrupted_signal:
             return ReproductionClassification(
                 classification_id=generate_classification_id(case_id, attempt_number),
                 outcome=ClassificationOutcome.INCONCLUSIVE,

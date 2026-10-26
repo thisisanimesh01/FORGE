@@ -149,6 +149,7 @@ CREATE INDEX IF NOT EXISTS idx_transitions_finding ON finding_transitions(findin
 CREATE INDEX IF NOT EXISTS idx_run_events_sequence ON run_events(run_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_reproduction_cases_finding ON reproduction_cases(finding_id);
 CREATE INDEX IF NOT EXISTS idx_reproduction_attempts_case ON reproduction_attempts(case_id, attempt_number);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_reproduction_attempts_case_num ON reproduction_attempts(case_id, attempt_number);
 CREATE INDEX IF NOT EXISTS idx_reproduction_classifications_case ON reproduction_classifications(case_id);
 """
 

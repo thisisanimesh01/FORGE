@@ -232,21 +232,27 @@ class DockerSandbox:
                 error_msg = f"Execution exceeded timeout limit of {request.limits.timeout_seconds}s"
 
 
-            # Bound and sanitize stdout
+            # Bound and sanitize stdout with head/tail preservation
             max_out = request.limits.max_stdout_bytes
             if len(raw_out) > max_out:
                 stdout_truncated = True
-                raw_out = raw_out[:max_out]
-                stdout_text = raw_out.decode("utf-8", errors="replace") + "\n[TRUNCATED: Output byte limit reached]"
+                half = max_out // 2
+                omitted = len(raw_out) - max_out
+                head_str = raw_out[:half].decode("utf-8", errors="replace")
+                tail_str = raw_out[-half:].decode("utf-8", errors="replace")
+                stdout_text = f"{head_str}\n\n[TRUNCATED: Output byte limit reached; {omitted} bytes omitted]\n\n{tail_str}"
             else:
                 stdout_text = raw_out.decode("utf-8", errors="replace")
 
-            # Bound and sanitize stderr
+            # Bound and sanitize stderr with head/tail preservation
             max_err = request.limits.max_stderr_bytes
             if len(raw_err) > max_err:
                 stderr_truncated = True
-                raw_err = raw_err[:max_err]
-                stderr_text = raw_err.decode("utf-8", errors="replace") + "\n[TRUNCATED: Output byte limit reached]"
+                half = max_err // 2
+                omitted = len(raw_err) - max_err
+                head_str = raw_err[:half].decode("utf-8", errors="replace")
+                tail_str = raw_err[-half:].decode("utf-8", errors="replace")
+                stderr_text = f"{head_str}\n\n[TRUNCATED: Output byte limit reached; {omitted} bytes omitted]\n\n{tail_str}"
             else:
                 stderr_text = raw_err.decode("utf-8", errors="replace")
 

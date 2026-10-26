@@ -419,7 +419,13 @@ def repro_run(
             current_commit_sha=acquired.resolved_commit_sha,
             is_resume=resume,
         )
-    except (StaleRevisionError, NonIdempotentRetryError, CaseManagementError) as e:
+    except StaleRevisionError as e:
+        typer.secho(f"Stale revision error: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    except NonIdempotentRetryError as e:
+        typer.secho(f"Non-idempotent retry refused: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except CaseManagementError as e:
         typer.secho(f"Reproduction attempt aborted: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
     finally:
@@ -427,23 +433,36 @@ def repro_run(
 
     if format.lower() == "json":
         typer.echo(json.dumps(attempt.model_dump(mode="json"), indent=2))
-        return
+    else:
+        color = typer.colors.GREEN if attempt.outcome == ReproductionOutcome.REPRODUCED else (
+            typer.colors.YELLOW if attempt.outcome in [ReproductionOutcome.BLOCKED, ReproductionOutcome.SKIPPED_SANDBOX_UNAVAILABLE] else typer.colors.RED
+        )
+        typer.secho(f"\nAttempt #{attempt.attempt_number} Result: {attempt.outcome.value.upper()}", fg=color, bold=True)
+        if attempt.diagnostic_message:
+            typer.echo(f"Details:    {attempt.diagnostic_message}")
+        if attempt.exit_code is not None:
+            typer.echo(f"Exit Code:  {attempt.exit_code}")
+        typer.echo(f"Duration:   {attempt.duration_ms:.1f}ms")
+        if attempt.evidence_id:
+            typer.echo(f"Evidence:   {attempt.evidence_id}")
 
-    color = typer.colors.GREEN if attempt.outcome == ReproductionOutcome.REPRODUCED else (
-        typer.colors.YELLOW if attempt.outcome in [ReproductionOutcome.BLOCKED, ReproductionOutcome.SKIPPED_SANDBOX_UNAVAILABLE] else typer.colors.RED
-    )
-    typer.secho(f"\nAttempt #{attempt.attempt_number} Result: {attempt.outcome.value.upper()}", fg=color, bold=True)
-    if attempt.diagnostic_message:
-        typer.echo(f"Details:    {attempt.diagnostic_message}")
-    if attempt.exit_code is not None:
-        typer.echo(f"Exit Code:  {attempt.exit_code}")
-    typer.echo(f"Duration:   {attempt.duration_ms:.1f}ms")
-    if attempt.evidence_id:
-        typer.echo(f"Evidence:   {attempt.evidence_id}")
-
-    if attempt.outcome == ReproductionOutcome.ERROR:
+    # Standardized exit codes across reproduction commands:
+    # 0 = REPRODUCED
+    # 1 = NOT_REPRODUCED / FAILED / PASSED
+    # 2 = ERROR / STALE_REVISION
+    # 3 = BLOCKED / SKIPPED_SANDBOX_UNAVAILABLE
+    # 4 = TIMEOUT / INCONCLUSIVE
+    if attempt.outcome == ReproductionOutcome.REPRODUCED:
+        raise typer.Exit(code=0)
+    elif attempt.outcome in [ReproductionOutcome.NOT_REPRODUCED, ReproductionOutcome.PASSED, ReproductionOutcome.FAILED]:
+        raise typer.Exit(code=1)
+    elif attempt.outcome == ReproductionOutcome.ERROR:
         raise typer.Exit(code=2)
-    elif attempt.outcome in [ReproductionOutcome.FAILED, ReproductionOutcome.TIMEOUT]:
+    elif attempt.outcome in [ReproductionOutcome.BLOCKED, ReproductionOutcome.SKIPPED_SANDBOX_UNAVAILABLE]:
+        raise typer.Exit(code=3)
+    elif attempt.outcome in [ReproductionOutcome.TIMEOUT, ReproductionOutcome.INCONCLUSIVE]:
+        raise typer.Exit(code=4)
+    else:
         raise typer.Exit(code=1)
 
 

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 from typing import Any, Dict, List, Optional
 import uuid
 
@@ -119,7 +120,7 @@ class ReproductionCaseManager:
             is_idempotent=is_idempotent,
         )
 
-        p_map = provenance_map or {
+        default_map = {
             "finding_id": FieldProvenance.STATIC_ANALYSIS,
             "target_repo": FieldProvenance.USER_INPUT,
             "target_commit_sha": FieldProvenance.USER_INPUT,
@@ -128,6 +129,9 @@ class ReproductionCaseManager:
             "hypothesis": FieldProvenance.STATIC_ANALYSIS,
             "expected_behavior": FieldProvenance.STATIC_ANALYSIS,
         }
+        if provenance_map:
+            default_map.update(provenance_map)
+        p_map = default_map
 
         case = ReproductionCase(
             case_id=case_id,
@@ -154,6 +158,9 @@ class ReproductionCaseManager:
                 if cur.fetchone():
                     raise CaseManagementError(f"Reproduction case '{case_id}' already exists")
 
+                contract_payload = case.contract.model_dump(mode="json")
+                contract_payload["_provenance_map"] = {k: v.value for k, v in case.provenance_map.items()}
+
                 conn.execute(
                     """
                     INSERT INTO reproduction_cases (
@@ -168,7 +175,7 @@ class ReproductionCaseManager:
                         case.run_id,
                         case.target_repo,
                         case.target_commit_sha,
-                        json.dumps(case.contract.model_dump(mode="json")),
+                        json.dumps(contract_payload),
                         case.policy_version,
                         case.status.value,
                         case.attempts_count,
@@ -191,6 +198,8 @@ class ReproductionCaseManager:
                     },
                 )
             return case
+        except sqlite3.IntegrityError as e:
+            raise CaseManagementError(f"Reproduction case '{case_id}' already exists or violated integrity: {e}")
         finally:
             conn.close()
 
@@ -204,6 +213,7 @@ class ReproductionCaseManager:
                 return None
 
             contract_dict = json.loads(row["contract_json"])
+            prov_dict = contract_dict.pop("_provenance_map", None)
             contract = ReproductionRequest.model_validate(contract_dict)
 
             retry_policy = RetryPolicy()
@@ -212,6 +222,17 @@ class ReproductionCaseManager:
                     retry_policy = RetryPolicy.model_validate(json.loads(row["retry_policy_json"]))
                 except Exception:
                     pass
+
+            if prov_dict:
+                prov_map = {k: FieldProvenance(v) for k, v in prov_dict.items() if k and v in FieldProvenance._value2member_map_}
+            else:
+                prov_map = {
+                    "finding_id": FieldProvenance.STATIC_ANALYSIS,
+                    "hypothesis": FieldProvenance.STATIC_ANALYSIS,
+                    "expected_behavior": FieldProvenance.STATIC_ANALYSIS,
+                    "command": FieldProvenance.UNTRUSTED_REPOSITORY,
+                    "environment": FieldProvenance.SYSTEM_POLICY,
+                }
 
             return ReproductionCase(
                 case_id=row["case_id"],
@@ -225,13 +246,7 @@ class ReproductionCaseManager:
                 attempts_count=row["attempts_count"],
                 max_retries=row["max_retries"],
                 retry_policy=retry_policy,
-                provenance_map={
-                    "finding_id": FieldProvenance.STATIC_ANALYSIS,
-                    "hypothesis": FieldProvenance.STATIC_ANALYSIS,
-                    "expected_behavior": FieldProvenance.STATIC_ANALYSIS,
-                    "command": FieldProvenance.UNTRUSTED_REPOSITORY,
-                    "environment": FieldProvenance.SYSTEM_POLICY,
-                },
+                provenance_map=prov_map,
                 created_at=datetime.fromisoformat(row["created_at"]),
                 updated_at=datetime.fromisoformat(row["updated_at"]),
             )
@@ -310,13 +325,23 @@ class ReproductionCaseManager:
             raise StoreError(f"Reproduction case '{case_id}' not found")
 
         # Revalidate commit revision (prevent stale revisions)
-        if current_commit_sha:
+        resolved_commit_sha = current_commit_sha
+        if resolved_commit_sha is None and (workspace_path / ".git").exists():
+            from forge.repository.acquisition import run_git_command
+            try:
+                git_res = run_git_command(["rev-parse", "HEAD"], cwd=workspace_path, timeout_seconds=5)
+                if git_res.returncode == 0:
+                    resolved_commit_sha = git_res.stdout.strip()
+            except Exception:
+                pass
+
+        if resolved_commit_sha:
             clean_expected = case.target_commit_sha.strip().lower()
-            clean_observed = current_commit_sha.strip().lower()
+            clean_observed = resolved_commit_sha.strip().lower()
             if not clean_observed.startswith(clean_expected) and not clean_expected.startswith(clean_observed):
                 raise StaleRevisionError(
                     f"Repository revision mismatch for case '{case_id}': "
-                    f"Case pinned to '{case.target_commit_sha}', but workspace revision is '{current_commit_sha}'"
+                    f"Case pinned to '{case.target_commit_sha}', but workspace revision is '{resolved_commit_sha}'"
                 )
 
         # Check retry eligibility
@@ -382,12 +407,23 @@ class ReproductionCaseManager:
         stdout_digest = hashlib.sha256(stdout_bytes).hexdigest()
         stderr_digest = hashlib.sha256(stderr_bytes).hexdigest()
 
-        # Bounded excerpting (max 5000 chars each for attempt record)
+        # Bounded excerpting with head/tail preservation (max 5000 chars each for attempt record)
         max_excerpt = 5000
         stdout_truncated = len(res.stdout) > max_excerpt
         stderr_truncated = len(res.stderr) > max_excerpt
-        stdout_clean = redact_secrets(res.stdout[:max_excerpt])
-        stderr_clean = redact_secrets(res.stderr[:max_excerpt])
+
+        def _bound_text(text: str, limit: int) -> str:
+            if len(text) <= limit:
+                return redact_secrets(text)
+            marker = f"\n[TRUNCATED: {len(text) - limit} chars omitted]\n"
+            avail = max(0, limit - len(marker))
+            half = avail // 2
+            head = text[:half]
+            tail = text[-(avail - half):] if (avail - half) > 0 else ""
+            return redact_secrets(f"{head}{marker}{tail}")
+
+        stdout_clean = _bound_text(res.stdout, max_excerpt)
+        stderr_clean = _bound_text(res.stderr, max_excerpt)
 
         # Construct attempt representation for classification
         temp_attempt = ReproductionAttempt(
@@ -664,6 +700,10 @@ class ReproductionCaseManager:
                             )
                         except InvalidTransitionError:
                             pass  # Keep finding in suspected if evidence validation fails closed
+        except sqlite3.IntegrityError as e:
+            raise CaseManagementError(
+                f"Database integrity conflict for attempt #{attempt_number} on case '{case.case_id}': {e}"
+            )
         finally:
             conn.close()
 

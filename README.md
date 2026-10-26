@@ -19,7 +19,7 @@ FORGE is an enterprise-grade autonomous software engineering intelligence platfo
 ```
 Phase 1: Secure Repository Intelligence  ── [COMPLETED] (Milestones 1–7)
 Phase 2: Diff-Aware Intelligent Review   ── [COMPLETED] (Milestones 1–6)
-Phase 3: Defect Reproduction & Verification ── [IN PROGRESS] (Milestones 1–4 Implemented; 5–6 Planned)
+Phase 3: Defect Reproduction & Verification ── [IN PROGRESS] (Milestones 1–5 Implemented; Milestone 6 Planned)
 Phase 4: Targeted Autonomous Repair     ── [PLANNED]
 Phase 5: Regression & Safety Verification ── [PLANNED]
 ```
@@ -46,7 +46,8 @@ Phase 5: Regression & Safety Verification ── [PLANNED]
 - **M2 — Reproduction Case Management & Evidence Capture (Implemented)**: Deterministic reproduction case tracking, revision pinning, multi-attempt history, bounded/redacted evidence capture, SHA256 digests, field-level provenance, safe retry policy (forbidding automatic non-idempotent retries), resume validation against stale revisions, and lifecycle transition integration.
 - **M3 — Deterministic Reproduction Planning (Implemented)**: Typed planning layer converting calibrated findings and trusted context into bounded, validated reproduction plans. Five strategies (`RUN_SPECIFIC_TEST`, `RUN_SCOPED_TEST_FILE`, `VALIDATE_BOUNDARY_CONDITION`, `CHECK_EXPECTED_OBSERVED`, `INSUFFICIENT_INFORMATION`). Deterministic plan IDs, full policy validator (14+ rejection criteria), CLI `forge plan` command group.
 - **M4 — Outcome Classification & Evidence Validation (Implemented)**: Strongly typed 8-outcome taxonomy (`REPRODUCED`, `NOT_REPRODUCED`, `UNRELATED_FAILURE`, `ENVIRONMENT_BLOCKED`, `TIMEOUT`, `FLAKY`, `INVALID_PLAN`, `INCONCLUSIVE`) with deterministic reason codes, strict oracle presence and provenance checks (never infer reproduction from generic exit code or model assertion), precedence enforcement, and flaky retry detection.
-- **M5–M6 (Planned)**: Minimal reproduction synthesis, dynamic trace capture, and automated verification suites.
+- **M5 — Reproduction Reliability and Regression Hardening (Implemented)**: Full pipeline hardening against concurrency races, partial write rollback, SQLite unique attempt number constraints, immediate git revision TOCTOU detection, symlink escape checks using Path.is_relative_to, head/tail output bounding preservation with explicit markers, interruption/cleanup failure classification as INCONCLUSIVE, and standardized CLI exit codes (0: reproduced, 1: not reproduced/failed, 2: invalid plan/error, 3: environment blocked, 4: timeout/inconclusive/flaky).
+- **M6 — Automated Reproduction Verification Suite (Planned)**: End-to-end verified reproduction against test repos and CI gating.
 
 ---
 
@@ -252,4 +253,5 @@ cp .env.example .env
   - Case Management & Evidence Capture: [`docs/specs/phase-3-milestone-2.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-2.md)
   - Deterministic Reproduction Planning: [`docs/specs/phase-3-milestone-3.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-3.md)
   - Outcome Classification & Evidence Validation: [`docs/specs/phase-3-milestone-4.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-4.md)
+  - Reproduction Reliability & Regression Hardening: [`docs/specs/phase-3-milestone-5.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-5.md)
 - Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)
