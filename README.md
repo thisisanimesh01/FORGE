@@ -23,14 +23,14 @@ Phase 3: Defect Reproduction & Verification ── [COMPLETED] (Milestones 1–6
 Pre-Phase 4: Local Ollama & Multi-Provider LLM Integration ── [COMPLETED]
 Phase 4 Readiness & Sandbox Gate        ── [COMPLETED]
 Phase 4: Targeted Autonomous Repair     ── [COMPLETED] (Milestones 1–6)
-Phase 5: Supervised End-to-End Engineering Workflow ── [IN PROGRESS] (Kickoff & Architecture Completed)
+Phase 5: Supervised End-to-End Engineering Workflow ── [IN PROGRESS] (Milestone 1 Completed)
 Phase 6: Autonomous Release & Production Hardening  ── [PLANNED]
 ```
 
-### Phase 5: Supervised End-to-End Engineering Workflow (In Progress — Kickoff Completed)
+### Phase 5: Supervised End-to-End Engineering Workflow (In Progress — M1 Completed)
 - **Kickoff & Architectural Foundation (Completed)**: Unifies repository acquisition, diff review, defect reproduction, and bounded repair verification into a supervised defect-to-verified-fix workflow. Codifies a 17-state typed state machine (`CREATED` through `AWAITING_HUMAN_REVIEW` to terminal `APPROVED` / `REJECTED`), transactional event ledger, cryptographic revision pinning, fail-closed container boundaries (`SANDBOX_UNAVAILABLE`), honest outcome taxonomy (`NOT_REPRODUCED`, `FLAKY`, `BROKEN_BUILD`, `REGRESSION_DETECTED`), and an exportable certified Engineering Dossier (`patch.diff`, verification proof, SARIF).
+- **M1 — Unified Task Intake & Repository Context Pipeline (Implemented & Verified)**: Standardizes defect intake across review findings (`review_finding`), unified git diffs (`unified_diff`), issue problem statements (`issue_description`), and test specifications (`test_specification`) into a validated `WorkflowIntakeSpec`. Cryptographically pins exact 40-character commit SHA (`resolve_and_pin_revision`), intercepts revision drift (`RevisionDriftError`), detects dirty working trees (`DirtyRepositoryError`), and sanitizes affected file paths (rejecting path traversal `..` and absolute paths). Assembles scoped, deterministic repository context (`RepositoryContext`) under explicit character and token budgets (`ContextBudget`, `ContextBudgetSummary`), filtering relevant AST symbols, extracting line-numbered source excerpts, wrapping discovered repository instructions in passive untrusted boundary banners, and providing CLI commands (`forge workflow intake create/validate/show` and `forge workflow context build/show`). Verified with 26 focused unit tests and 713 regression tests.
 - **Milestone Sequence (Roadmap)**:
-  - *M1 — Unified Task Intake & Repository Context Pipeline*: Standardized intake contracts, base commit SHA pinning, and AST-scoped context extraction.
   - *M2 — Supervised Workflow State Machine & Transactional Ledger*: Resumable orchestrator, optimistic concurrency control, and secret-scrubbed audit ledger.
   - *M3 — Automated Evidence Chaining from Reproduction to Repair*: Direct forwarding of validated reproduction evidence to bounded repair planning.
   - *M4 — Multi-Check Regression & Safety Verification*: Multi-stage container verification covering targeted test, baseline test suite, static linting, and security analysis (`bandit`).
@@ -113,6 +113,39 @@ forge doctor
 
 # Inspect sandbox runtime health, container configuration, and isolation limits
 forge sandbox doctor
+```
+
+### Supervised End-to-End Engineering Workflow: Intake & Context (Phase 5 Milestone 1)
+```bash
+# 1. Create a task intake specification from an issue description
+forge workflow intake create --type issue --repo /path/to/repo --issue-title "Division by zero" --issue-text "divide(10, 0) crash" --affected-file pkg/calculator.py --output intake.json
+
+# 2. Create intake from a specific failing test command
+forge workflow intake create --type test --repo /path/to/repo --test-file tests/test_calc.py --test-command "pytest tests/test_calc.py::test_zero" --output intake_test.json
+
+# 3. Create intake from raw unified diff or patch file
+forge workflow intake create --type diff --repo /path/to/repo --diff-file changes.diff --output intake_diff.json
+
+# 4. Create intake from an existing review finding in SQLite
+forge workflow intake create --type finding --repo /path/to/repo --finding-id find_01 --output intake_finding.json
+
+# 5. Validate an intake specification offline and against repository
+forge workflow intake validate intake.json --repo /path/to/repo
+
+# 6. Display intake specification
+forge workflow intake show intake.json
+
+# 7. Assemble scoped repository context for a validated intake specification
+forge workflow context build intake.json --output context.json
+
+# 8. Assemble context with custom character budget
+forge workflow context build intake.json --budget 15000 --output context.json
+
+# 9. Inspect assembled context metadata
+forge workflow context show context.json
+
+# 10. Display the rendered markdown prompt ready for model consumption
+forge workflow context show context.json --prompt-only
 ```
 
 ### Evidence-Grounded Repair Planning & Isolated Verification (Phase 4 Milestones 1–2)
@@ -417,4 +450,5 @@ cp .env.example .env
   - Docker Integration Validation & Deterministic Test Repair: [`docs/specs/docker-integration-validation.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/docker-integration-validation.md)
 - Phase 5 Specifications:
   - Supervised End-to-End Engineering Workflow Architecture & Roadmap: [`docs/specs/phase-5-roadmap.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-roadmap.md)
+  - Unified Task Intake & Repository Context Pipeline: [`docs/specs/phase-5-m1-intake-context.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m1-intake-context.md)
 - Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)

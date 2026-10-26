@@ -138,11 +138,15 @@ class EngineeringWorkflowState(str, Enum):
 
 Phase 5 is partitioned into 6 small, independently verifiable milestones:
 
-### Milestone 1: Unified Task Intake & Repository Context Pipeline
-- **Objective**: Standardize defect intake across review findings, issue descriptions, and failed test cases; acquire target repository with base revision pinning; assemble scoped repository intelligence under token budgets.
-- **Inputs**: Target repository URI, base commit SHA, intake source (finding ID, diff, or test spec).
-- **Outputs**: Validated `EngineeringTaskSpec`, pinned workspace, and immutable `RepositoryContext`.
-- **Exit Gate**: 100% test pass on valid/invalid intake formats, path containment checks, revision pinning, and budget truncation.
+### Milestone 1: Unified Task Intake & Repository Context Pipeline (Implemented & Verified)
+- **Status**: COMPLETED & VERIFIED
+- **Specification**: [`docs/specs/phase-5-m1-intake-context.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m1-intake-context.md)
+- **Implementation**:
+  - Typed intake models and contracts in `app/forge/workflow/models.py` (`WorkflowIntakeSpec`, `IntakeSourceType`, `FindingIntakePayload`, `DiffIntakePayload`, `IssueIntakePayload`, `TestSpecIntakePayload`).
+  - Revision resolution and pinning in `app/forge/workflow/intake.py` (`resolve_and_pin_revision` with `DirtyRepositoryError` and `RevisionDriftError`).
+  - Scoped repository context assembly in `app/forge/workflow/context.py` (`assemble_repository_context`, deterministic AST ranking, bounded line excerpts, untrusted boundary banners, and `ContextBudgetSummary`).
+  - CLI commands in `app/forge/cli.py` (`forge workflow intake create/validate/show` and `forge workflow context build/show`).
+- **Exit Gate Passed**: 26 unit tests in `tests/unit/test_phase5_milestone1.py` passed; 713 regression tests passed; 100% pass on acceptance and benchmark suites.
 
 ### Milestone 2: Supervised Workflow State Machine & Transactional Ledger
 - **Objective**: Implement the overarching workflow orchestrator with optimistic concurrency, sequential append-only event auditing, crash resilience, and pause/resume capability.
@@ -206,10 +210,10 @@ To prevent misleading claims of software correctness or false bug detection:
 
 ---
 
-## 8. Recommendation for Milestone 1
+## 8. Recommendation for Milestone 2
 
-The recommended first implementation milestone is **Phase 5 Milestone 1: Unified Task Intake & Repository Context Pipeline**:
-- Create `app/forge/workflow/models.py` and `app/forge/workflow/intake.py`.
-- Define `EngineeringTaskSpec`, `IntakeSource`, and `RepositoryContext`.
-- Wire repository acquisition, URL/path validation, and AST symbol extraction into a single deterministic pipeline.
-- Implement unit tests covering intake validation, revision pinning, and context bounding.
+With Milestone 1 completed and verified, the recommended next implementation step is **Phase 5 Milestone 2: Supervised Workflow State Machine & Transactional Ledger**:
+- Implement `EngineeringWorkflow` state machine in `app/forge/workflow/state.py` and `orchestrator.py`.
+- Define database migrations and SQLite store tables (`engineering_workflows`, `workflow_events`).
+- Support pause/resume semantics, crash recovery, and optimistic concurrency versioning.
+- Implement CLI workflow lifecycle commands (`forge workflow start/status/list/resume/review`).

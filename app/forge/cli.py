@@ -26,6 +26,11 @@ plan_app = typer.Typer(help="Deterministic reproduction plan generation, validat
 repair_app = typer.Typer(help="Evidence-grounded repair planning and patch candidate commands.")
 workflow_app = typer.Typer(help="Controlled repair orchestration workflow commands.")
 repair_app.add_typer(workflow_app, name="workflow")
+eng_workflow_app = typer.Typer(help="Phase 5 supervised end-to-end engineering workflow commands.")
+workflow_intake_app = typer.Typer(help="Workflow task intake and normalization commands.")
+workflow_context_app = typer.Typer(help="Repository context assembly commands.")
+eng_workflow_app.add_typer(workflow_intake_app, name="intake")
+eng_workflow_app.add_typer(workflow_context_app, name="context")
 app.add_typer(db_app, name="db")
 app.add_typer(findings_app, name="findings")
 app.add_typer(sandbox_app, name="sandbox")
@@ -34,6 +39,7 @@ app.add_typer(policy_app, name="policy")
 app.add_typer(repro_app, name="repro")
 app.add_typer(plan_app, name="plan")
 app.add_typer(repair_app, name="repair")
+app.add_typer(eng_workflow_app, name="workflow")
 
 
 
@@ -2210,6 +2216,290 @@ def workflow_review(
     else:
         typer.echo("\n[Result] Workflow REJECTED by human operator.")
         raise typer.Exit(code=1)
+
+
+# =============================================================================
+# Phase 5 Engineering Workflow Commands (Milestone 1: Intake & Context)
+# =============================================================================
+
+def _render_intake_markdown(spec: Any) -> str:
+    lines = [
+        "# Workflow Task Intake Specification",
+        f"- **Intake ID**: `{spec.intake_id}`",
+        f"- **Source Type**: `{spec.source_type.value}`",
+        f"- **Target Repo**: `{spec.target_repo}`",
+        f"- **Base Commit**: `{spec.base_commit_sha[:10]}...` ({spec.base_commit_sha})",
+        f"- **Title**: {spec.title}",
+        f"- **Description**: {spec.description}",
+    ]
+    if spec.affected_files:
+        lines.append(f"- **Affected Files** ({len(spec.affected_files)}): {', '.join(spec.affected_files)}")
+    else:
+        lines.append("- **Affected Files**: none declared")
+
+    if spec.source_type.value == "review_finding" and spec.finding_payload:
+        lines.append(f"- **Finding ID**: `{spec.finding_payload.finding_id}`")
+        if spec.finding_payload.severity:
+            lines.append(f"- **Severity**: `{spec.finding_payload.severity.value}`")
+    elif spec.source_type.value == "unified_diff" and spec.diff_payload:
+        lines.append(f"- **Diff Changes**: +{spec.diff_payload.total_additions} / -{spec.diff_payload.total_deletions} ({spec.diff_payload.diff_bytes} bytes)")
+    elif spec.source_type.value == "test_specification" and spec.test_payload:
+        lines.append(f"- **Test File**: `{spec.test_payload.test_file}`")
+        lines.append(f"- **Test Command**: `{spec.test_payload.test_command}`")
+    return "\n".join(lines)
+
+
+def _render_context_markdown(ctx: Any) -> str:
+    lines = [
+        "# Assembled Repository Context",
+        f"- **Context ID**: `{ctx.context_id}`",
+        f"- **Intake ID**: `{ctx.intake_id}`",
+        f"- **Target Repo**: `{ctx.target_repo}`",
+        f"- **Pinned Commit**: `{ctx.revision.commit_sha[:10]}...`",
+        f"- **Branch**: `{ctx.revision.branch or 'detached'}`",
+        f"- **Total Characters**: {ctx.budget_summary.total_chars} / {ctx.budget_summary.char_budget} chars",
+        f"- **Estimated Tokens**: ~{ctx.budget_summary.estimated_tokens}",
+        f"- **Truncated**: `{'YES' if ctx.budget_summary.is_truncated else 'NO'}`",
+    ]
+    if ctx.budget_summary.truncation_reasons:
+        for r in ctx.budget_summary.truncation_reasons:
+            lines.append(f"  - *Truncation Notice*: {r}")
+    lines.append(f"- **Relevant Symbols**: {len(ctx.relevant_symbols)}")
+    lines.append(f"- **Source Excerpts**: {len(ctx.source_excerpts)}")
+    lines.append(f"- **Discovered Instructions**: {len(ctx.instruction_files)}")
+    return "\n".join(lines)
+
+
+@workflow_intake_app.command(name="create")
+def cli_intake_create(
+    source_type: str = typer.Option(..., "--type", "-t", help="Intake source type: finding, diff, issue, or test"),
+    repo: Path = typer.Option(Path("."), "--repo", "-r", help="Target repository path"),
+    finding_id: Optional[str] = typer.Option(None, "--finding-id", help="Finding identifier (for finding intake)"),
+    diff_file: Optional[Path] = typer.Option(None, "--diff-file", help="Path to unified diff file"),
+    diff_text: Optional[str] = typer.Option(None, "--diff-text", help="Raw diff text"),
+    issue_title: Optional[str] = typer.Option(None, "--issue-title", help="Issue title"),
+    issue_text: Optional[str] = typer.Option(None, "--issue-text", help="Issue description text"),
+    issue_file: Optional[Path] = typer.Option(None, "--issue-file", help="Path to issue markdown or text file"),
+    test_file: Optional[str] = typer.Option(None, "--test-file", help="Test file path (e.g. tests/test_foo.py)"),
+    test_command: Optional[str] = typer.Option(None, "--test-command", help="Test command to reproduce failure"),
+    test_name: Optional[str] = typer.Option(None, "--test-name", help="Specific test function or class name"),
+    affected_files: Optional[List[str]] = typer.Option(None, "--affected-file", "-f", help="Declared affected files"),
+    expected_sha: Optional[str] = typer.Option(None, "--expected-sha", help="Expected base commit SHA to enforce"),
+    allow_dirty: bool = typer.Option(False, "--allow-dirty", help="Allow uncommitted changes in target repository"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="File path to write intake spec JSON"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Normalize and validate a defect intake task from finding, diff, issue, or test."""
+    from forge.workflow.intake import (
+        create_intake_from_diff,
+        create_intake_from_finding,
+        create_intake_from_issue,
+        create_intake_from_test_spec,
+    )
+    from forge.storage.store import ForgeStore
+    settings = get_settings()
+
+    st = source_type.strip().lower()
+    try:
+        if st in ("finding", "review_finding"):
+            if not finding_id:
+                typer.secho("Error: --finding-id is required for finding intake.", fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=2)
+            store = ForgeStore(db_path=settings.db_path)
+            spec = create_intake_from_finding(
+                repo_path=repo,
+                finding_id=finding_id,
+                store=store,
+                expected_sha=expected_sha,
+                allow_dirty=allow_dirty,
+            )
+        elif st in ("diff", "unified_diff"):
+            text = diff_text
+            if diff_file:
+                if not diff_file.exists():
+                    typer.secho(f"Error: Diff file not found: {diff_file}", fg=typer.colors.RED, err=True)
+                    raise typer.Exit(code=2)
+                text = diff_file.read_text(encoding="utf-8")
+            if not text:
+                typer.secho("Error: Either --diff-file or --diff-text is required for diff intake.", fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=2)
+            spec = create_intake_from_diff(
+                repo_path=repo,
+                diff_text=text,
+                expected_sha=expected_sha,
+                allow_dirty=allow_dirty,
+            )
+        elif st in ("issue", "issue_description"):
+            body = issue_text
+            if issue_file:
+                if not issue_file.exists():
+                    typer.secho(f"Error: Issue file not found: {issue_file}", fg=typer.colors.RED, err=True)
+                    raise typer.Exit(code=2)
+                body = issue_file.read_text(encoding="utf-8")
+            if not body or not issue_title:
+                typer.secho("Error: --issue-title and (--issue-text or --issue-file) are required for issue intake.", fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=2)
+            spec = create_intake_from_issue(
+                repo_path=repo,
+                title=issue_title,
+                issue_text=body,
+                affected_files=affected_files,
+                expected_sha=expected_sha,
+                allow_dirty=allow_dirty,
+            )
+        elif st in ("test", "test_specification"):
+            if not test_file or not test_command:
+                typer.secho("Error: --test-file and --test-command are required for test intake.", fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=2)
+            spec = create_intake_from_test_spec(
+                repo_path=repo,
+                test_file=test_file,
+                test_command=test_command,
+                test_name=test_name,
+                expected_sha=expected_sha,
+                allow_dirty=allow_dirty,
+            )
+        else:
+            typer.secho(f"Error: Unsupported intake type '{source_type}'. Choose finding, diff, issue, or test.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=2)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        typer.secho(f"Intake creation failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if output:
+        output.write_text(spec.model_dump_json(indent=2), encoding="utf-8")
+        typer.secho(f"Exported intake specification to {output}", fg=typer.colors.GREEN)
+
+    if format.lower() == "json":
+        typer.echo(spec.model_dump_json(indent=2))
+    else:
+        typer.echo(_render_intake_markdown(spec))
+
+
+@workflow_intake_app.command(name="validate")
+def cli_intake_validate(
+    intake_file: Path = typer.Argument(..., help="Path to intake spec JSON file"),
+    repo: Optional[Path] = typer.Option(None, "--repo", "-r", help="Optional target repo path to verify against"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Validate an intake specification file offline and against an optional repository."""
+    from forge.workflow.intake import validate_intake_spec
+    from forge.workflow.models import WorkflowIntakeSpec
+
+    if not intake_file.exists():
+        typer.secho(f"Intake file not found: {intake_file}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        content = intake_file.read_text(encoding="utf-8")
+        spec = WorkflowIntakeSpec.model_validate_json(content)
+        is_valid, reasons = validate_intake_spec(spec, repo_path=repo)
+    except Exception as exc:
+        typer.secho(f"Validation error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if format.lower() == "json":
+        typer.echo(json.dumps({"valid": is_valid, "reasons": reasons, "intake_id": spec.intake_id}, indent=2))
+    else:
+        if is_valid:
+            typer.secho(f"[VALID] Intake specification '{spec.intake_id}' passed all checks.", fg=typer.colors.GREEN)
+        else:
+            typer.secho(f"[INVALID] Intake specification '{spec.intake_id}' failed checks:", fg=typer.colors.RED)
+            for r in reasons:
+                typer.echo(f"  - {r}")
+    if not is_valid:
+        raise typer.Exit(code=1)
+
+
+@workflow_intake_app.command(name="show")
+def cli_intake_show(
+    intake_file: Path = typer.Argument(..., help="Path to intake spec JSON file"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Display an existing intake specification JSON file."""
+    from forge.workflow.models import WorkflowIntakeSpec
+
+    if not intake_file.exists():
+        typer.secho(f"Intake file not found: {intake_file}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        content = intake_file.read_text(encoding="utf-8")
+        spec = WorkflowIntakeSpec.model_validate_json(content)
+    except Exception as exc:
+        typer.secho(f"Failed to load intake spec: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if format.lower() == "json":
+        typer.echo(spec.model_dump_json(indent=2))
+    else:
+        typer.echo(_render_intake_markdown(spec))
+
+
+@workflow_context_app.command(name="build")
+def cli_context_build(
+    intake_file: Path = typer.Argument(..., help="Path to intake spec JSON file"),
+    repo: Optional[Path] = typer.Option(None, "--repo", "-r", help="Repository path override (defaults to intake target_repo)"),
+    budget: int = typer.Option(25_000, "--budget", "-b", help="Max total character budget for context"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="File path to save assembled context JSON"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Assemble scoped repository context for a validated intake specification."""
+    from forge.workflow.context import assemble_repository_context
+    from forge.workflow.models import ContextBudget, WorkflowIntakeSpec
+
+    if not intake_file.exists():
+        typer.secho(f"Intake file not found: {intake_file}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        spec = WorkflowIntakeSpec.model_validate_json(intake_file.read_text(encoding="utf-8"))
+        target_path = repo or Path(spec.target_repo)
+        ctx_budget = ContextBudget(max_total_chars=budget)
+        context = assemble_repository_context(repo_path=target_path, intake=spec, budget=ctx_budget)
+    except Exception as exc:
+        typer.secho(f"Context assembly failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if output:
+        output.write_text(context.model_dump_json(indent=2), encoding="utf-8")
+        typer.secho(f"Saved context artifact to {output}", fg=typer.colors.GREEN)
+
+    if format.lower() == "json":
+        typer.echo(context.model_dump_json(indent=2))
+    else:
+        typer.echo(_render_context_markdown(context))
+
+
+@workflow_context_app.command(name="show")
+def cli_context_show(
+    context_file: Path = typer.Argument(..., help="Path to context JSON file"),
+    prompt_only: bool = typer.Option(False, "--prompt-only", help="Display only the rendered markdown prompt"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Display an assembled repository context bundle or its rendered prompt."""
+    from forge.workflow.models import RepositoryContext
+
+    if not context_file.exists():
+        typer.secho(f"Context file not found: {context_file}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        ctx = RepositoryContext.model_validate_json(context_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        typer.secho(f"Failed to load context: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if prompt_only:
+        typer.echo(ctx.rendered_prompt)
+        return
+
+    if format.lower() == "json":
+        typer.echo(ctx.model_dump_json(indent=2))
+    else:
+        typer.echo(_render_context_markdown(ctx))
 
 
 def main() -> None:
