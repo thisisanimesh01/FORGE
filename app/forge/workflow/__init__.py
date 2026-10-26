@@ -2,6 +2,7 @@
 
 Milestone 1: Unified Task Intake & Repository Context Pipeline.
 Milestone 2: Supervised Workflow State Machine & Transactional Ledger.
+Milestone 3: Automated Evidence Chaining from Reproduction to Repair.
 """
 
 from forge.workflow.context import (
@@ -9,6 +10,12 @@ from forge.workflow.context import (
     extract_source_excerpts,
     filter_and_rank_symbols,
     render_context_prompt,
+)
+from forge.workflow.evidence_chain import (
+    ensure_finding_in_store,
+    extract_reproduction_command_from_intake,
+    resolve_intake_finding_id,
+    validate_reproduction_evidence,
 )
 from forge.workflow.intake import (
     compute_intake_id,
@@ -24,23 +31,32 @@ from forge.workflow.models import (
     ContextBudget,
     ContextBudgetExceededError,
     ContextBudgetSummary,
+    CorruptedEvidenceError,
     DiffIntakePayload,
     DirtyRepositoryError,
     EngineeringWorkflow,
     EngineeringWorkflowEvent,
     EngineeringWorkflowState,
+    EvidenceChainError,
+    EvidenceTamperedError,
     FindingIntakePayload,
     HumanApprovalRequiredError,
     IntakeSourceType,
     IntakeValidationError,
     InvalidWorkflowTransitionError,
     IssueIntakePayload,
+    MismatchedEvidenceError,
+    MissingEvidenceError,
+    RepairPlanningStageResult,
     RepositoryContext,
     RepositoryRevisionInfo,
+    ReproductionStageResult,
     RevisionDriftError,
     SourceExcerpt,
+    StaleRevisionEvidenceError,
     TargetImmutabilityViolationError,
     TestSpecIntakePayload,
+    UntrustedOracleError,
     WorkflowConcurrencyError,
     WorkflowError,
     WorkflowIntakeSpec,
@@ -68,6 +84,13 @@ __all__ = [
     "WorkflowConcurrencyError",
     "WorkflowResumeError",
     "HumanApprovalRequiredError",
+    "EvidenceChainError",
+    "MissingEvidenceError",
+    "StaleRevisionEvidenceError",
+    "MismatchedEvidenceError",
+    "UntrustedOracleError",
+    "EvidenceTamperedError",
+    "CorruptedEvidenceError",
     # Enums & Models
     "IntakeSourceType",
     "EngineeringWorkflowState",
@@ -83,6 +106,8 @@ __all__ = [
     "RepositoryContext",
     "EngineeringWorkflow",
     "EngineeringWorkflowEvent",
+    "ReproductionStageResult",
+    "RepairPlanningStageResult",
     # Intake Functions
     "resolve_and_pin_revision",
     "compute_intake_id",
@@ -104,6 +129,11 @@ __all__ = [
     "validate_workflow_transition",
     "is_resumable_state",
     "is_terminal_state",
+    # Evidence Chaining Functions
+    "resolve_intake_finding_id",
+    "ensure_finding_in_store",
+    "extract_reproduction_command_from_intake",
+    "validate_reproduction_evidence",
     # Orchestrator
     "EngineeringWorkflowOrchestrator",
 ]

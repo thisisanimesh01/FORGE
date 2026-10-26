@@ -2676,6 +2676,102 @@ def cli_eng_workflow_review(
         raise typer.Exit(code=1)
 
 
+@eng_workflow_app.command(name="repro")
+def cli_eng_workflow_repro(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to reproduce defect for"),
+    repo: Optional[Path] = typer.Option(None, "--repo", "-r", help="Repository path override (defaults to workflow target_repo)"),
+    test_command: Optional[str] = typer.Option(None, "--test-command", "-c", help="Explicit test command override"),
+    max_retries: int = typer.Option(0, "--max-retries", help="Maximum retry attempts (0-3)"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Execute or resume defect reproduction and chain validated evidence into the workflow."""
+    from forge.workflow.orchestrator import EngineeringWorkflowOrchestrator
+    import shlex
+
+    orchestrator = EngineeringWorkflowOrchestrator()
+    cmd_args = shlex.split(test_command) if test_command else None
+    try:
+        wf = orchestrator.reproduce_defect(
+            workflow_id=workflow_id,
+            workspace_path=repo,
+            command_args=cmd_args,
+            max_retries=max_retries,
+        )
+        events = orchestrator.list_events(wf.workflow_id)
+    except Exception as exc:
+        typer.secho(f"Reproduction failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if format.lower() == "json":
+        typer.echo(wf.model_dump_json(indent=2))
+    else:
+        typer.echo(_render_eng_workflow_markdown(wf, events))
+
+
+@eng_workflow_app.command(name="plan-repair")
+def cli_eng_workflow_plan_repair(
+    workflow_id: str = typer.Argument(..., help="Workflow ID in REPRODUCED state to plan repair for"),
+    repo: Optional[Path] = typer.Option(None, "--repo", "-r", help="Repository path override (defaults to workflow target_repo)"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider override"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Model name override"),
+    scratch_dir: Optional[Path] = typer.Option(None, "--scratch-dir", help="Scratch workspace directory for candidate analysis"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Validate reproduction evidence and generate an evidence-grounded repair plan."""
+    from forge.workflow.orchestrator import EngineeringWorkflowOrchestrator
+
+    orchestrator = EngineeringWorkflowOrchestrator()
+    try:
+        wf = orchestrator.plan_repair(
+            workflow_id=workflow_id,
+            workspace_path=repo,
+            provider_name=provider,
+            model_name=model,
+            scratch_workspace_path=scratch_dir,
+        )
+        events = orchestrator.list_events(wf.workflow_id)
+    except Exception as exc:
+        typer.secho(f"Repair planning failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if format.lower() == "json":
+        typer.echo(wf.model_dump_json(indent=2))
+    else:
+        typer.echo(_render_eng_workflow_markdown(wf, events))
+
+
+@eng_workflow_app.command(name="advance")
+def cli_eng_workflow_advance(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to advance"),
+    repo: Optional[Path] = typer.Option(None, "--repo", "-r", help="Repository path override (defaults to workflow target_repo)"),
+    provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider override"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Model name override"),
+    scratch_dir: Optional[Path] = typer.Option(None, "--scratch-dir", help="Scratch workspace directory for candidate analysis"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Progress an engineering workflow through sequential stages up to repair planning."""
+    from forge.workflow.orchestrator import EngineeringWorkflowOrchestrator
+
+    orchestrator = EngineeringWorkflowOrchestrator()
+    try:
+        wf = orchestrator.advance_workflow(
+            workflow_id=workflow_id,
+            workspace_path=repo,
+            provider_name=provider,
+            model_name=model,
+            scratch_workspace_path=scratch_dir,
+        )
+        events = orchestrator.list_events(wf.workflow_id)
+    except Exception as exc:
+        typer.secho(f"Workflow advance failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if format.lower() == "json":
+        typer.echo(wf.model_dump_json(indent=2))
+    else:
+        typer.echo(_render_eng_workflow_markdown(wf, events))
+
+
 def main() -> None:
     """CLI entry point."""
     app()

@@ -9,8 +9,18 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from forge.config import ForgeSettings, get_settings
+from forge.reproduction.manager import ReproductionCaseManager
+from forge.reproduction.models import CaseStatus, generate_case_id
+from forge.sandbox.contracts import ReproductionCommand, ReproductionOutcome, ReproductionRequest
+from forge.schemas import EvidenceType
 from forge.storage.store import ForgeStore, StoreError
 from forge.workflow.context import assemble_repository_context
+from forge.workflow.evidence_chain import (
+    ensure_finding_in_store,
+    extract_reproduction_command_from_intake,
+    resolve_intake_finding_id,
+    validate_reproduction_evidence,
+)
 from forge.workflow.intake import validate_intake_spec
 from forge.workflow.models import (
     EngineeringWorkflow,
@@ -18,6 +28,11 @@ from forge.workflow.models import (
     EngineeringWorkflowState,
     HumanApprovalRequiredError,
     InvalidWorkflowTransitionError,
+    MissingEvidenceError,
+    RepairPlanningStageResult,
+    ReproductionStageResult,
+    RevisionDriftError,
+    StaleRevisionEvidenceError,
     WorkflowConcurrencyError,
     WorkflowIntakeSpec,
     WorkflowResumeError,
@@ -203,3 +218,378 @@ class EngineeringWorkflowOrchestrator:
     def list_events(self, workflow_id: str) -> List[EngineeringWorkflowEvent]:
         """Fetch all append-only events for a workflow in monotonic sequence order."""
         return self.store.list_engineering_workflow_events(workflow_id)
+
+    def reproduce_defect(
+        self,
+        workflow_id: str,
+        workspace_path: Optional[Path] = None,
+        command_args: Optional[List[str]] = None,
+        expected_exit_codes: Optional[List[int]] = None,
+        expected_output_patterns: Optional[List[str]] = None,
+        max_retries: int = 0,
+        harness: Optional[Any] = None,
+    ) -> EngineeringWorkflow:
+        """Execute or resume defect reproduction and chain validated evidence into the workflow."""
+        wf = self.store.get_engineering_workflow(workflow_id)
+        if not wf:
+            raise StoreError(f"Engineering workflow '{workflow_id}' not found.")
+
+        # Idempotent return if already in REPRODUCED
+        if wf.state == EngineeringWorkflowState.REPRODUCED:
+            return wf
+
+        if wf.state not in (
+            EngineeringWorkflowState.REPO_ANALYZED,
+            EngineeringWorkflowState.REPRODUCTION_PENDING,
+            EngineeringWorkflowState.REPRO_BLOCKED,
+        ):
+            raise InvalidWorkflowTransitionError(
+                f"Cannot run reproduction for workflow in state '{wf.state.value}'. "
+                f"Workflow must be in 'repo_analyzed', 'reproduction_pending', or 'repro_blocked'."
+            )
+
+        intake = self.store.get_workflow_intake(wf.intake_id)
+        if not intake:
+            raise StoreError(f"Intake specification '{wf.intake_id}' not found.")
+
+        repo_path = workspace_path or Path(wf.target_repo)
+        if (repo_path / ".git").exists():
+            from forge.repository.acquisition import run_git_command
+            try:
+                git_res = run_git_command(["rev-parse", "HEAD"], cwd=repo_path, timeout_seconds=5)
+                if git_res.returncode == 0:
+                    current_sha = git_res.stdout.strip().lower()
+                    expected_sha = wf.base_commit_sha.strip().lower()
+                    if not current_sha.startswith(expected_sha) and not expected_sha.startswith(current_sha):
+                        raise RevisionDriftError(
+                            f"Workspace revision '{current_sha}' does not match workflow base commit '{wf.base_commit_sha}'. Revision drift detected."
+                        )
+            except RevisionDriftError:
+                raise
+            except Exception:
+                pass
+
+        # Transition to REPRODUCTION_PENDING if currently in REPO_ANALYZED or REPRO_BLOCKED
+        if wf.state == EngineeringWorkflowState.REPO_ANALYZED:
+            wf = self.store.transition_engineering_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                target_state=EngineeringWorkflowState.REPRODUCTION_PENDING,
+                stage="start_reproduction",
+            )
+        elif wf.state == EngineeringWorkflowState.REPRO_BLOCKED:
+            wf = self.store.transition_engineering_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                target_state=EngineeringWorkflowState.REPRODUCTION_PENDING,
+                stage="resume_reproduction",
+                payload={"reason": "Retrying reproduction from blocked state"},
+            )
+
+        finding = ensure_finding_in_store(self.store, intake, run_id=wf.workflow_id)
+
+        # Derive reproduction command
+        repro_cmd: Optional[ReproductionCommand] = None
+        if command_args:
+            repro_cmd = ReproductionCommand(
+                args=list(command_args),
+                relative_cwd=".",
+                expected_exit_codes=expected_exit_codes or [1],
+                expected_output_patterns=expected_output_patterns or [],
+            )
+        else:
+            repro_cmd = extract_reproduction_command_from_intake(intake)
+
+        if repro_cmd is None:
+            return self.store.transition_engineering_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                target_state=EngineeringWorkflowState.REPRO_INCONCLUSIVE,
+                stage="reproduction_planning",
+                payload={"reason": "No safe reproduction command could be derived from intake or inputs."},
+            )
+
+        manager = ReproductionCaseManager(store=self.store, harness=harness)
+        case_id = generate_case_id(finding.finding_id, str(repo_path.resolve()), wf.base_commit_sha)
+        case = manager.get_case(case_id)
+
+        # Idempotency check: if case already reproduced with valid evidence, reuse it
+        if case and case.status == CaseStatus.REPRODUCED:
+            ev_list = self.store.list_evidence_for_finding(finding.finding_id)
+            repro_evs = [e for e in ev_list if e.evidence_type == EvidenceType.REPRODUCTION_RESULT]
+            if repro_evs:
+                latest_ev = repro_evs[-1]
+                validate_reproduction_evidence(latest_ev, wf, intake, case, self.store)
+                return self.store.transition_engineering_workflow(
+                    workflow_id=wf.workflow_id,
+                    expected_version=wf.version,
+                    target_state=EngineeringWorkflowState.REPRODUCED,
+                    stage="reproduction_idempotent_reuse",
+                    repro_case_id=case.case_id,
+                    payload={"case_id": case.case_id, "evidence_id": latest_ev.evidence_id, "reused": True},
+                )
+
+        if case is None:
+            contract = ReproductionRequest(
+                request_id=f"req_{finding.finding_id}_{uuid.uuid4().hex[:8]}",
+                finding_id=finding.finding_id,
+                target_repo=str(repo_path.resolve()),
+                commit_sha=wf.base_commit_sha,
+                hypothesis=f"Reproduction hypothesis for {finding.finding_id}",
+                command=repro_cmd,
+            )
+            case = manager.create_case(
+                finding_id=finding.finding_id,
+                target_repo=str(repo_path.resolve()),
+                target_commit_sha=wf.base_commit_sha,
+                contract=contract,
+                run_id=wf.workflow_id,
+                max_retries=max_retries,
+                is_idempotent=True,
+            )
+
+        attempt = manager.run_attempt(
+            case_id=case.case_id,
+            workspace_path=repo_path.resolve(),
+            current_commit_sha=wf.base_commit_sha,
+        )
+
+        stage_res = ReproductionStageResult(
+            case_id=case.case_id,
+            attempt_id=attempt.attempt_id,
+            attempt_number=attempt.attempt_number,
+            outcome=attempt.outcome.value,
+            exit_code=attempt.exit_code,
+            evidence_id=attempt.evidence_id,
+            sandbox_available=(attempt.outcome != ReproductionOutcome.SKIPPED_SANDBOX_UNAVAILABLE),
+            duration_ms=attempt.duration_ms,
+            diagnostic_message=attempt.diagnostic_message,
+        )
+
+        if attempt.outcome in (ReproductionOutcome.SKIPPED_SANDBOX_UNAVAILABLE, ReproductionOutcome.BLOCKED):
+            return self.store.transition_engineering_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                target_state=EngineeringWorkflowState.REPRO_BLOCKED,
+                stage="defect_reproduction",
+                repro_case_id=case.case_id,
+                error_message=attempt.diagnostic_message or "Sandbox unavailable or environment blocked",
+                payload=stage_res.model_dump(mode="json"),
+            )
+        elif attempt.outcome == ReproductionOutcome.REPRODUCED:
+            evidence = self.store.get_evidence(attempt.evidence_id) if attempt.evidence_id else None
+            validate_reproduction_evidence(evidence, wf, intake, case, self.store)
+            return self.store.transition_engineering_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                target_state=EngineeringWorkflowState.REPRODUCED,
+                stage="defect_reproduction",
+                repro_case_id=case.case_id,
+                payload=stage_res.model_dump(mode="json"),
+            )
+        elif attempt.outcome in (ReproductionOutcome.NOT_REPRODUCED, ReproductionOutcome.TIMEOUT):
+            return self.store.transition_engineering_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                target_state=EngineeringWorkflowState.REPRO_FAILED,
+                stage="defect_reproduction",
+                repro_case_id=case.case_id,
+                error_message=attempt.diagnostic_message or f"Reproduction failed with outcome: {attempt.outcome.value}",
+                payload=stage_res.model_dump(mode="json"),
+            )
+        else:
+            return self.store.transition_engineering_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                target_state=EngineeringWorkflowState.REPRO_INCONCLUSIVE,
+                stage="defect_reproduction",
+                repro_case_id=case.case_id,
+                error_message=attempt.diagnostic_message or f"Reproduction inconclusive with outcome: {attempt.outcome.value}",
+                payload=stage_res.model_dump(mode="json"),
+            )
+
+    def plan_repair(
+        self,
+        workflow_id: str,
+        workspace_path: Optional[Path] = None,
+        provider_name: Optional[str] = None,
+        model_name: Optional[str] = None,
+        scratch_workspace_path: Optional[Path] = None,
+        planner: Optional[Any] = None,
+    ) -> EngineeringWorkflow:
+        """Validate reproduction evidence and generate an evidence-grounded repair plan."""
+        from forge.repair.models import RepairPlanStatus
+        from forge.repair.planner import RepairPlanner
+
+        wf = self.store.get_engineering_workflow(workflow_id)
+        if not wf:
+            raise StoreError(f"Engineering workflow '{workflow_id}' not found.")
+
+        if wf.state != EngineeringWorkflowState.REPRODUCED:
+            raise InvalidWorkflowTransitionError(
+                f"Cannot plan repair for workflow in state '{wf.state.value}'. "
+                f"Workflow must be in 'reproduced' state."
+            )
+
+        intake = self.store.get_workflow_intake(wf.intake_id)
+        if not intake:
+            raise StoreError(f"Intake specification '{wf.intake_id}' not found.")
+
+        repo_path = workspace_path or Path(wf.target_repo)
+        if (repo_path / ".git").exists():
+            from forge.repository.acquisition import run_git_command
+            try:
+                git_res = run_git_command(["rev-parse", "HEAD"], cwd=repo_path, timeout_seconds=5)
+                if git_res.returncode == 0:
+                    current_sha = git_res.stdout.strip().lower()
+                    expected_sha = wf.base_commit_sha.strip().lower()
+                    if not current_sha.startswith(expected_sha) and not expected_sha.startswith(current_sha):
+                        raise RevisionDriftError(
+                            f"Workspace revision '{current_sha}' does not match workflow base commit '{wf.base_commit_sha}'. Revision drift detected."
+                        )
+            except RevisionDriftError:
+                raise
+            except Exception:
+                pass
+
+        fid = resolve_intake_finding_id(intake)
+        finding = self.store.get_finding(fid)
+        evidence_records = self.store.list_evidence_for_finding(fid)
+        repro_evidence = [e for e in evidence_records if e.evidence_type == EvidenceType.REPRODUCTION_RESULT]
+        if not repro_evidence:
+            raise MissingEvidenceError(
+                f"Workflow '{workflow_id}' has no reproduction evidence attached to finding '{fid}'."
+            )
+
+        case = None
+        if wf.repro_case_id:
+            case = ReproductionCaseManager(store=self.store).get_case(wf.repro_case_id)
+
+        latest_repro_ev = repro_evidence[-1]
+        validate_reproduction_evidence(latest_repro_ev, wf, intake, case, self.store)
+
+        # Transition to REPAIR_PENDING with verified evidence context
+        wf = self.store.transition_engineering_workflow(
+            workflow_id=wf.workflow_id,
+            expected_version=wf.version,
+            target_state=EngineeringWorkflowState.REPAIR_PENDING,
+            stage="start_repair_planning",
+            transition_context={"has_repro_evidence": True},
+        )
+
+        repair_planner = planner or RepairPlanner(provider_name=provider_name, model_name=model_name)
+        plan = repair_planner.plan_repair(
+            finding_id=fid,
+            target_repo=repo_path,
+            base_commit_sha=wf.base_commit_sha,
+            finding=finding,
+            evidence_records=evidence_records,
+            scratch_workspace_path=scratch_workspace_path,
+            store=self.store,
+            run_id=wf.workflow_id,
+        )
+
+        if plan.status == RepairPlanStatus.VALIDATED:
+            patch_digest = plan.patch_candidate.sha256_digest if plan.patch_candidate else None
+            lines_changed = (plan.patch_candidate.added_lines + plan.patch_candidate.removed_lines) if plan.patch_candidate else 0
+            stage_res = RepairPlanningStageResult(
+                plan_id=plan.plan_id,
+                status=plan.status.value,
+                patch_digest=patch_digest,
+                target_file=plan.target_file,
+                lines_changed=lines_changed,
+            )
+            return self.store.attach_repair_plan_to_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                repair_plan_id=plan.plan_id,
+                stage="repair_planning_completed",
+                payload=stage_res.model_dump(mode="json"),
+            )
+        else:
+            plan_violations = (
+                plan.validation.violations
+                if (plan.validation and plan.validation.violations)
+                else (getattr(plan, "violations", None) or [plan.status.value])
+            )
+            stage_res = RepairPlanningStageResult(
+                plan_id=plan.plan_id,
+                status=plan.status.value,
+                violations=plan_violations,
+            )
+            return self.store.transition_engineering_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                target_state=EngineeringWorkflowState.REPAIR_FAILED,
+                stage="repair_planning_failed",
+                error_message="; ".join(plan_violations),
+                payload=stage_res.model_dump(mode="json"),
+            )
+
+    def advance_workflow(
+        self,
+        workflow_id: str,
+        workspace_path: Optional[Path] = None,
+        provider_name: Optional[str] = None,
+        model_name: Optional[str] = None,
+        scratch_workspace_path: Optional[Path] = None,
+        harness: Optional[Any] = None,
+        planner: Optional[Any] = None,
+    ) -> EngineeringWorkflow:
+        """Progress an engineering workflow through sequential stages up to repair planning."""
+        wf = self.store.get_engineering_workflow(workflow_id)
+        if not wf:
+            raise StoreError(f"Engineering workflow '{workflow_id}' not found.")
+
+        # 1. CREATED -> INTAKE_VALIDATED
+        if wf.state == EngineeringWorkflowState.CREATED:
+            intake = self.store.get_workflow_intake(wf.intake_id)
+            wf = self.store.transition_engineering_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                target_state=EngineeringWorkflowState.INTAKE_VALIDATED,
+                stage="intake_validation",
+                payload={"title": intake.title, "source_type": intake.source_type.value} if intake else {},
+            )
+
+        # 2. INTAKE_VALIDATED -> REPO_ANALYZED
+        if wf.state == EngineeringWorkflowState.INTAKE_VALIDATED:
+            intake = self.store.get_workflow_intake(wf.intake_id)
+            repo = workspace_path or Path(wf.target_repo)
+            if repo.exists() and repo.is_dir() and intake:
+                context = assemble_repository_context(repo, intake)
+                wf = self.store.transition_engineering_workflow(
+                    workflow_id=wf.workflow_id,
+                    expected_version=wf.version,
+                    target_state=EngineeringWorkflowState.REPO_ANALYZED,
+                    stage="context_assembly",
+                    context_id=context.context_id,
+                    payload={
+                        "token_estimate": context.budget_summary.estimated_tokens,
+                        "files_included": len(context.source_excerpts),
+                        "truncated": context.budget_summary.is_truncated,
+                    },
+                )
+            else:
+                return wf
+
+        # 3. REPO_ANALYZED / REPRODUCTION_PENDING -> reproduce_defect
+        if wf.state in (EngineeringWorkflowState.REPO_ANALYZED, EngineeringWorkflowState.REPRODUCTION_PENDING):
+            wf = self.reproduce_defect(
+                workflow_id=wf.workflow_id,
+                workspace_path=workspace_path,
+                harness=harness,
+            )
+
+        # 4. REPRODUCED -> plan_repair
+        if wf.state == EngineeringWorkflowState.REPRODUCED:
+            wf = self.plan_repair(
+                workflow_id=wf.workflow_id,
+                workspace_path=workspace_path,
+                provider_name=provider_name,
+                model_name=model_name,
+                scratch_workspace_path=scratch_workspace_path,
+                planner=planner,
+            )
+
+        return wf

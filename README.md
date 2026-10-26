@@ -23,18 +23,19 @@ Phase 3: Defect Reproduction & Verification ── [COMPLETED] (Milestones 1–6
 Pre-Phase 4: Local Ollama & Multi-Provider LLM Integration ── [COMPLETED]
 Phase 4 Readiness & Sandbox Gate        ── [COMPLETED]
 Phase 4: Targeted Autonomous Repair     ── [COMPLETED] (Milestones 1–6)
-Phase 5: Supervised End-to-End Engineering Workflow ── [IN PROGRESS] (Milestones 1–2 Completed)
+Phase 5: Supervised End-to-End Engineering Workflow ── [IN PROGRESS] (Milestones 1–3 Completed)
 Phase 6: Autonomous Release & Production Hardening  ── [PLANNED]
 ```
 
-### Phase 5: Supervised End-to-End Engineering Workflow (In Progress — M1–M2 Completed)
+### Phase 5: Supervised End-to-End Engineering Workflow (In Progress — M1–M3 Completed)
 - **Kickoff & Architectural Foundation (Completed)**: Unifies repository acquisition, diff review, defect reproduction, and bounded repair verification into a supervised defect-to-verified-fix workflow. Codifies a 19-state typed state machine (`CREATED` through `AWAITING_HUMAN_REVIEW` to terminal `APPROVED` / `REJECTED`), transactional event ledger, cryptographic revision pinning, fail-closed container boundaries (`SANDBOX_UNAVAILABLE`), honest outcome taxonomy (`NOT_REPRODUCED`, `FLAKY`, `BROKEN_BUILD`, `REGRESSION_DETECTED`), and an exportable certified Engineering Dossier (`patch.diff`, verification proof, SARIF).
 - **M1 — Unified Task Intake & Repository Context Pipeline (Implemented & Verified)**: Standardizes defect intake across review findings (`review_finding`), unified git diffs (`unified_diff`), issue problem statements (`issue_description`), and test specifications (`test_specification`) into a validated `WorkflowIntakeSpec`. Cryptographically pins exact 40-character commit SHA (`resolve_and_pin_revision`), intercepts revision drift (`RevisionDriftError`), detects dirty working trees (`DirtyRepositoryError`), and sanitizes affected file paths (rejecting path traversal `..` and absolute paths). Assembles scoped, deterministic repository context (`RepositoryContext`) under explicit character and token budgets (`ContextBudget`, `ContextBudgetSummary`), filtering relevant AST symbols, extracting line-numbered source excerpts, wrapping discovered repository instructions in passive untrusted boundary banners, and providing CLI commands (`forge workflow intake create/validate/show` and `forge workflow context build/show`). Verified with 26 focused unit tests and 713 regression tests.
 - **M2 — Supervised Workflow State Machine & Transactional Ledger (Implemented & Verified)**: Delivers a typed, guarded 19-state lifecycle machine with code-enforced transition validation, transactional SQLite storage (`workflow_intakes`, `engineering_workflows`, `engineering_workflow_events`), optimistic concurrency control via monotonic integer versioning (`WorkflowConcurrencyError` on conflicting updates), append-only sequential event auditing with automatic secret redaction, safe crash recovery and unblocking (`REPRO_BLOCKED` and `VERIFICATION_BLOCKED` safely resumed; terminal states strictly reject resumption), and a mandatory human authorization gate (`AWAITING_HUMAN_REVIEW` strictly required before `APPROVED`). Features CLI commands (`forge workflow start`, `forge workflow status`, `forge workflow list`, `forge workflow resume`, `forge workflow review`). Verified with 21 unit and integration tests and 734 full-suite tests.
+- **M3 — Automated Evidence Chaining from Reproduction to Repair (Implemented & Verified)**: Connects verified defect reproduction directly into bounded repair planning. Safely derives non-shell reproduction commands from test specifications or issue reproduction hints (`extract_reproduction_command_from_intake`). Validates reproduction evidence integrity against commit revision pinning, finding identity, non-empty/untruncated content, exit code contradictions, and trusted oracle provenance (`validate_reproduction_evidence`). Manages guarded transitions through `reproduce_defect`, `plan_repair`, and sequential `advance_workflow` in `EngineeringWorkflowOrchestrator`, halting on inconclusive or failed outcomes, blocking safely without host fallback on Docker absence (`REPRO_BLOCKED`), and atomically attaching valid candidate patches with optimistic concurrency in SQLite (`attach_repair_plan_to_workflow`). Features CLI commands (`forge workflow repro`, `forge workflow plan-repair`, `forge workflow advance`). Verified with 31 unit tests and 765 full-suite tests.
 - **Milestone Sequence (Roadmap)**:
   - *M1 — Unified Task Intake & Repository Context Pipeline*: Completed and verified.
   - *M2 — Supervised Workflow State Machine & Transactional Ledger*: Completed and verified.
-  - *M3 — Automated Evidence Chaining from Reproduction to Repair*: Direct forwarding of validated reproduction evidence to bounded repair planning.
+  - *M3 — Automated Evidence Chaining from Reproduction to Repair*: Completed and verified.
   - *M4 — Multi-Check Regression & Safety Verification*: Multi-stage container verification covering targeted test, baseline test suite, static linting, and security analysis (`bandit`).
   - *M5 — Certified Engineering Dossier & Operator Export*: Operator-approved export containing `patch.diff`, cryptographic integrity digests, SARIF findings, and application runbook.
   - *M6 — End-to-End Workflow Acceptance, Reliability & Release*: Comprehensive 10-domain acceptance corpus, adversarial stress tests, and formal release readiness.
@@ -173,6 +174,24 @@ forge workflow resume wf_eng_38b1f8ac9210
 # 6. Submit mandatory human review decision (approve or reject)
 forge workflow review wf_eng_38b1f8ac9210 --decision approve --notes "Verified fix offline"
 forge workflow review wf_eng_38b1f8ac9210 --decision reject --notes "Fix violates policy"
+```
+
+### Automated Evidence Chaining & Defect Reproduction (Phase 5 Milestone 3)
+```bash
+# 1. Execute defect reproduction and chain validated evidence into workflow
+forge workflow repro wf_eng_38b1f8ac9210
+
+# 2. Execute reproduction with explicit repository path and test command override
+forge workflow repro wf_eng_38b1f8ac9210 --repo /path/to/repo --test-command "pytest tests/test_calc.py"
+
+# 3. Plan evidence-grounded repair candidate for a reproduced workflow
+forge workflow plan-repair wf_eng_38b1f8ac9210 --repo /path/to/repo
+
+# 4. Plan repair with specific provider, model, and scratch directory
+forge workflow plan-repair wf_eng_38b1f8ac9210 --provider ollama --model qwen2.5-coder:7b --scratch-dir /tmp/scratch
+
+# 5. Sequentially advance workflow through intake, context, reproduction, and repair planning
+forge workflow advance wf_eng_38b1f8ac9210 --repo /path/to/repo
 ```
 
 ### Evidence-Grounded Repair Planning & Isolated Verification (Phase 4 Milestones 1–2)

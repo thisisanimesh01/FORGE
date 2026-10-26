@@ -166,11 +166,18 @@ def validate_workflow_transition(
                 f"Cannot mark workflow as VERIFIED with unverified outcome: '{verify_outcome}'"
             )
 
-    # 4. Evidence grounding check for direct repair fast-forward from REPO_ANALYZED
+    # 4. Evidence grounding check for repair planning
     if current_state == EngineeringWorkflowState.REPO_ANALYZED and target_state == EngineeringWorkflowState.REPAIR_PENDING:
         has_repro_evidence = ctx.get("has_repro_evidence", False)
         if not has_repro_evidence:
             raise InvalidWorkflowTransitionError(
                 "Direct transition from REPO_ANALYZED to REPAIR_PENDING requires verified reproduction evidence. "
                 "Otherwise workflow must transition to REPRODUCTION_PENDING."
+            )
+
+    if current_state == EngineeringWorkflowState.REPRODUCED and target_state == EngineeringWorkflowState.REPAIR_PENDING:
+        has_repro_evidence = ctx.get("has_repro_evidence", True)
+        if not has_repro_evidence:
+            raise InvalidWorkflowTransitionError(
+                "Transition from REPRODUCED to REPAIR_PENDING requires valid verified reproduction evidence."
             )

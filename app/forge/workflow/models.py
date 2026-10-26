@@ -69,6 +69,37 @@ class HumanApprovalRequiredError(WorkflowError):
     """Raised when an automated action attempts to bypass mandatory human review."""
 
 
+class EvidenceChainError(WorkflowError):
+    """Base exception raised when evidence chaining or provenance verification fails."""
+
+
+class MissingEvidenceError(EvidenceChainError):
+    """Raised when required reproduction evidence does not exist in store."""
+
+
+class StaleRevisionEvidenceError(EvidenceChainError):
+    """Raised when evidence is pinned to a commit revision differing from workflow base SHA."""
+
+
+RevisionDriftError = StaleRevisionEvidenceError
+
+
+class MismatchedEvidenceError(EvidenceChainError):
+    """Raised when evidence type, finding identity, or target repository does not match."""
+
+
+class UntrustedOracleError(EvidenceChainError):
+    """Raised when reproduction evidence lacks a trusted test/execution oracle."""
+
+
+class EvidenceTamperedError(EvidenceChainError):
+    """Raised when evidence digests, exit codes, or outputs exhibit tampering or inconsistency."""
+
+
+class CorruptedEvidenceError(EvidenceChainError):
+    """Raised when evidence content is empty, corrupted, or invalidated by excessive redaction."""
+
+
 # =============================================================================
 # Enums
 # =============================================================================
@@ -349,3 +380,32 @@ class EngineeringWorkflow(BaseModel):
     version: int = Field(default=1, ge=1, description="Monotonically increasing version for optimistic concurrency")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ReproductionStageResult(BaseModel):
+    """Structured summary of reproduction execution for workflow ledger events."""
+    model_config = ConfigDict(frozen=True)
+
+    case_id: str = Field(description="Reproduction case ID")
+    attempt_id: str = Field(description="Reproduction attempt ID")
+    attempt_number: int = Field(ge=1, description="Attempt sequence number")
+    outcome: str = Field(description="Classified reproduction outcome")
+    exit_code: Optional[int] = Field(default=None, description="Observed process exit code")
+    evidence_id: Optional[str] = Field(default=None, description="Persisted evidence record ID if reproduced")
+    sandbox_available: bool = Field(default=True, description="Whether sandbox isolation was available")
+    duration_ms: float = Field(default=0.0, ge=0.0, description="Execution duration in milliseconds")
+    diagnostic_message: Optional[str] = Field(default=None, description="Diagnostic details or skip reason")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class RepairPlanningStageResult(BaseModel):
+    """Structured summary of repair planning execution for workflow ledger events."""
+    model_config = ConfigDict(frozen=True)
+
+    plan_id: str = Field(description="Repair plan ID")
+    status: str = Field(description="Repair plan status (valid, rejected, blocked)")
+    patch_digest: Optional[str] = Field(default=None, description="SHA256 digest of patch candidate")
+    target_file: Optional[str] = Field(default=None, description="Target modified file")
+    lines_changed: int = Field(default=0, ge=0, description="Total lines modified in patch")
+    violations: List[str] = Field(default_factory=list, description="Policy or scope violations if rejected")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

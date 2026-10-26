@@ -1323,6 +1323,119 @@ class ForgeStore:
         finally:
             conn.close()
 
+    def attach_repair_plan_to_workflow(
+        self,
+        workflow_id: str,
+        expected_version: int,
+        repair_plan_id: str,
+        stage: str = "repair_plan_attached",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Atomically record a generated repair plan ID on a workflow with optimistic concurrency."""
+        from forge.workflow.models import (
+            EngineeringWorkflow,
+            EngineeringWorkflowState,
+            WorkflowConcurrencyError,
+        )
+
+        conn = self._conn()
+        try:
+            with conn:
+                cur = conn.execute(
+                    "SELECT * FROM engineering_workflows WHERE workflow_id = ?",
+                    (workflow_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise StoreError(f"Engineering workflow '{workflow_id}' not found.")
+
+                current_version = row["version"]
+                if expected_version is not None and current_version != expected_version:
+                    raise WorkflowConcurrencyError(
+                        f"Concurrency conflict on workflow '{workflow_id}': "
+                        f"expected version {expected_version}, but found {current_version}."
+                    )
+
+                current_state = EngineeringWorkflowState(row["state"])
+                new_version = current_version + 1
+                now_dt = datetime.now(timezone.utc)
+                now_str = now_dt.isoformat()
+
+                # Event recording
+                cur_seq = conn.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM engineering_workflow_events WHERE workflow_id = ?",
+                    (workflow_id,),
+                )
+                seq = cur_seq.fetchone()[0]
+                eid = f"wfe_{uuid.uuid4().hex[:12]}"
+                clean_payload = json.loads(redact_secrets(json.dumps(payload or {})))
+
+                conn.execute(
+                    """
+                    INSERT INTO engineering_workflow_events (
+                        event_id, workflow_id, sequence, from_state, to_state, stage, payload_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        eid,
+                        workflow_id,
+                        seq,
+                        current_state.value,
+                        current_state.value,
+                        stage,
+                        json.dumps(clean_payload),
+                        now_str,
+                    ),
+                )
+
+                updated_workflow = EngineeringWorkflow(
+                    workflow_id=workflow_id,
+                    intake_id=row["intake_id"],
+                    target_repo=row["target_repo"],
+                    base_commit_sha=row["base_commit_sha"],
+                    state=current_state,
+                    context_id=row["context_id"],
+                    repro_case_id=row["repro_case_id"],
+                    repair_plan_id=repair_plan_id,
+                    verification_attempt_id=row["verification_attempt_id"],
+                    regression_summary=json.loads(row["regression_summary_json"] or "{}"),
+                    human_decision=row["human_decision"],
+                    human_notes=row["human_notes"],
+                    error_message=row["error_message"],
+                    version=new_version,
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                    updated_at=now_dt,
+                )
+
+                cur_upd = conn.execute(
+                    """
+                    UPDATE engineering_workflows SET
+                        repair_plan_id = ?,
+                        version = ?,
+                        workflow_json = ?,
+                        updated_at = ?
+                    WHERE workflow_id = ? AND version = ?
+                    """,
+                    (
+                        repair_plan_id,
+                        new_version,
+                        updated_workflow.model_dump_json(),
+                        now_str,
+                        workflow_id,
+                        current_version,
+                    ),
+                )
+
+                if cur_upd.rowcount == 0:
+                    raise WorkflowConcurrencyError(
+                        f"Concurrency conflict on workflow '{workflow_id}': "
+                        f"expected version {current_version} update failed."
+                    )
+
+                return updated_workflow
+        finally:
+            conn.close()
+
     def list_engineering_workflow_events(self, workflow_id: str) -> List[Any]:
         """Fetch all events for an engineering workflow in strict sequence order."""
         from forge.workflow.models import EngineeringWorkflowEvent, EngineeringWorkflowState

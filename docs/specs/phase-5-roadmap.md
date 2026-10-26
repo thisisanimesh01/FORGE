@@ -158,11 +158,16 @@ Phase 5 is partitioned into 6 small, independently verifiable milestones:
   - CLI workflow commands in `app/forge/cli.py` (`forge workflow start`, `forge workflow status`, `forge workflow list`, `forge workflow resume`, `forge workflow review`).
 - **Exit Gate Passed**: 21 unit and integration tests in `tests/unit/test_phase5_milestone2.py` passed; 734 total project tests passed with 0 failures; target repository immutability strictly preserved.
 
-### Milestone 3: Automated Evidence Chaining from Reproduction to Repair
-- **Objective**: Wire Phase 3 defect reproduction directly into Phase 4 repair planning; ensure ungrounded findings or failed reproductions halt the workflow cleanly without fabricating evidence.
-- **Inputs**: Pinned repository context and defect hypothesis.
-- **Outputs**: Verified reproduction evidence attached to workflow; bounded repair plan and unified diff patch candidate.
-- **Exit Gate**: Proved that `REPRO_FAILED` or `REPRO_BLOCKED` prevents repair planning; proved that `REPRODUCED` cleanly generates a valid candidate patch.
+### Milestone 3: Automated Evidence Chaining from Reproduction to Repair (Implemented & Verified)
+- **Status**: COMPLETED & VERIFIED
+- **Specification**: [`docs/specs/phase-5-m3-evidence-chaining.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m3-evidence-chaining.md)
+- **Implementation**:
+  - Safe reproduction command derivation in `app/forge/workflow/evidence_chain.py` (`extract_reproduction_command_from_intake`).
+  - Strict evidence verification & provenance validation in `app/forge/workflow/evidence_chain.py` (`validate_reproduction_evidence`, rejecting missing, corrupted, stale, untrusted, or exit-code-0 contradictory evidence).
+  - Supervised orchestration in `app/forge/workflow/orchestrator.py` (`reproduce_defect`, `plan_repair`, `advance_workflow`).
+  - Optimistic concurrency plan attachment in `app/forge/storage/store.py` (`attach_repair_plan_to_workflow`).
+  - CLI workflow commands in `app/forge/cli.py` (`forge workflow repro`, `forge workflow plan-repair`, `forge workflow advance`).
+- **Exit Gate Passed**: 31 unit tests in `tests/unit/test_phase5_milestone3.py` passed; 765 regression tests passed; 100% pass on acceptance and benchmark suites; zero target repository mutations.
 
 ### Milestone 4: Multi-Check Regression & Safety Verification
 - **Objective**: Execute multi-stage verification in the Docker sandbox: (1) target reproduction test, (2) baseline test suite, (3) static linting (`flake8`/`ruff`), and (4) security analysis (`bandit`).
@@ -214,10 +219,10 @@ To prevent misleading claims of software correctness or false bug detection:
 
 ---
 
-## 8. Recommendation for Milestone 2
+## 8. Recommendation for Milestone 4
 
-With Milestone 1 completed and verified, the recommended next implementation step is **Phase 5 Milestone 2: Supervised Workflow State Machine & Transactional Ledger**:
-- Implement `EngineeringWorkflow` state machine in `app/forge/workflow/state.py` and `orchestrator.py`.
-- Define database migrations and SQLite store tables (`engineering_workflows`, `workflow_events`).
-- Support pause/resume semantics, crash recovery, and optimistic concurrency versioning.
-- Implement CLI workflow lifecycle commands (`forge workflow start/status/list/resume/review`).
+With Milestones 1–3 completed and verified, the recommended next implementation step is **Phase 5 Milestone 4: Multi-Check Regression & Safety Verification**:
+- Implement isolated multi-check verification harness chaining target reproduction test, baseline test regression, static linting, and security scanning (`bandit`).
+- Support structured outcome classification (`VERIFIED`, `BROKEN_BUILD`, `REGRESSION_DETECTED`, `SECURITY_REGRESSION`, `TIMEOUT`, `SANDBOX_UNAVAILABLE`).
+- Add workflow transition gates advancing verified repairs toward `AWAITING_HUMAN_REVIEW` or falling back to `REGRESSION_FAILED` / `VERIFICATION_FAILED`.
+- Integrate multi-check verification commands into the CLI.
