@@ -2740,6 +2740,41 @@ def cli_eng_workflow_plan_repair(
         typer.echo(_render_eng_workflow_markdown(wf, events))
 
 
+@eng_workflow_app.command(name="verify")
+def cli_eng_workflow_verify(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to verify"),
+    repo: Optional[Path] = typer.Option(None, "--repo", "-r", help="Repository path override (defaults to workflow target_repo)"),
+    scratch_dir: Optional[Path] = typer.Option(None, "--scratch-dir", help="Scratch directory for verification"),
+    no_lint: bool = typer.Option(False, "--no-lint", help="Skip static lint checks"),
+    no_security: bool = typer.Option(False, "--no-security", help="Skip security analysis checks"),
+    baseline_test: Optional[str] = typer.Option(None, "--baseline-test", help="Explicit baseline test command"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Execute isolated multi-check verification (reproduction, regression, lint, security) on proposed repair."""
+    from forge.workflow.orchestrator import EngineeringWorkflowOrchestrator
+
+    orchestrator = EngineeringWorkflowOrchestrator()
+    try:
+        base_cmd = baseline_test.split() if baseline_test else None
+        wf = orchestrator.verify_repair(
+            workflow_id=workflow_id,
+            workspace_path=repo,
+            scratch_workspace_path=scratch_dir,
+            include_lint=not no_lint,
+            include_security=not no_security,
+            baseline_test_command=base_cmd,
+        )
+        events = orchestrator.list_events(wf.workflow_id)
+    except Exception as exc:
+        typer.secho(f"Workflow verification failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if format.lower() == "json":
+        typer.echo(wf.model_dump_json(indent=2))
+    else:
+        typer.echo(_render_eng_workflow_markdown(wf, events))
+
+
 @eng_workflow_app.command(name="advance")
 def cli_eng_workflow_advance(
     workflow_id: str = typer.Argument(..., help="Workflow ID to advance"),
@@ -2747,9 +2782,10 @@ def cli_eng_workflow_advance(
     provider: Optional[str] = typer.Option(None, "--provider", "-p", help="LLM provider override"),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Model name override"),
     scratch_dir: Optional[Path] = typer.Option(None, "--scratch-dir", help="Scratch workspace directory for candidate analysis"),
+    verify: bool = typer.Option(False, "--verify", help="Automatically advance through verification stage if repair plan is generated"),
     format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
 ) -> None:
-    """Progress an engineering workflow through sequential stages up to repair planning."""
+    """Progress an engineering workflow through sequential stages up to human review."""
     from forge.workflow.orchestrator import EngineeringWorkflowOrchestrator
 
     orchestrator = EngineeringWorkflowOrchestrator()
@@ -2760,6 +2796,7 @@ def cli_eng_workflow_advance(
             provider_name=provider,
             model_name=model,
             scratch_workspace_path=scratch_dir,
+            auto_verify=verify,
         )
         events = orchestrator.list_events(wf.workflow_id)
     except Exception as exc:
@@ -2770,6 +2807,7 @@ def cli_eng_workflow_advance(
         typer.echo(wf.model_dump_json(indent=2))
     else:
         typer.echo(_render_eng_workflow_markdown(wf, events))
+
 
 
 def main() -> None:

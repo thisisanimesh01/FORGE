@@ -1462,3 +1462,69 @@ class ForgeStore:
             ]
         finally:
             conn.close()
+
+    def save_multi_check_verification(self, result: Any) -> None:
+        """Persist a MultiCheckVerificationResult to SQLite."""
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO multi_check_verifications (
+                        attempt_id, workflow_id, repair_plan_id, base_commit_sha,
+                        patch_digest, aggregate_outcome, regression_detected,
+                        sandbox_available, result_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        result.attempt_id,
+                        result.workflow_id,
+                        result.repair_plan_id,
+                        result.base_commit_sha,
+                        result.patch_digest,
+                        result.aggregate_outcome.value if hasattr(result.aggregate_outcome, "value") else str(result.aggregate_outcome),
+                        1 if result.regression_detected else 0,
+                        1 if result.sandbox_available else 0,
+                        result.model_dump_json(),
+                        result.created_at.isoformat(),
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def get_multi_check_verification(self, attempt_id: str) -> Optional[Any]:
+        """Retrieve a MultiCheckVerificationResult by attempt_id."""
+        from forge.workflow.models import MultiCheckVerificationResult
+
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT result_json FROM multi_check_verifications WHERE attempt_id = ?",
+                (attempt_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return MultiCheckVerificationResult.model_validate_json(row["result_json"])
+        finally:
+            conn.close()
+
+    def list_multi_check_verifications(self, workflow_id: Optional[str] = None) -> List[Any]:
+        """List MultiCheckVerificationResults, optionally filtered by workflow_id."""
+        from forge.workflow.models import MultiCheckVerificationResult
+
+        conn = self._conn()
+        try:
+            if workflow_id:
+                cur = conn.execute(
+                    "SELECT result_json FROM multi_check_verifications WHERE workflow_id = ? ORDER BY created_at ASC",
+                    (workflow_id,),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT result_json FROM multi_check_verifications ORDER BY created_at ASC"
+                )
+            rows = cur.fetchall()
+            return [MultiCheckVerificationResult.model_validate_json(r["result_json"]) for r in rows]
+        finally:
+            conn.close()

@@ -28,6 +28,9 @@ from forge.workflow.intake import (
     validate_intake_spec,
 )
 from forge.workflow.models import (
+    BaselineCheckFailureError,
+    CandidateRegressionError,
+    CheckStatus,
     ContextBudget,
     ContextBudgetExceededError,
     ContextBudgetSummary,
@@ -47,6 +50,10 @@ from forge.workflow.models import (
     IssueIntakePayload,
     MismatchedEvidenceError,
     MissingEvidenceError,
+    MultiCheckVerificationPlan,
+    MultiCheckVerificationResult,
+    MultiCheckVerificationStageResult,
+    PatchIntegrityTamperedError,
     RepairPlanningStageResult,
     RepositoryContext,
     RepositoryRevisionInfo,
@@ -56,7 +63,14 @@ from forge.workflow.models import (
     StaleRevisionEvidenceError,
     TargetImmutabilityViolationError,
     TestSpecIntakePayload,
+    ToolUnavailableError,
     UntrustedOracleError,
+    VerificationAggregateOutcome,
+    VerificationBlockedError,
+    VerificationCheckResult,
+    VerificationCheckSpec,
+    VerificationCheckType,
+    VerificationPipelineError,
     WorkflowConcurrencyError,
     WorkflowError,
     WorkflowIntakeSpec,
@@ -70,6 +84,11 @@ from forge.workflow.state import (
     is_resumable_state,
     is_terminal_state,
     validate_workflow_transition,
+)
+from forge.workflow.verification import (
+    MultiCheckVerifier,
+    build_default_verification_plan,
+    validate_verification_check_command,
 )
 
 __all__ = [
@@ -91,6 +110,12 @@ __all__ = [
     "UntrustedOracleError",
     "EvidenceTamperedError",
     "CorruptedEvidenceError",
+    "VerificationPipelineError",
+    "VerificationBlockedError",
+    "ToolUnavailableError",
+    "BaselineCheckFailureError",
+    "CandidateRegressionError",
+    "PatchIntegrityTamperedError",
     # Enums & Models
     "IntakeSourceType",
     "EngineeringWorkflowState",
@@ -108,6 +133,14 @@ __all__ = [
     "EngineeringWorkflowEvent",
     "ReproductionStageResult",
     "RepairPlanningStageResult",
+    "VerificationCheckType",
+    "CheckStatus",
+    "VerificationAggregateOutcome",
+    "VerificationCheckSpec",
+    "VerificationCheckResult",
+    "MultiCheckVerificationPlan",
+    "MultiCheckVerificationResult",
+    "MultiCheckVerificationStageResult",
     # Intake Functions
     "resolve_and_pin_revision",
     "compute_intake_id",
@@ -134,6 +167,10 @@ __all__ = [
     "ensure_finding_in_store",
     "extract_reproduction_command_from_intake",
     "validate_reproduction_evidence",
+    # Verification Pipeline Functions & Classes
+    "MultiCheckVerifier",
+    "build_default_verification_plan",
+    "validate_verification_check_command",
     # Orchestrator
     "EngineeringWorkflowOrchestrator",
 ]

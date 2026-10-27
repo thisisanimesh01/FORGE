@@ -263,6 +263,20 @@ CREATE TABLE IF NOT EXISTS engineering_workflow_events (
     FOREIGN KEY(workflow_id) REFERENCES engineering_workflows(workflow_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS multi_check_verifications (
+    attempt_id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    repair_plan_id TEXT NOT NULL,
+    base_commit_sha TEXT NOT NULL,
+    patch_digest TEXT NOT NULL,
+    aggregate_outcome TEXT NOT NULL,
+    regression_detected INTEGER NOT NULL DEFAULT 0,
+    sandbox_available INTEGER NOT NULL DEFAULT 1,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(workflow_id) REFERENCES engineering_workflows(workflow_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
@@ -284,6 +298,8 @@ CREATE INDEX IF NOT EXISTS idx_eng_workflows_state ON engineering_workflows(stat
 CREATE INDEX IF NOT EXISTS idx_eng_workflows_intake ON engineering_workflows(intake_id);
 CREATE INDEX IF NOT EXISTS idx_eng_workflow_events_seq ON engineering_workflow_events(workflow_id, sequence);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_eng_workflow_events_seq ON engineering_workflow_events(workflow_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_multi_check_wf ON multi_check_verifications(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_multi_check_plan ON multi_check_verifications(repair_plan_id);
 """
 
 

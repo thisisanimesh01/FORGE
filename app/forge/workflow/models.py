@@ -100,6 +100,30 @@ class CorruptedEvidenceError(EvidenceChainError):
     """Raised when evidence content is empty, corrupted, or invalidated by excessive redaction."""
 
 
+class VerificationPipelineError(WorkflowError):
+    """Base exception for repair verification pipeline errors."""
+
+
+class VerificationBlockedError(VerificationPipelineError):
+    """Raised when verification cannot proceed due to sandbox or tool unavailability."""
+
+
+class ToolUnavailableError(VerificationPipelineError):
+    """Raised when a required verification tool is not present in the execution environment."""
+
+
+class BaselineCheckFailureError(VerificationPipelineError):
+    """Raised when baseline pre-patch execution violates pre-conditions (e.g. defect not reproducible)."""
+
+
+class CandidateRegressionError(VerificationPipelineError):
+    """Raised when candidate patch introduces a regression on pre-existing passing tests."""
+
+
+class PatchIntegrityTamperedError(VerificationPipelineError):
+    """Raised when candidate patch diff content does not match its SHA256 integrity digest."""
+
+
 # =============================================================================
 # Enums
 # =============================================================================
@@ -408,4 +432,126 @@ class RepairPlanningStageResult(BaseModel):
     target_file: Optional[str] = Field(default=None, description="Target modified file")
     lines_changed: int = Field(default=0, ge=0, description="Total lines modified in patch")
     violations: List[str] = Field(default_factory=list, description="Policy or scope violations if rejected")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# =============================================================================
+# Milestone 4: Multi-Check Verification Models
+# =============================================================================
+
+class VerificationCheckType(str, Enum):
+    """Categorized check type in a multi-check verification pipeline."""
+    REPRODUCTION = "reproduction"
+    BASELINE_TESTS = "baseline_tests"
+    LINT = "lint"
+    SECURITY = "security"
+
+
+class CheckStatus(str, Enum):
+    """Execution status for an individual verification check."""
+    PASSED = "passed"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+    TIMED_OUT = "timed_out"
+    SKIPPED = "skipped"
+    INCONCLUSIVE = "inconclusive"
+
+
+class VerificationAggregateOutcome(str, Enum):
+    """Deterministic aggregate outcome of a multi-check verification pipeline."""
+    PASSED = "passed"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+    TIMED_OUT = "timed_out"
+    INCONCLUSIVE = "inconclusive"
+    BASELINE_FAILED = "baseline_failed"
+
+
+class VerificationCheckSpec(BaseModel):
+    """Specification of an isolated check to execute within the verification harness."""
+    model_config = ConfigDict(frozen=True)
+
+    check_type: VerificationCheckType = Field(description="Check category")
+    name: str = Field(description="Descriptive check name (e.g. 'pytest:target_oracle', 'flake8:style')")
+    command: List[str] = Field(description="Allowlisted non-shell command array")
+    timeout_seconds: float = Field(default=60.0, ge=1.0, le=300.0, description="Per-check timeout quota")
+    required: bool = Field(default=True, description="Whether failure or absence blocks verification")
+    expected_baseline_failure: bool = Field(default=False, description="True if baseline execution MUST fail (e.g. reproduction oracle)")
+    relative_cwd: str = Field(default=".", description="Working directory relative to repo root")
+    env_vars: Dict[str, str] = Field(default_factory=dict, description="Filtered environment variables")
+
+
+class VerificationCheckResult(BaseModel):
+    """Auditable result of a single check execution."""
+    model_config = ConfigDict(frozen=True)
+
+    check_type: VerificationCheckType = Field(description="Check category")
+    name: str = Field(description="Check name")
+    status: CheckStatus = Field(description="Individual check status")
+    command: List[str] = Field(description="Exact executed command arguments")
+    pinned_revision: str = Field(description="Pinned repository base commit SHA")
+    scratch_workspace_id: str = Field(description="Disposable scratch workspace identifier")
+    exit_code: Optional[int] = Field(default=None, description="Observed process exit code")
+    timed_out: bool = Field(default=False, description="Whether process exceeded timeout quota")
+    duration_ms: float = Field(default=0.0, ge=0.0, description="Execution duration in milliseconds")
+    stdout_excerpt: str = Field(default="", description="Sanitized and bounded standard output")
+    stderr_excerpt: str = Field(default="", description="Sanitized and bounded standard error")
+    output_digest: str = Field(default="", description="SHA256 digest of stdout + stderr")
+    provenance: str = Field(description="Provenance trace string")
+    is_baseline: bool = Field(default=False, description="Whether this was a pre-patch baseline execution")
+    diagnostic: str = Field(default="", description="Sanitized diagnostic message")
+    tool_available: bool = Field(default=True, description="Whether tool was found in sandbox")
+
+
+class MultiCheckVerificationPlan(BaseModel):
+    """Declarative, deterministic multi-check verification plan for a proposed repair."""
+    model_config = ConfigDict(frozen=True)
+
+    plan_id: str = Field(description="Deterministic verification plan ID (vplan_<hex12>)")
+    workflow_id: str = Field(description="Associated engineering workflow ID")
+    repair_plan_id: str = Field(description="Associated repair plan ID")
+    base_commit_sha: str = Field(description="Pinned base commit SHA")
+    patch_digest: str = Field(description="SHA256 digest of the patch candidate")
+    target_file: str = Field(description="Relative path of file targeted by patch")
+    checks: List[VerificationCheckSpec] = Field(default_factory=list, description="Ordered check specifications")
+    overall_timeout_seconds: float = Field(default=300.0, ge=10.0, le=900.0, description="Overall pipeline timeout")
+
+
+class MultiCheckVerificationResult(BaseModel):
+    """Immutable aggregate audit record for a multi-check verification attempt."""
+    model_config = ConfigDict(frozen=True)
+
+    attempt_id: str = Field(description="Unique verification attempt ID (vatt_<hex12>)")
+    workflow_id: str = Field(description="Associated workflow ID")
+    repair_plan_id: str = Field(description="Associated repair plan ID")
+    base_commit_sha: str = Field(description="Pinned base commit SHA")
+    patch_digest: str = Field(description="SHA256 digest of candidate patch")
+    aggregate_outcome: VerificationAggregateOutcome = Field(description="Classified aggregate outcome")
+    baseline_results: List[VerificationCheckResult] = Field(default_factory=list, description="Pre-patch baseline check results")
+    candidate_results: List[VerificationCheckResult] = Field(default_factory=list, description="Post-patch candidate check results")
+    regression_detected: bool = Field(default=False, description="Whether candidate broke pre-existing passing tests")
+    sandbox_available: bool = Field(default=True, description="Whether container isolation was available")
+    patch_applied_cleanly: bool = Field(default=True, description="Whether patch applied cleanly without conflicts")
+    syntax_valid: bool = Field(default=True, description="Whether AST syntax verification passed")
+    diagnostic: str = Field(default="", description="Sanitized aggregate diagnostic explanation")
+    total_duration_ms: float = Field(default=0.0, ge=0.0, description="Total duration across all checks in ms")
+    limitations: List[str] = Field(default_factory=list, description="Explicit operational limitations or skipped tools")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class MultiCheckVerificationStageResult(BaseModel):
+    """Structured summary for workflow ledger events upon verification completion."""
+    model_config = ConfigDict(frozen=True)
+
+    attempt_id: str = Field(description="Verification attempt ID")
+    repair_plan_id: str = Field(description="Associated repair plan ID")
+    aggregate_outcome: str = Field(description="Classified aggregate outcome")
+    checks_total: int = Field(default=0, ge=0)
+    checks_passed: int = Field(default=0, ge=0)
+    checks_failed: int = Field(default=0, ge=0)
+    checks_skipped: int = Field(default=0, ge=0)
+    regression_detected: bool = Field(default=False)
+    sandbox_available: bool = Field(default=True)
+    duration_ms: float = Field(default=0.0, ge=0.0)
+    diagnostic: str = Field(default="")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

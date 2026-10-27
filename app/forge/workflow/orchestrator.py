@@ -29,15 +29,19 @@ from forge.workflow.models import (
     HumanApprovalRequiredError,
     InvalidWorkflowTransitionError,
     MissingEvidenceError,
+    MultiCheckVerificationResult,
+    MultiCheckVerificationStageResult,
     RepairPlanningStageResult,
     ReproductionStageResult,
     RevisionDriftError,
     StaleRevisionEvidenceError,
+    VerificationAggregateOutcome,
     WorkflowConcurrencyError,
     WorkflowIntakeSpec,
     WorkflowResumeError,
 )
 from forge.workflow.state import is_resumable_state, is_terminal_state
+from forge.workflow.verification import MultiCheckVerifier, build_default_verification_plan
 
 
 class EngineeringWorkflowOrchestrator:
@@ -490,6 +494,10 @@ class EngineeringWorkflowOrchestrator:
         )
 
         if plan.status == RepairPlanStatus.VALIDATED:
+            if hasattr(self.store, "get_repair_plan") and hasattr(self.store, "save_repair_plan"):
+                if not self.store.get_repair_plan(plan.plan_id):
+                    self.store.save_repair_plan(plan)
+
             patch_digest = plan.patch_candidate.sha256_digest if plan.patch_candidate else None
             lines_changed = (plan.patch_candidate.added_lines + plan.patch_candidate.removed_lines) if plan.patch_candidate else 0
             stage_res = RepairPlanningStageResult(
@@ -526,6 +534,211 @@ class EngineeringWorkflowOrchestrator:
                 payload=stage_res.model_dump(mode="json"),
             )
 
+    def verify_repair(
+        self,
+        workflow_id: str,
+        workspace_path: Optional[Path] = None,
+        scratch_workspace_path: Optional[Path] = None,
+        verifier: Optional[Any] = None,
+        include_lint: bool = True,
+        include_security: bool = True,
+        baseline_test_command: Optional[List[str]] = None,
+    ) -> EngineeringWorkflow:
+        """Execute sandboxed multi-check verification for a proposed repair plan."""
+        from forge.repair.models import RepairPlan
+
+        wf = self.store.get_engineering_workflow(workflow_id)
+        if not wf:
+            raise StoreError(f"Engineering workflow '{workflow_id}' not found.")
+
+        # Check state: can verify from REPAIR_PENDING, VERIFICATION_PENDING, or resume from VERIFICATION_BLOCKED
+        if wf.state not in (
+            EngineeringWorkflowState.REPAIR_PENDING,
+            EngineeringWorkflowState.VERIFICATION_PENDING,
+            EngineeringWorkflowState.VERIFICATION_BLOCKED,
+        ):
+            raise InvalidWorkflowTransitionError(
+                f"Cannot verify repair for workflow in state '{wf.state.value}'. "
+                f"Workflow must be in 'repair_pending', 'verification_pending', or 'verification_blocked'."
+            )
+
+        if not wf.repair_plan_id:
+            raise StoreError(f"Workflow '{workflow_id}' has no associated repair plan to verify.")
+
+        plan: Optional[RepairPlan] = self.store.get_repair_plan(wf.repair_plan_id)
+        if not plan:
+            raise StoreError(f"Repair plan '{wf.repair_plan_id}' not found in store.")
+
+        intake = self.store.get_workflow_intake(wf.intake_id)
+        if not intake:
+            raise StoreError(f"Intake specification '{wf.intake_id}' not found.")
+
+        repo_path = workspace_path or Path(wf.target_repo)
+        if (repo_path / ".git").exists():
+            from forge.repository.acquisition import run_git_command
+            try:
+                git_res = run_git_command(["rev-parse", "HEAD"], cwd=repo_path, timeout_seconds=5)
+                if git_res.returncode == 0:
+                    current_sha = git_res.stdout.strip().lower()
+                    expected_sha = wf.base_commit_sha.strip().lower()
+                    if not current_sha.startswith(expected_sha) and not expected_sha.startswith(current_sha):
+                        raise RevisionDriftError(
+                            f"Workspace revision '{current_sha}' does not match workflow base commit '{wf.base_commit_sha}'. Revision drift detected."
+                        )
+            except RevisionDriftError:
+                raise
+            except Exception:
+                pass
+
+        # Transition to VERIFICATION_PENDING if not already
+        if wf.state != EngineeringWorkflowState.VERIFICATION_PENDING:
+            wf = self.store.transition_engineering_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                target_state=EngineeringWorkflowState.VERIFICATION_PENDING,
+                stage="start_verification",
+            )
+
+        multi_verifier = verifier or MultiCheckVerifier()
+        vplan = build_default_verification_plan(
+            workflow_id=wf.workflow_id,
+            repair_plan=plan,
+            intake_spec=intake,
+            repo_path=repo_path,
+            include_lint=include_lint,
+            include_security=include_security,
+            baseline_test_command=baseline_test_command,
+        )
+
+        vresult = multi_verifier.execute_verification(
+            plan=vplan,
+            repair_plan=plan,
+            target_repo=repo_path,
+            scratch_parent=scratch_workspace_path,
+        )
+
+        self.store.save_multi_check_verification(vresult)
+
+        stage_res = MultiCheckVerificationStageResult(
+            attempt_id=vresult.attempt_id,
+            repair_plan_id=plan.plan_id,
+            aggregate_outcome=vresult.aggregate_outcome.value,
+            checks_total=len(vresult.candidate_results) or len(vplan.checks),
+            checks_passed=sum(1 for c in vresult.candidate_results if c.status.value == "passed"),
+            checks_failed=sum(1 for c in vresult.candidate_results if c.status.value == "failed"),
+            checks_skipped=sum(1 for c in vresult.candidate_results if c.status.value == "skipped"),
+            regression_detected=vresult.regression_detected,
+            sandbox_available=vresult.sandbox_available,
+            duration_ms=vresult.total_duration_ms,
+            diagnostic=vresult.diagnostic,
+        )
+
+        if vresult.aggregate_outcome == VerificationAggregateOutcome.PASSED:
+            # 1. VERIFICATION_PENDING -> VERIFIED
+            wf = self.store.transition_engineering_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                target_state=EngineeringWorkflowState.VERIFIED,
+                stage="multi_check_verification",
+                verification_attempt_id=vresult.attempt_id,
+                regression_summary={
+                    "regression_detected": False,
+                    "checks_total": stage_res.checks_total,
+                    "checks_passed": stage_res.checks_passed,
+                    "limitations": vresult.limitations,
+                },
+                transition_context={"verification_outcome": "passed"},
+                payload=stage_res.model_dump(mode="json"),
+            )
+
+            # 2. VERIFIED -> REGRESSION_CHECKING
+            wf = self.store.transition_engineering_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                target_state=EngineeringWorkflowState.REGRESSION_CHECKING,
+                stage="regression_evaluation",
+                verification_attempt_id=vresult.attempt_id,
+                regression_summary={
+                    "regression_detected": False,
+                    "checks_total": stage_res.checks_total,
+                },
+            )
+
+            # 3. REGRESSION_CHECKING -> AWAITING_HUMAN_REVIEW (Halts strictly for human decision)
+            wf = self.store.transition_engineering_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                target_state=EngineeringWorkflowState.AWAITING_HUMAN_REVIEW,
+                stage="awaiting_operator_review",
+                verification_attempt_id=vresult.attempt_id,
+                regression_summary={"regression_detected": False},
+                transition_context={"regression_detected": False},
+            )
+            return wf
+
+        elif vresult.aggregate_outcome == VerificationAggregateOutcome.BLOCKED:
+            return self.store.transition_engineering_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                target_state=EngineeringWorkflowState.VERIFICATION_BLOCKED,
+                stage="verification_blocked",
+                verification_attempt_id=vresult.attempt_id,
+                error_message=vresult.diagnostic,
+                payload=stage_res.model_dump(mode="json"),
+            )
+
+        elif vresult.aggregate_outcome == VerificationAggregateOutcome.FAILED:
+            if vresult.regression_detected:
+                # Target reproduction was fixed, but regression occurred
+                wf = self.store.transition_engineering_workflow(
+                    workflow_id=wf.workflow_id,
+                    expected_version=wf.version,
+                    target_state=EngineeringWorkflowState.VERIFIED,
+                    stage="defect_oracle_passed",
+                    verification_attempt_id=vresult.attempt_id,
+                    transition_context={"verification_outcome": "passed"},
+                )
+                wf = self.store.transition_engineering_workflow(
+                    workflow_id=wf.workflow_id,
+                    expected_version=wf.version,
+                    target_state=EngineeringWorkflowState.REGRESSION_CHECKING,
+                    stage="regression_evaluation",
+                    verification_attempt_id=vresult.attempt_id,
+                    regression_summary={"regression_detected": True},
+                )
+                return self.store.transition_engineering_workflow(
+                    workflow_id=wf.workflow_id,
+                    expected_version=wf.version,
+                    target_state=EngineeringWorkflowState.REGRESSION_FAILED,
+                    stage="regression_detected",
+                    verification_attempt_id=vresult.attempt_id,
+                    regression_summary={"regression_detected": True},
+                    error_message=vresult.diagnostic,
+                    payload=stage_res.model_dump(mode="json"),
+                )
+            else:
+                return self.store.transition_engineering_workflow(
+                    workflow_id=wf.workflow_id,
+                    expected_version=wf.version,
+                    target_state=EngineeringWorkflowState.VERIFICATION_FAILED,
+                    stage="verification_failed",
+                    verification_attempt_id=vresult.attempt_id,
+                    error_message=vresult.diagnostic,
+                    payload=stage_res.model_dump(mode="json"),
+                )
+
+        else:
+            # TIMED_OUT, BASELINE_FAILED, INCONCLUSIVE
+            return self.store.transition_engineering_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                target_state=EngineeringWorkflowState.VERIFICATION_FAILED,
+                stage=f"verification_{vresult.aggregate_outcome.value}",
+                verification_attempt_id=vresult.attempt_id,
+                error_message=vresult.diagnostic,
+                payload=stage_res.model_dump(mode="json"),
+            )
+
     def advance_workflow(
         self,
         workflow_id: str,
@@ -535,8 +748,10 @@ class EngineeringWorkflowOrchestrator:
         scratch_workspace_path: Optional[Path] = None,
         harness: Optional[Any] = None,
         planner: Optional[Any] = None,
+        verifier: Optional[Any] = None,
+        auto_verify: bool = False,
     ) -> EngineeringWorkflow:
-        """Progress an engineering workflow through sequential stages up to repair planning."""
+        """Progress an engineering workflow through sequential stages up to repair planning (or human review if auto_verify=True)."""
         wf = self.store.get_engineering_workflow(workflow_id)
         if not wf:
             raise StoreError(f"Engineering workflow '{workflow_id}' not found.")
@@ -590,6 +805,15 @@ class EngineeringWorkflowOrchestrator:
                 model_name=model_name,
                 scratch_workspace_path=scratch_workspace_path,
                 planner=planner,
+            )
+
+        # 5. REPAIR_PENDING -> verify_repair (if auto_verify is True)
+        if auto_verify and wf.state == EngineeringWorkflowState.REPAIR_PENDING and wf.repair_plan_id:
+            wf = self.verify_repair(
+                workflow_id=wf.workflow_id,
+                workspace_path=workspace_path,
+                scratch_workspace_path=scratch_workspace_path,
+                verifier=verifier,
             )
 
         return wf

@@ -181,3 +181,11 @@ def validate_workflow_transition(
             raise InvalidWorkflowTransitionError(
                 "Transition from REPRODUCED to REPAIR_PENDING requires valid verified reproduction evidence."
             )
+
+    # 5. Regression safety check
+    if current_state == EngineeringWorkflowState.REGRESSION_CHECKING and target_state == EngineeringWorkflowState.AWAITING_HUMAN_REVIEW:
+        if ctx.get("regression_detected", False):
+            raise InvalidWorkflowTransitionError(
+                "Cannot advance to AWAITING_HUMAN_REVIEW when regression is detected. "
+                "Workflow must transition to REGRESSION_FAILED."
+            )

@@ -169,11 +169,17 @@ Phase 5 is partitioned into 6 small, independently verifiable milestones:
   - CLI workflow commands in `app/forge/cli.py` (`forge workflow repro`, `forge workflow plan-repair`, `forge workflow advance`).
 - **Exit Gate Passed**: 31 unit tests in `tests/unit/test_phase5_milestone3.py` passed; 765 regression tests passed; 100% pass on acceptance and benchmark suites; zero target repository mutations.
 
-### Milestone 4: Multi-Check Regression & Safety Verification
-- **Objective**: Execute multi-stage verification in the Docker sandbox: (1) target reproduction test, (2) baseline test suite, (3) static linting (`flake8`/`ruff`), and (4) security analysis (`bandit`).
-- **Inputs**: Validated patch candidate diff, target repo, and verification configuration.
-- **Outputs**: Structured `MultiCheckVerificationResult` categorizing outcome (`VERIFIED`, `BROKEN_BUILD`, `REGRESSION_DETECTED`, `SECURITY_REGRESSION`, `TIMEOUT`, `SANDBOX_UNAVAILABLE`).
-- **Exit Gate**: Synthetic regression fixtures correctly trigger `REGRESSION_FAILED`; clean fixes advance to `AWAITING_HUMAN_REVIEW`.
+### Milestone 4: Multi-Check Regression & Safety Verification (Implemented & Verified)
+- **Status**: COMPLETED & VERIFIED
+- **Specification**: [`docs/specs/phase-5-m4-multi-check-verification.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m4-multi-check-verification.md)
+- **Implementation**:
+  - Typed multi-check models, exceptions, and contracts in `app/forge/workflow/models.py` (`MultiCheckVerificationPlan`, `MultiCheckVerificationResult`, `VerificationCheckSpec`, `VerificationCheckResult`, `VerificationCheckType`, `CheckStatus`, `VerificationAggregateOutcome`).
+  - Command allowlisting and shell injection defense in `app/forge/workflow/verification.py` (`validate_verification_check_command`).
+  - Multi-check verification engine with baseline/candidate delta comparison in `app/forge/workflow/verification.py` (`MultiCheckVerifier`, `build_default_verification_plan`).
+  - Transactional verification persistence in `app/forge/storage/database.py` and `app/forge/storage/store.py` (`multi_check_verifications` table).
+  - Supervised lifecycle transitions and regression guards in `app/forge/workflow/state.py` and `app/forge/workflow/orchestrator.py` (`verify_repair`, `advance_workflow` with `--verify`).
+  - CLI workflow verification command in `app/forge/cli.py` (`forge workflow verify`).
+- **Exit Gate Passed**: 24 unit and integration tests in `tests/unit/test_phase5_milestone4.py` passed; 789 total regression tests passed; 100% pass on acceptance and benchmark suites; zero target repository mutations.
 
 ### Milestone 5: Certified Engineering Dossier & Operator Export
 - **Objective**: Generate a certified, structured engineering package upon operator approval, containing the validated patch diff, SHA256 integrity digest, SARIF 2.1.0 review findings, verification certificate, and manual application instructions.
@@ -219,10 +225,10 @@ To prevent misleading claims of software correctness or false bug detection:
 
 ---
 
-## 8. Recommendation for Milestone 4
+## 8. Recommendation for Milestone 5
 
-With Milestones 1–3 completed and verified, the recommended next implementation step is **Phase 5 Milestone 4: Multi-Check Regression & Safety Verification**:
-- Implement isolated multi-check verification harness chaining target reproduction test, baseline test regression, static linting, and security scanning (`bandit`).
-- Support structured outcome classification (`VERIFIED`, `BROKEN_BUILD`, `REGRESSION_DETECTED`, `SECURITY_REGRESSION`, `TIMEOUT`, `SANDBOX_UNAVAILABLE`).
-- Add workflow transition gates advancing verified repairs toward `AWAITING_HUMAN_REVIEW` or falling back to `REGRESSION_FAILED` / `VERIFICATION_FAILED`.
-- Integrate multi-check verification commands into the CLI.
+With Milestones 1–4 completed and verified, the recommended next implementation step is **Phase 5 Milestone 5: Certified Engineering Dossier & Operator Export**:
+- Define structured schemas for certified engineering dossier exports (`patch.diff`, `verification_certificate.json`, `findings.sarif`, `audit_ledger.json`, `APPLY.md`).
+- Implement cryptographic signing / SHA256 manifest verification for all exported artifacts.
+- Enforce strict operator review gate: only `APPROVED` workflows can be exported as dossiers.
+- Integrate dossier generation commands into the CLI (`forge workflow export`).
