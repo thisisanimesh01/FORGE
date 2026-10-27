@@ -9,7 +9,6 @@ Supported providers
 -------------------
 * ``fake``         — deterministic offline mock (no credentials, no network).
 * ``ollama``       — local Ollama inference server (no API key required).
-* ``ollama_cloud`` — hosted Ollama Cloud (requires ``OLLAMA_API_KEY``).
 * ``groq``         — Groq Cloud API (OpenAI-compatible; requires ``GROQ_API_KEY``).
 * ``gemini``       — Google Gemini via the OpenAI-compatibility shim
                      (requires ``GEMINI_API_KEY``).
@@ -21,7 +20,6 @@ Environment variable reference
 ``FORGE_LLM_MODEL``     — model ID override (provider-specific default used when absent).
 ``FORGE_LLM_API_BASE``  — base-URL override (overrides per-provider default).
 ``OLLAMA_BASE_URL``     — Ollama base URL (default: http://localhost:11434).
-``OLLAMA_API_KEY``      — Ollama Cloud API key.
 ``GROQ_API_KEY``        — Groq API key.
 ``GEMINI_API_KEY``      — Gemini API key.
 ``DEEPSEEK_API_KEY``    — DeepSeek API key.
@@ -51,7 +49,6 @@ from forge.llm.provider import LLMProvider, LLMUnavailableError
 _DEFAULT_MODELS: dict[str, str] = {
     "fake": "forge-fake-model",
     "ollama": "llama3",
-    "ollama_cloud": "gemma4:cloud",
     "groq": "llama-3.3-70b-versatile",
     "gemini": "gemini-2.0-flash",
     "deepseek": "deepseek-chat",
@@ -59,7 +56,6 @@ _DEFAULT_MODELS: dict[str, str] = {
 
 #: Base URL for each cloud provider's OpenAI-compatible endpoint.
 _DEFAULT_BASE_URLS: dict[str, str] = {
-    "ollama_cloud": "https://ollama.com/v1",
     "groq": "https://api.groq.com/openai/v1",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
     "deepseek": "https://api.deepseek.com/v1",
@@ -105,8 +101,11 @@ def get_provider(
     if resolved_provider == "ollama":
         return _build_ollama_provider(model=model, settings=settings)
 
-    if resolved_provider == "ollama_cloud":
-        return _build_ollama_cloud_provider(model=model, settings=settings)
+    if resolved_provider in ("ollama_cloud", "ollama-cloud"):
+        raise LLMUnavailableError(
+            "Ollama Cloud provider has been removed; Ollama is local-only at http://localhost:11434/v1. "
+            "Use 'ollama' with a locally hosted model."
+        )
 
     if resolved_provider == "groq":
         return _build_groq_provider(model=model, settings=settings)
@@ -119,7 +118,7 @@ def get_provider(
 
     raise LLMUnavailableError(
         f"Unknown LLM provider '{resolved_provider}'. "
-        "Supported providers: fake, ollama, ollama_cloud, groq, gemini, deepseek. "
+        "Supported providers: fake, ollama, groq, gemini, deepseek. "
         "Set FORGE_LLM_PROVIDER to one of these values."
     )
 
@@ -152,28 +151,6 @@ def _build_ollama_provider(model, settings) -> OpenAICompatibleProvider:
         api_base=api_base,
     )
     return provider
-
-
-def _build_ollama_cloud_provider(model, settings) -> OpenAICompatibleProvider:
-    """Build an Ollama Cloud provider (hosted at https://ollama.com/v1)."""
-    api_key = (
-        getattr(settings, "ollama_api_key", None)
-        or os.environ.get("OLLAMA_API_KEY")
-        or ""
-    ).strip()
-    if not api_key:
-        raise LLMUnavailableError(
-            "Ollama Cloud provider requires OLLAMA_API_KEY to be set. "
-            "Add it to your .env file or environment. "
-            "No automatic fallback is performed."
-        )
-    api_base = settings.llm_api_base or _DEFAULT_BASE_URLS["ollama_cloud"]
-    resolved_model = model or settings.llm_model or _DEFAULT_MODELS["ollama_cloud"]
-    return OpenAICompatibleProvider(
-        api_key=api_key,
-        model=resolved_model,
-        api_base=api_base,
-    )
 
 
 def _build_groq_provider(model, settings) -> OpenAICompatibleProvider:
@@ -282,7 +259,6 @@ def describe_provider(provider_name: Optional[str] = None) -> dict:
         }
 
     key_checks = {
-        "ollama_cloud": bool(getattr(settings, "ollama_api_key", None) or os.environ.get("OLLAMA_API_KEY")),
         "groq": bool(getattr(settings, "groq_api_key", None) or os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_API")),
         "gemini": bool(getattr(settings, "gemini_api_key", None) or os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API")),
         "deepseek": bool(getattr(settings, "deepseek_api_key", None) or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API")),

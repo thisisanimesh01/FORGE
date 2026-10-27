@@ -121,11 +121,12 @@ def test_reproduction_harness_fails_closed_without_host_execution(tmp_path: Path
 # =============================================================================
 
 def test_supported_providers_inventory():
-    """Verify supported providers list matches specifications: fake, ollama, ollama_cloud, gemini, deepseek, groq."""
+    """Verify supported providers list matches specifications: fake, ollama, gemini, deepseek, groq."""
     providers = set(_DEFAULT_MODELS.keys())
-    expected = {"fake", "ollama", "ollama_cloud", "gemini", "deepseek", "groq"}
+    expected = {"fake", "ollama", "gemini", "deepseek", "groq"}
     assert providers == expected
     assert "openai" not in providers
+    assert "ollama_cloud" not in providers
 
 
 def test_cloud_fallback_policy_disabled_by_default():
@@ -138,6 +139,12 @@ def test_openai_provider_strictly_rejected():
     """Requesting 'openai' provider must raise LLMUnavailableError."""
     with pytest.raises(LLMUnavailableError, match="Unknown LLM provider 'openai'"):
         get_provider(provider_name="openai")
+
+
+def test_ollama_cloud_provider_strictly_rejected():
+    """Requesting 'ollama_cloud' provider must raise LLMUnavailableError."""
+    with pytest.raises(LLMUnavailableError, match="Ollama Cloud provider has been removed"):
+        get_provider(provider_name="ollama_cloud")
 
 
 # =============================================================================

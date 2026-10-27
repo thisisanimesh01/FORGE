@@ -55,7 +55,7 @@ Phase 6: Autonomous Release & Production Hardening  ── [PLANNED]
 
 ### Phase 4 Readiness & Sandbox Gate (Completed)
 - **Container Sandbox & Host Isolation Audit**: Complete audit of container sandbox boundaries (`DockerSandbox`, `ReproductionHarness`). Verified that when Docker is absent (`shutil.which("docker") is None`), FORGE fails closed with `SKIPPED_SANDBOX_UNAVAILABLE` and strictly refuses to execute target repository code directly on the host.
-- **Multi-Provider & Cloud Guard Invariants**: Retained 6 supported providers (`fake`, `ollama`, `ollama_cloud`, `gemini`, `deepseek`, `groq`) with complete elimination of OpenAI API dependencies and strict enforcement of `FORGE_ALLOW_CLOUD_FALLBACK=false`.
+- **Multi-Provider & Cloud Guard Invariants**: Retained 5 supported providers (`fake`, `ollama`, `gemini`, `deepseek`, `groq`) with complete elimination of OpenAI API and Ollama Cloud dependencies, standardizing Ollama strictly on local execution (`http://localhost:11434/v1`) and enforcing `FORGE_ALLOW_CLOUD_FALLBACK=false`.
 - **Formal Repair Safety Contract (`forge.repair.contracts`)**: Codified formal safety boundaries required before Phase 4 patch generation can begin:
   - *Target Repository Immutability*: Target repository remains strictly read-only; repairs are strictly isolated to independent scratch workspaces.
   - *Base Revision Pinning*: Repairs are cryptographically pinned to the finding's verified commit SHA (`validate_base_sha`).
@@ -66,10 +66,9 @@ Phase 6: Autonomous Release & Production Hardening  ── [PLANNED]
 - **Phase 4 Autonomous Repair Notice**: **Phase 4 autonomous repair is NOT STARTED**. No automated patch generation, target repository mutation, git commit, push, or deployment has been implemented or enabled.
 
 ### Pre-Phase 4: Local Ollama & Multi-Provider LLM Integration (Completed)
-- **Local Ollama Runtime**: Default local execution via Ollama (`http://localhost:11434/v1`) with zero cloud credential requirements. Hardware resource analysis (8 GB M1, 13 GiB available disk) establishing suitability of compact coding models (`qwen2.5-coder:1.5b` or `llama3.2:3b`).
-- **Ollama Cloud Integration**: Managed inference at `https://ollama.com/v1` via `ollama_cloud` (`ollama-cloud`) requiring `OLLAMA_API_KEY` with default model `gemma4:cloud`. Decoupled from local Ollama to prevent silent routing.
+- **Local Ollama Standardization**: Standardized Ollama on strictly local inference (`http://localhost:11434/v1`) with zero cloud credential requirements. `ollama_cloud` is completely removed to prevent unauthorized or silent cloud routing. Hardware resource analysis (8 GB M1, 13 GiB available disk) establishing suitability of compact coding models (`qwen2.5-coder:1.5b` or `llama3.2:3b`).
 - **Multi-Cloud Integration**: Standard `httpx` OpenAI-compatible support for Groq (`GROQ_API_KEY` / `GROQ_API`), Google Gemini (`GEMINI_API_KEY` / `GEMINI_API`), and DeepSeek (`DEEPSEEK_API_KEY` / `DEEPSEEK_API`) with zero extra SDK dependencies.
-- **Fail-Secure Architecture**: Strict cloud fallback prohibition (`FORGE_ALLOW_CLOUD_FALLBACK=false`), bounded transient 5xx retries, typed rate-limit and authentication error mapping, and automated token scrubbing.
+- **Fail-Secure Architecture**: Strict cloud fallback prohibition (`FORGE_ALLOW_CLOUD_FALLBACK=false`), fail-closed behavior on local endpoint connection failures, bounded transient 5xx retries, typed rate-limit and authentication error mapping, and automated token scrubbing.
 
 
 ### Phase 1: Secure Repository Intelligence (Completed)
@@ -523,10 +522,9 @@ cp .env.example .env
 
 | Variable | Default | Description |
 |---|---|---|
-| `FORGE_LLM_PROVIDER` | `ollama` | Provider: `ollama` (default local), `ollama_cloud` (hosted), `groq`, `gemini`, `deepseek`, or `fake` (offline) |
-| `FORGE_LLM_MODEL` | *(empty)* | Model identifier override (provider defaults used when empty) |
+| `FORGE_LLM_PROVIDER` | `ollama` | Provider: `ollama` (default local), `groq`, `gemini`, `deepseek`, or `fake` (offline) |
+| `FORGE_LLM_MODEL` | *(empty)* | Model identifier override (e.g. `qwen2.5-coder:1.5b`; provider defaults used when empty) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Base URL for local Ollama server (compatible with Friday convention) |
-| `OLLAMA_API_KEY` | *(empty)* | API key for Ollama Cloud (`https://ollama.com/v1`) |
 | `GROQ_API_KEY` | *(empty)* | API key for Groq Cloud (compatible with Friday convention) |
 | `GEMINI_API_KEY` | *(empty)* | API key for Google Gemini (compatible with Friday convention) |
 | `DEEPSEEK_API_KEY` | *(empty)* | API key for DeepSeek (compatible with Friday convention) |
@@ -534,6 +532,29 @@ cp .env.example .env
 | `FORGE_LLM_API_BASE` | *(empty)* | Custom endpoint base URL override (vLLM, custom proxies) |
 | `FORGE_MAX_STEPS` | `10` | Max investigation iterations |
 | `FORGE_DOCKER_IMAGE` | `python:3.11-slim` | Base container image for sandboxed execution |
+
+### Local Ollama Setup & Usage
+
+FORGE standardizes on local Ollama execution (`http://localhost:11434/v1`). Hosted/cloud Ollama inference is explicitly rejected.
+
+1. **Install and Run Ollama**: Ensure Ollama is running locally:
+   ```bash
+   ollama serve
+   ```
+2. **Download Model**:
+   ```bash
+   ollama pull qwen2.5-coder:1.5b
+   ```
+3. **Configure Environment**:
+   ```bash
+   export FORGE_LLM_PROVIDER=ollama
+   export FORGE_LLM_MODEL=qwen2.5-coder:1.5b
+   export OLLAMA_BASE_URL=http://localhost:11434  # default
+   ```
+4. **Guarantees & Troubleshooting**:
+   - **No Silent Cloud Routing**: Requesting `ollama_cloud` fails immediately with `LLMUnavailableError`.
+   - **Local Network Failure**: If local Ollama is down or connection is refused, FORGE fails closed with `LLMUnavailableError` without falling back to cloud providers or fake mocks (`FORGE_ALLOW_CLOUD_FALLBACK=false`).
+   - **Model Availability**: If the requested model is not installed locally, Ollama returns an error and FORGE surfaces the failure honestly.
 
 ---
 
@@ -558,7 +579,8 @@ cp .env.example .env
 - Phase 3→4 Transition & Pre-Phase 4:
   - Multi-Provider Configuration & Credential Reuse: [`docs/specs/phase-3-provider-transition.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-provider-transition.md)
   - Local Ollama & Multi-Provider LLM Integration: [`docs/specs/pre-phase-4-llm-providers.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/pre-phase-4-llm-providers.md)
-  - Ollama Cloud Provider Integration: [`docs/specs/ollama-cloud-provider.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/ollama-cloud-provider.md)
+  - Local Ollama Standardization & Cloud Removal: [`docs/specs/local-ollama-standardization.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/local-ollama-standardization.md)
+  - Ollama Cloud Provider Integration (Superseded): [`docs/specs/ollama-cloud-provider.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/ollama-cloud-provider.md)
   - Removal of OpenAI API Provider: [`docs/specs/remove-openai-provider.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/remove-openai-provider.md)
   - Phase 4 Readiness & Sandbox Gate: [`docs/specs/phase-4-readiness.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-readiness.md)
 - Phase 4 Specifications:

@@ -18,7 +18,7 @@ Phase 5 delivers the **Supervised End-to-End Engineering Workflow** for FORGE. I
 3. **Fail-Closed Container Sandboxing**: Any dynamic execution of repository code requires containerized isolation (`DockerSandbox`). When Docker is unavailable, the workflow immediately transitions to `BLOCKED` with reason `SANDBOX_UNAVAILABLE`. Target repository code is **strictly forbidden from running on the host machine**.
 4. **Honest Outcome Attribution**: An unavailable sandbox or failed execution is **never mislabeled** as a verified defect or verified fix. Unsuccessful reproductions are marked `REPRO_FAILED`, `REPRO_BLOCKED`, or `REPRO_INCONCLUSIVE`. Failed verifications are marked `VERIFICATION_FAILED` (`REPAIR_FAILED`, `BROKEN_BUILD`, or `REGRESSION_DETECTED`).
 5. **Cryptographic Revision & Evidence Pinning**: Workflows are pinned to the verified target repository commit SHA. Changes to repository HEAD between stages are intercepted as `REVISION_DRIFT`. Repair planning is strictly prohibited without validated reproduction evidence.
-6. **Zero Silent Cloud Fallback**: Provider configuration adheres to explicit selection (`ollama`, `ollama_cloud`, `gemini`, `deepseek`, `groq`, `fake`). Automatic cloud fallback is strictly disabled (`FORGE_ALLOW_CLOUD_FALLBACK=false`). OpenAI remains unsupported.
+6. **Zero Silent Cloud Fallback & Local Ollama Standardization**: Provider configuration adheres to explicit selection (`ollama`, `gemini`, `deepseek`, `groq`, `fake`). Ollama is strictly local (`http://localhost:11434/v1`); Ollama Cloud (`ollama_cloud`) has been completely removed to prevent unauthorized or silent cloud routing. Automatic cloud fallback is strictly disabled (`FORGE_ALLOW_CLOUD_FALLBACK=false`). OpenAI remains unsupported.
 
 ---
 
