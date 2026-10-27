@@ -2356,6 +2356,7 @@ def cli_intake_create(
                 test_file=test_file,
                 test_command=test_command,
                 test_name=test_name,
+                affected_files=affected_files,
                 expected_sha=expected_sha,
                 allow_dirty=allow_dirty,
             )

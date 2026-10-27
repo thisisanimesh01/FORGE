@@ -12,11 +12,12 @@ Guarantees:
 """
 
 from datetime import datetime, timezone
+import ast
 from enum import Enum
 import hashlib
 from pathlib import Path
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from forge.config import redact_secrets
@@ -307,6 +308,21 @@ def verify_workspace_containment(workspace_root: Path, relative_path: str) -> Pa
     return candidate
 
 
+def is_test_path(file_path: Union[str, Path]) -> bool:
+    """Determine whether a file path represents a test file rather than production implementation."""
+    p = Path(file_path)
+    parts = [part.lower() for part in p.parts]
+    test_dirs = {"tests", "test", "testing", "spec", "specs"}
+    if any(part in test_dirs for part in parts[:-1]):
+        return True
+    name = p.name.lower()
+    if name.startswith("test_") or name.endswith("_test.py") or name.endswith("_test.js") or name.endswith("_test.ts"):
+        return True
+    if name.endswith("_spec.rb") or name.endswith(".spec.ts") or name.endswith(".spec.js") or name.endswith(".test.js") or name.endswith(".test.ts"):
+        return True
+    return False
+
+
 def parse_and_validate_unified_diff(
     contract: RepairSafetyContract,
     unified_diff: str,
@@ -377,6 +393,9 @@ def parse_and_validate_unified_diff(
             f"Total changed lines ({total_changed}) exceeds budget max of {budget.max_lines_changed}"
         )
 
+    if hunk_count > 0 and added_lines == 0 and removed_lines == 0:
+        reasons.append("Patch candidate contains no additions or deletions (empty/no-op diff)")
+
     metrics = {
         "touched_files": sorted(touched_files),
         "hunk_count": hunk_count,
@@ -388,6 +407,150 @@ def parse_and_validate_unified_diff(
 
     is_valid = len(reasons) == 0
     return is_valid, reasons, metrics
+
+
+def validate_patch_applicability(
+    repo_path: Path,
+    unified_diff: str,
+    base_commit_sha: Optional[str] = None,
+) -> Tuple[bool, List[str]]:
+    """Validate in-memory whether a unified diff applies cleanly to target repository files at pinned base revision.
+
+    Guarantees:
+    - Never mutates target repository files or git state (in-memory dry run only).
+    - Verifies file existence within repository workspace.
+    - Verifies that hunk context lines match actual file content around declared line numbers.
+    - Verifies that applying the patch yields syntactically valid Python code (for .py files).
+
+    Returns:
+        (is_applicable, reasons)
+    """
+    reasons: List[str] = []
+    if not unified_diff or not unified_diff.strip():
+        return False, ["Unified diff is empty"]
+
+    # Parse target files and their hunks
+    file_diff_pattern = re.compile(r"^---\s+[a/]*(.*?)\n\+\+\+\s+[b/]*(.*?)$", re.MULTILINE)
+    hunk_pattern = re.compile(
+        r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@[^\n]*\n([\s\S]*?)(?=^@@|\Z)",
+        re.MULTILINE,
+    )
+
+    file_headers = list(file_diff_pattern.finditer(unified_diff))
+    if not file_headers:
+        return False, ["Malformed diff: no file headers ('--- a/...' and '+++ b/...') detected"]
+
+    file_blocks: List[Tuple[str, str, str]] = []
+    for i, fh in enumerate(file_headers):
+        old_file = fh.group(1).strip()
+        new_file = fh.group(2).strip()
+        start_idx = fh.end()
+        end_idx = file_headers[i + 1].start() if i + 1 < len(file_headers) else len(unified_diff)
+        body = unified_diff[start_idx:end_idx]
+        file_blocks.append((old_file, new_file, body))
+
+    for old_file, new_file, body in file_blocks:
+        target_file = new_file
+        if target_file.startswith("b/"):
+            target_file = target_file[2:]
+        if target_file == "/dev/null":
+            continue
+
+        try:
+            target_disk = verify_workspace_containment(repo_path, target_file)
+        except Exception as e:
+            reasons.append(f"Scope containment error for '{target_file}': {e}")
+            continue
+
+        is_new_file = (old_file == "/dev/null" or old_file == "a//dev/null")
+        if not is_new_file:
+            if not target_disk.is_file():
+                reasons.append(f"Target file '{target_file}' does not exist in repository at base revision")
+                continue
+            orig_text = target_disk.read_text(encoding="utf-8", errors="replace")
+            orig_lines = orig_text.splitlines(keepends=True)
+        else:
+            orig_lines = []
+
+        hunk_matches = list(hunk_pattern.finditer(body))
+        if not hunk_matches:
+            reasons.append(f"Target file '{target_file}' has headers but no valid @@ hunk blocks")
+            continue
+
+        hunk_blocks = []
+        for m in hunk_matches:
+            old_start = int(m.group(1))
+            old_len = int(m.group(2)) if m.group(2) is not None else 1
+            new_start = int(m.group(3))
+            new_len = int(m.group(4)) if m.group(4) is not None else 1
+            hunk_blocks.append((old_start, old_len, new_start, new_len, m.group(5)))
+
+        # Sort hunks in descending order of old_start for in-memory splicing
+        hunk_blocks.sort(key=lambda x: x[0], reverse=True)
+        current_lines = list(orig_lines)
+
+        file_applicable = True
+        for old_start, old_len, new_start, new_len, hunk_body in hunk_blocks:
+            body_lines = hunk_body.splitlines()
+            expected_old: List[str] = []
+            replacement_new: List[str] = []
+
+            for line in body_lines:
+                if line.startswith("-") and not line.startswith("---"):
+                    expected_old.append(line[1:])
+                elif line.startswith("+") and not line.startswith("+++"):
+                    replacement_new.append(line[1:])
+                elif line.startswith(" "):
+                    expected_old.append(line[1:])
+                    replacement_new.append(line[1:])
+                elif line == "":
+                    expected_old.append("")
+                    replacement_new.append("")
+
+            # Find matching context around old_start (1-indexed)
+            target_idx = old_start - 1
+            match_idx = None
+            search_window = [target_idx] + [target_idx + d for d in [1, -1, 2, -2, 3, -3, 4, -4, 5, -5]]
+
+            for candidate_idx in search_window:
+                if candidate_idx < 0 or candidate_idx + len(expected_old) > len(current_lines):
+                    continue
+                matches_candidate = True
+                for k, exp in enumerate(expected_old):
+                    actual = current_lines[candidate_idx + k].rstrip("\r\n")
+                    if actual != exp.rstrip("\r\n"):
+                        matches_candidate = False
+                        break
+                if matches_candidate:
+                    match_idx = candidate_idx
+                    break
+
+            if match_idx is None:
+                file_applicable = False
+                reasons.append(
+                    f"Patch hunk context mismatch in '{target_file}' around line {old_start}: "
+                    f"context lines do not match file content at pinned revision"
+                )
+                break
+
+            # In-memory splice
+            formatted_replacement = [
+                l if l.endswith("\n") else f"{l}\n" for l in replacement_new
+            ]
+            current_lines[match_idx : match_idx + len(expected_old)] = formatted_replacement
+
+        if not file_applicable:
+            continue
+
+        # Check Python syntax for .py files
+        if target_file.endswith(".py"):
+            new_content = "".join(current_lines)
+            try:
+                ast.parse(new_content)
+            except SyntaxError as e:
+                reasons.append(f"Patch introduces Python syntax error in '{target_file}': {e}")
+
+    return len(reasons) == 0, reasons
 
 
 def evaluate_repair_outcome(

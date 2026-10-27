@@ -388,6 +388,7 @@ def create_intake_from_test_spec(
     test_file: str,
     test_command: str,
     test_name: Optional[str] = None,
+    affected_files: Optional[List[str]] = None,
     expected_failure_pattern: Optional[str] = None,
     expected_sha: Optional[str] = None,
     allow_dirty: bool = False,
@@ -442,6 +443,16 @@ def create_intake_from_test_spec(
         "base_commit_sha": FieldProvenance.SYSTEM_POLICY,
     }
 
+    if affected_files:
+        sanitized_affected = sanitize_affected_paths(affected_files)
+        if clean_test_file not in sanitized_affected:
+            final_affected = [clean_test_file] + sanitized_affected
+        else:
+            final_affected = sanitized_affected
+        provenance["affected_files"] = FieldProvenance.USER_INPUT
+    else:
+        final_affected = [clean_test_file]
+
     return WorkflowIntakeSpec(
         intake_id=intake_id,
         source_type=IntakeSourceType.TEST_SPECIFICATION,
@@ -449,7 +460,7 @@ def create_intake_from_test_spec(
         base_commit_sha=rev_info.commit_sha,
         title=title,
         description=desc,
-        affected_files=[clean_test_file],
+        affected_files=final_affected,
         test_payload=test_payload,
         metadata={"framework": framework, "branch": rev_info.branch},
         provenance=provenance,

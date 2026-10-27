@@ -238,12 +238,13 @@ To prevent misleading claims of software correctness or false bug detection:
 
 ## 8. Phase 5 Completion & Release Closure
 
-Phase 5 has been fully delivered, verified, and released across all 6 planned milestones:
+Phase 5 has been fully delivered, verified, and released across all 6 planned milestones, followed by the grounded repair reliability hardening:
 - **Milestone 1**: Unified Task Intake & Repository Context Pipeline (`docs/specs/phase-5-m1-intake-context.md`).
 - **Milestone 2**: Supervised Workflow State Machine & Transactional Ledger (`docs/specs/phase-5-m2-workflow-ledger.md`).
 - **Milestone 3**: Automated Evidence Chaining from Reproduction to Repair (`docs/specs/phase-5-m3-evidence-chaining.md`).
 - **Milestone 4**: Multi-Check Regression & Safety Verification (`docs/specs/phase-5-m4-multi-check-verification.md`).
 - **Milestone 5**: Certified Engineering Dossier & Operator Export (`docs/specs/phase-5-m5-dossier-export.md`).
 - **Milestone 6**: End-to-End Workflow Acceptance, Reliability & Release (`docs/specs/phase-5-m6-acceptance.md`).
+- **Reliability Hardening**: Repair Planner Grounded Target Selection, In-Memory Diff Applicability & Scope Safety (`docs/specs/repair-planner-reliability.md`).
 
 **Phase Status**: **CLOSED & RELEASED FOR SUPERVISED USE**. Zero automated mutations, zero git commits or branch pushes on target repositories. Mandatory human approval gate strictly enforced before dossier export.

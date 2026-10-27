@@ -24,8 +24,21 @@ Pre-Phase 4: Local Ollama & Multi-Provider LLM Integration ── [COMPLETED]
 Phase 4 Readiness & Sandbox Gate        ── [COMPLETED]
 Phase 4: Targeted Autonomous Repair     ── [COMPLETED] (Milestones 1–6)
 Phase 5: Supervised End-to-End Engineering Workflow ── [COMPLETED] (Milestones 1–6)
+Repair Planner Reliability & Grounded Verification ── [COMPLETED]
 Phase 6: Autonomous Release & Production Hardening  ── [PLANNED]
 ```
+
+### Repair Planner Reliability & Grounded Verification (Completed)
+- **Problem & Root Cause**: Pilot 01 exposed that intakes created from failing test specifications defaulted `affected_files` solely to test files. Downstream repair planning targeted tests instead of implementation code, causing context mismatches and verification crashes.
+- **Architectural Enhancements**:
+  - *Candidate Target Resolution*: `resolve_candidate_targets` discovers candidate implementation targets from reproduction stack traces, AST test imports, and symbol indexing.
+  - *Strict Test Immunity & Scope Restriction*: `is_test_path` identifies test files. Modifying test files to mask defects is strictly forbidden. Intakes restricted solely to tests reject repairs when implementation files require modification, requiring an authorized revised intake.
+  - *Ambiguous Root-Cause Protection*: Halts with an ambiguous root-cause blocker if multiple candidate implementation files are found without explicit designation.
+  - *Multi-File Context Framing*: Target implementation code is presented with 1-indexed line numbers; failing test oracles are explicitly demarcated as read-only reference data.
+  - *In-Memory Patch Applicability Validation*: `validate_patch_applicability` verifies hunk headers, context line matching against base commit files, Python AST syntax, and rejects empty/no-op diffs before marking plans `VALIDATED`.
+  - *Bounded Retry Feedback Loop*: Allows up to `1 + max_retries` attempts with structured diagnostic feedback, failing closed if retries are exhausted without silent cloud fallback.
+  - *Target Repository Immutability*: All planning and applicability checks run strictly in-memory, ensuring zero modification to target files or Git history.
+- **Verification**: Verified with 9 dedicated regression tests (`tests/unit/test_repair_planner_reliability.py`), 849 full regression tests, and 11/11 passing repair benchmarks.
 
 ### Phase 5: Supervised End-to-End Engineering Workflow (Completed)
 - **Kickoff & Architectural Foundation (Completed)**: Unifies repository acquisition, diff review, defect reproduction, and bounded repair verification into a supervised defect-to-verified-fix workflow. Codifies a 19-state typed state machine (`CREATED` through `AWAITING_HUMAN_REVIEW` to terminal `APPROVED` / `REJECTED`), transactional event ledger, cryptographic revision pinning, fail-closed container boundaries (`SANDBOX_UNAVAILABLE`), honest outcome taxonomy (`NOT_REPRODUCED`, `FLAKY`, `BROKEN_BUILD`, `REGRESSION_DETECTED`), and an exportable certified Engineering Dossier (`patch.diff`, verification proof, SARIF).
@@ -125,8 +138,8 @@ forge sandbox doctor
 # 1. Create a task intake specification from an issue description
 forge workflow intake create --type issue --repo /path/to/repo --issue-title "Division by zero" --issue-text "divide(10, 0) crash" --affected-file pkg/calculator.py --output intake.json
 
-# 2. Create intake from a specific failing test command
-forge workflow intake create --type test --repo /path/to/repo --test-file tests/test_calc.py --test-command "pytest tests/test_calc.py::test_zero" --output intake_test.json
+# 2. Create intake from a specific failing test command (optionally specifying affected implementation files)
+forge workflow intake create --type test --repo /path/to/repo --test-file tests/test_calc.py --test-command "pytest tests/test_calc.py::test_zero" --affected-file pkg/calculator.py --output intake_test.json
 
 # 3. Create intake from raw unified diff or patch file
 forge workflow intake create --type diff --repo /path/to/repo --diff-file changes.diff --output intake_diff.json

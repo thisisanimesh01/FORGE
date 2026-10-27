@@ -19,9 +19,11 @@ from forge.repair.contracts import (
     assert_human_approval_gate,
     compute_patch_sha256,
     evaluate_repair_outcome,
+    is_test_path,
     parse_and_validate_unified_diff,
     sanitize_patch_content,
     validate_base_sha,
+    validate_patch_applicability,
     verify_workspace_containment,
 )
 from forge.repair.models import (
@@ -109,6 +111,7 @@ __all__ = [
     "compute_acceptance_metrics",
     "compute_patch_sha256",
     "evaluate_repair_outcome",
+    "is_test_path",
     "parse_and_validate_unified_diff",
     "prepare_disposable_workspace",
     "render_acceptance_json",
@@ -116,6 +119,7 @@ __all__ = [
     "run_acceptance_suite",
     "sanitize_patch_content",
     "validate_base_sha",
+    "validate_patch_applicability",
     "validate_verification_command",
     "validate_workflow_transition",
     "verify_workspace_containment",
