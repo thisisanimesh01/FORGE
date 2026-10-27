@@ -121,6 +121,21 @@ from forge.workflow.dossier import (
     build_findings_sarif,
     build_apply_markdown,
 )
+from forge.workflow.acceptance import (
+    Phase5AcceptanceCategory,
+    Phase5AcceptanceExecutionMode,
+    ScenarioStatus,
+    Phase5AcceptanceScenarioDefinition,
+    Phase5AcceptanceScenarioResult,
+    Phase5AcceptanceMetrics,
+    Phase5AcceptanceReport,
+    compute_phase5_acceptance_metrics,
+    compute_acceptance_metrics,
+    render_phase5_acceptance_markdown,
+    render_phase5_acceptance_json,
+    run_phase5_acceptance_suite,
+    PHASE5_ACCEPTANCE_SCENARIOS,
+)
 
 
 __all__ = [
@@ -234,4 +249,18 @@ __all__ = [
     "build_audit_ledger_export",
     "build_findings_sarif",
     "build_apply_markdown",
+    # Acceptance & Reliability (Phase 5 Milestone 6)
+    "Phase5AcceptanceCategory",
+    "Phase5AcceptanceExecutionMode",
+    "ScenarioStatus",
+    "Phase5AcceptanceScenarioDefinition",
+    "Phase5AcceptanceScenarioResult",
+    "Phase5AcceptanceMetrics",
+    "Phase5AcceptanceReport",
+    "compute_phase5_acceptance_metrics",
+    "compute_acceptance_metrics",
+    "render_phase5_acceptance_markdown",
+    "render_phase5_acceptance_json",
+    "run_phase5_acceptance_suite",
+    "PHASE5_ACCEPTANCE_SCENARIOS",
 ]

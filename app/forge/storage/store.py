@@ -985,10 +985,18 @@ class ForgeStore:
             with conn:
                 conn.execute(
                     """
-                    INSERT OR REPLACE INTO workflow_intakes (
+                    INSERT INTO workflow_intakes (
                         intake_id, source_type, target_repo, base_commit_sha,
                         title, description, affected_files_json, intake_json, created_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(intake_id) DO UPDATE SET
+                        source_type=excluded.source_type,
+                        target_repo=excluded.target_repo,
+                        base_commit_sha=excluded.base_commit_sha,
+                        title=excluded.title,
+                        description=excluded.description,
+                        affected_files_json=excluded.affected_files_json,
+                        intake_json=excluded.intake_json
                     """,
                     (
                         spec.intake_id,

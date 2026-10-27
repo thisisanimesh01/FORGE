@@ -69,6 +69,11 @@ class EngineeringWorkflowOrchestrator:
         validate_intake_spec(intake_spec)
         self.store.save_workflow_intake(intake_spec)
 
+        existing = self.store.list_engineering_workflows(intake_id=intake_spec.intake_id)
+        active = [w for w in existing if not is_terminal_state(w.state)]
+        if active:
+            return active[0]
+
         wf_id = f"wf_eng_{uuid.uuid4().hex[:12]}"
         now = datetime.now(timezone.utc)
         workflow = EngineeringWorkflow(

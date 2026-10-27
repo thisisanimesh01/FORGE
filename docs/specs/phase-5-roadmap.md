@@ -1,7 +1,7 @@
 # Phase 5: Supervised End-to-End Engineering Workflow — Architecture & Roadmap
 
-- **Milestone:** Phase 5 Kickoff — Architecture & Roadmap
-- **Status:** COMPLETED & VERIFIED (Roadmap & Architectural Gate)
+- **Milestone:** Phase 5 — Supervised End-to-End Engineering Workflow
+- **Status:** COMPLETED & VERIFIED (Phase 5 Complete — Milestones 1–6)
 - **Target Repo Immutability:** STRICTLY ENFORCED (Zero automated mutation, zero commits, zero pushes, zero PRs)
 - **Commit Message:** `docs(workflow): define phase 5 end-to-end engineering roadmap`
 - **Traceability:** Implements Phase 5 specification and release gate per `AGENTS.md` (Sections 1, 2, 3, 4, 5, 7), building directly upon completed Phases 1–4.
@@ -198,7 +198,11 @@ Phase 5 is partitioned into 6 small, independently verifiable milestones:
 - **Objective**: Harden the integrated workflow against adversarial inputs, timeout cascades, concurrent workflow operations, and host isolation failure modes across comprehensive acceptance scenarios.
 - **Inputs**: Complete Phase 5 pipeline.
 - **Outputs**: Quantitative acceptance metrics, benchmark evaluation, and final release readiness documentation.
-- **Exit Gate**: 100% pass on acceptance suite; 100% pass on regression suite (unit + security + integration); mandatory release gates satisfied.
+- **Key Modules**:
+  - Acceptance scenario harness and runner in `app/forge/workflow/acceptance.py` (`run_phase5_acceptance_suite`, `compute_phase5_acceptance_metrics`, `render_phase5_acceptance_markdown`, `render_phase5_acceptance_json`).
+  - CLI integration in `app/forge/cli.py` (`forge workflow test`, `forge workflow acceptance`).
+  - Unit test suite in `tests/unit/test_phase5_milestone6.py`.
+- **Exit Gate Passed**: 30/30 deterministic acceptance scenarios passed across 10 domains (100.0% pass rate); 9 unit tests passed; full 838-test regression suite passed; 0 target repository mutations; 0 secret leaks; release gate policy fully satisfied (`docs/specs/phase-5-m6-acceptance.md`).
 
 ---
 
@@ -232,9 +236,14 @@ To prevent misleading claims of software correctness or false bug detection:
 
 ---
 
-## 8. Recommendation for Milestone 6
+## 8. Phase 5 Completion & Release Closure
 
-With Milestones 1–5 completed and verified, the recommended final step for Phase 5 is **Phase 5 Milestone 6: End-to-End Workflow Acceptance, Reliability & Release**:
-- Establish end-to-end integration acceptance test scenarios covering intake through dossier export.
-- Verify comprehensive failure mode recovery, concurrent workflow integrity, and secret containment across full pipeline runs.
-- Update documentation and prepare release readiness report for Phase 5.
+Phase 5 has been fully delivered, verified, and released across all 6 planned milestones:
+- **Milestone 1**: Unified Task Intake & Repository Context Pipeline (`docs/specs/phase-5-m1-intake-context.md`).
+- **Milestone 2**: Supervised Workflow State Machine & Transactional Ledger (`docs/specs/phase-5-m2-workflow-ledger.md`).
+- **Milestone 3**: Automated Evidence Chaining from Reproduction to Repair (`docs/specs/phase-5-m3-evidence-chaining.md`).
+- **Milestone 4**: Multi-Check Regression & Safety Verification (`docs/specs/phase-5-m4-multi-check-verification.md`).
+- **Milestone 5**: Certified Engineering Dossier & Operator Export (`docs/specs/phase-5-m5-dossier-export.md`).
+- **Milestone 6**: End-to-End Workflow Acceptance, Reliability & Release (`docs/specs/phase-5-m6-acceptance.md`).
+
+**Phase Status**: **CLOSED & RELEASED FOR SUPERVISED USE**. Zero automated mutations, zero git commits or branch pushes on target repositories. Mandatory human approval gate strictly enforced before dossier export.
