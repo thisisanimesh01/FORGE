@@ -555,3 +555,24 @@ class MultiCheckVerificationStageResult(BaseModel):
     duration_ms: float = Field(default=0.0, ge=0.0)
     diagnostic: str = Field(default="")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# Re-export Milestone 5 dossier models and exceptions
+from forge.workflow.dossier_models import (  # noqa: E402
+    AuditLedgerExport,
+    DossierError,
+    DossierExportDirectoryError,
+    DossierExportRefusedError,
+    DossierFileEntry,
+    DossierIntegrityError,
+    DossierManifest,
+    DossierSecurityError,
+    DossierSignature,
+    DossierSignatureError,
+    DossierValidationError,
+    DossierValidationResult,
+    DossierWorkflowNotApprovedError,
+    HumanReviewStatus,
+    VerificationCertificate,
+    VerificationCertificateCheckEntry,
+)

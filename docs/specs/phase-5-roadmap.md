@@ -182,10 +182,17 @@ Phase 5 is partitioned into 6 small, independently verifiable milestones:
 - **Exit Gate Passed**: 24 unit and integration tests in `tests/unit/test_phase5_milestone4.py` passed; 789 total regression tests passed; 100% pass on acceptance and benchmark suites; zero target repository mutations.
 
 ### Milestone 5: Certified Engineering Dossier & Operator Export
+- **Status**: COMPLETED & VERIFIED
+- **Specification**: [docs/specs/phase-5-m5-dossier-export.md](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m5-dossier-export.md)
 - **Objective**: Generate a certified, structured engineering package upon operator approval, containing the validated patch diff, SHA256 integrity digest, SARIF 2.1.0 review findings, verification certificate, and manual application instructions.
-- **Inputs**: Approved workflow record.
-- **Outputs**: Exported directory containing `patch.diff`, `verification_certificate.json`, `findings.sarif`, `audit_ledger.json`, and `APPLY.md`.
-- **Exit Gate**: Dossier schema validation; cryptographic digest verification; zero target repository mutations verified.
+- **Inputs**: Approved workflow record (`state == APPROVED`, `human_decision == "approve"`).
+- **Outputs**: Exported directory containing `patch.diff`, `verification_certificate.json`, `findings.sarif`, `audit_ledger.json`, `APPLY.md`, and `manifest.json` (with optional HMAC-SHA256 signature).
+- **Key Modules**:
+  - Typed models and schemas in `app/forge/workflow/dossier_models.py` (`DossierManifest`, `VerificationCertificate`, `AuditLedgerExport`, `DossierValidationResult`).
+  - Export and offline validation engine in `app/forge/workflow/dossier.py` (`export_engineering_dossier`, `validate_engineering_dossier`, `validate_workflow_for_export`, `sign_manifest_files`).
+  - Orchestrator export integration in `app/forge/workflow/orchestrator.py` (`export_dossier`).
+  - CLI commands in `app/forge/cli.py` (`forge workflow export`, `forge workflow validate-dossier`).
+- **Exit Gate Passed**: 40 unit and integration tests in `tests/unit/test_phase5_milestone5.py` passed; 829 total regression tests passed; 100% pass on acceptance and benchmark suites; zero target repository mutations.
 
 ### Milestone 6: End-to-End Workflow Acceptance, Reliability & Release
 - **Objective**: Harden the integrated workflow against adversarial inputs, timeout cascades, concurrent workflow operations, and host isolation failure modes across comprehensive acceptance scenarios.
@@ -225,10 +232,9 @@ To prevent misleading claims of software correctness or false bug detection:
 
 ---
 
-## 8. Recommendation for Milestone 5
+## 8. Recommendation for Milestone 6
 
-With Milestones 1–4 completed and verified, the recommended next implementation step is **Phase 5 Milestone 5: Certified Engineering Dossier & Operator Export**:
-- Define structured schemas for certified engineering dossier exports (`patch.diff`, `verification_certificate.json`, `findings.sarif`, `audit_ledger.json`, `APPLY.md`).
-- Implement cryptographic signing / SHA256 manifest verification for all exported artifacts.
-- Enforce strict operator review gate: only `APPROVED` workflows can be exported as dossiers.
-- Integrate dossier generation commands into the CLI (`forge workflow export`).
+With Milestones 1–5 completed and verified, the recommended final step for Phase 5 is **Phase 5 Milestone 6: End-to-End Workflow Acceptance, Reliability & Release**:
+- Establish end-to-end integration acceptance test scenarios covering intake through dossier export.
+- Verify comprehensive failure mode recovery, concurrent workflow integrity, and secret containment across full pipeline runs.
+- Update documentation and prepare release readiness report for Phase 5.

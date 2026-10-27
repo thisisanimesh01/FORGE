@@ -90,6 +90,38 @@ from forge.workflow.verification import (
     build_default_verification_plan,
     validate_verification_check_command,
 )
+from forge.workflow.dossier_models import (
+    AuditLedgerExport,
+    DossierError,
+    DossierExportDirectoryError,
+    DossierExportRefusedError,
+    DossierFileEntry,
+    DossierIntegrityError,
+    DossierManifest,
+    DossierSecurityError,
+    DossierSignature,
+    DossierSignatureError,
+    DossierValidationError,
+    DossierValidationResult,
+    DossierWorkflowNotApprovedError,
+    HumanReviewStatus,
+    VerificationCertificate,
+    VerificationCertificateCheckEntry,
+)
+from forge.workflow.dossier import (
+    REQUIRED_DOSSIER_FILES,
+    ALL_ALLOWED_DOSSIER_FILES,
+    export_engineering_dossier,
+    validate_engineering_dossier,
+    validate_workflow_for_export,
+    sign_manifest_files,
+    verify_manifest_signature,
+    build_verification_certificate,
+    build_audit_ledger_export,
+    build_findings_sarif,
+    build_apply_markdown,
+)
+
 
 __all__ = [
     # Errors
@@ -173,4 +205,33 @@ __all__ = [
     "validate_verification_check_command",
     # Orchestrator
     "EngineeringWorkflowOrchestrator",
+    # Dossier Models & Exceptions
+    "DossierError",
+    "DossierWorkflowNotApprovedError",
+    "DossierExportRefusedError",
+    "DossierSecurityError",
+    "DossierExportDirectoryError",
+    "DossierIntegrityError",
+    "DossierSignatureError",
+    "DossierValidationError",
+    "DossierFileEntry",
+    "DossierSignature",
+    "DossierManifest",
+    "VerificationCertificateCheckEntry",
+    "HumanReviewStatus",
+    "VerificationCertificate",
+    "AuditLedgerExport",
+    "DossierValidationResult",
+    # Dossier Functions & Constants
+    "REQUIRED_DOSSIER_FILES",
+    "ALL_ALLOWED_DOSSIER_FILES",
+    "export_engineering_dossier",
+    "validate_engineering_dossier",
+    "validate_workflow_for_export",
+    "sign_manifest_files",
+    "verify_manifest_signature",
+    "build_verification_certificate",
+    "build_audit_ledger_export",
+    "build_findings_sarif",
+    "build_apply_markdown",
 ]

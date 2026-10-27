@@ -2809,6 +2809,123 @@ def cli_eng_workflow_advance(
         typer.echo(_render_eng_workflow_markdown(wf, events))
 
 
+@eng_workflow_app.command(name="export")
+def workflow_export(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to export as certified engineering dossier"),
+    output_dir: Path = typer.Option(..., "--output-dir", "-o", help="Target export directory path"),
+    repo: Optional[Path] = typer.Option(None, "--repo", "-r", help="Repository path override for revision drift check"),
+    key: Optional[str] = typer.Option(None, "--key", help="Secret key string for HMAC-SHA256 manifest signature"),
+    key_file: Optional[Path] = typer.Option(None, "--key-file", help="Path to file containing secret key for signing"),
+    key_id: Optional[str] = typer.Option(None, "--key-id", help="Identifier for signing key"),
+    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing dossier package in output directory"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Export an approved engineering workflow into an integrity-verified engineering dossier package."""
+    from forge.workflow.dossier import export_engineering_dossier
+    from forge.storage.store import ForgeStore
+    from forge.config import get_settings
+
+    signing_key = key
+    if key_file is not None:
+        if not key_file.is_file():
+            typer.secho(f"Signing key file not found: '{key_file}'", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        signing_key = key_file.read_text(encoding="utf-8").strip()
+
+    settings = get_settings()
+    store = ForgeStore(db_path=settings.db_path)
+
+    try:
+        manifest = export_engineering_dossier(
+            workflow_id=workflow_id,
+            output_dir=output_dir,
+            store=store,
+            target_repo_path=repo,
+            signing_key=signing_key,
+            key_id=key_id,
+            force=force,
+        )
+    except Exception as exc:
+        typer.secho(f"Dossier export failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if format.lower() == "json":
+        typer.echo(manifest.model_dump_json(indent=2))
+    else:
+        typer.echo("# FORGE Certified Engineering Dossier Exported")
+        typer.echo(f"- **Dossier ID**: `{manifest.dossier_id}`")
+        typer.echo(f"- **Workflow ID**: `{manifest.workflow_id}`")
+        typer.echo(f"- **Export Directory**: `{output_dir.resolve()}`")
+        typer.echo(f"- **Base Revision**: `{manifest.base_commit_sha}`")
+        typer.echo(f"- **Patch SHA-256**: `{manifest.patch_digest}`")
+        typer.echo(f"- **Total Files**: `{len(manifest.files)}`")
+        if manifest.signature:
+            typer.echo(f"- **Cryptographic Signature**: `HMAC-SHA256` (Key ID: `{manifest.signature.key_id}`)")
+        else:
+            typer.echo(f"- **Integrity**: `SHA-256 Manifest Checksums` (Unsigned)")
+        typer.echo("")
+        typer.echo("Files packaged:")
+        for fname, entry in sorted(manifest.files.items()):
+            typer.echo(f"  - `{fname}` ({entry.byte_size} bytes, sha256: `{entry.sha256[:16]}...`)")
+        typer.echo("")
+        typer.echo(f"Dossier ready for operator inspection in '{output_dir.resolve()}'. See APPLY.md.")
+
+
+@eng_workflow_app.command(name="validate-dossier")
+def workflow_validate_dossier(
+    dossier_dir: Path = typer.Argument(..., help="Path to dossier directory to validate"),
+    key: Optional[str] = typer.Option(None, "--key", help="Secret key string to verify HMAC-SHA256 signature"),
+    key_file: Optional[Path] = typer.Option(None, "--key-file", help="Path to file containing secret key"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Perform deterministic offline validation of an exported engineering dossier."""
+    from forge.workflow.dossier import validate_engineering_dossier
+
+    signing_key = key
+    if key_file is not None:
+        if not key_file.is_file():
+            typer.secho(f"Signing key file not found: '{key_file}'", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        signing_key = key_file.read_text(encoding="utf-8").strip()
+
+    try:
+        res = validate_engineering_dossier(
+            dossier_dir=dossier_dir,
+            signing_key=signing_key,
+        )
+    except Exception as exc:
+        typer.secho(f"Dossier validation error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if format.lower() == "json":
+        typer.echo(res.model_dump_json(indent=2))
+    else:
+        if res.is_valid:
+            typer.secho("[VALID] Engineering dossier passed all integrity and schema checks.", fg=typer.colors.GREEN)
+            typer.echo(f"- **Directory**: `{res.dossier_dir}`")
+            typer.echo(f"- **Workflow ID**: `{res.workflow_id}`")
+            typer.echo(f"- **Base Commit**: `{res.base_commit_sha}`")
+            typer.echo(f"- **Patch SHA-256**: `{res.patch_digest}`")
+            typer.echo(f"- **Files Verified**: `{res.files_verified}`")
+            if res.signature_present:
+                if res.signature_valid is True:
+                    typer.secho("- **Signature**: [VALID] HMAC-SHA256 signature verified successfully.", fg=typer.colors.GREEN)
+                elif res.signature_valid is None:
+                    typer.secho("- **Signature**: [UNVERIFIED] HMAC-SHA256 signature present (provide --key to verify).", fg=typer.colors.YELLOW)
+                else:
+                    typer.secho("- **Signature**: [INVALID] Signature mismatch.", fg=typer.colors.RED)
+            else:
+                typer.echo("- **Signature**: None (Unsigned manifest with SHA-256 integrity checksums)")
+            for w in res.warnings:
+                typer.secho(f"  [WARN] {w}", fg=typer.colors.YELLOW)
+        else:
+            typer.secho("[INVALID] Engineering dossier failed validation.", fg=typer.colors.RED, err=True)
+            for err in res.errors:
+                typer.secho(f"  [ERROR] {err}", fg=typer.colors.RED, err=True)
+            for w in res.warnings:
+                typer.secho(f"  [WARN] {w}", fg=typer.colors.YELLOW, err=True)
+            raise typer.Exit(code=1)
+
 
 def main() -> None:
     """CLI entry point."""

@@ -6,7 +6,7 @@ Milestone 2: Supervised Workflow State Machine & Transactional Ledger.
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from forge.config import ForgeSettings, get_settings
 from forge.reproduction.manager import ReproductionCaseManager
@@ -817,3 +817,24 @@ class EngineeringWorkflowOrchestrator:
             )
 
         return wf
+
+    def export_dossier(
+        self,
+        workflow_id: str,
+        output_dir: Union[str, Path],
+        target_repo_path: Optional[Union[str, Path]] = None,
+        signing_key: Optional[Union[str, bytes]] = None,
+        key_id: Optional[str] = None,
+        force: bool = False,
+    ) -> Any:
+        """Export an approved engineering workflow into an integrity-verified engineering dossier."""
+        from forge.workflow.dossier import export_engineering_dossier
+        return export_engineering_dossier(
+            workflow_id=workflow_id,
+            output_dir=output_dir,
+            store=self.store,
+            target_repo_path=target_repo_path,
+            signing_key=signing_key,
+            key_id=key_id,
+            force=force,
+        )

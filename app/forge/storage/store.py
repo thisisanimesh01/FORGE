@@ -1049,12 +1049,28 @@ class ForgeStore:
             with conn:
                 conn.execute(
                     """
-                    INSERT OR REPLACE INTO engineering_workflows (
+                    INSERT INTO engineering_workflows (
                         workflow_id, intake_id, target_repo, base_commit_sha, state,
                         context_id, repro_case_id, repair_plan_id, verification_attempt_id,
                         regression_summary_json, human_decision, human_notes, error_message,
                         version, workflow_json, created_at, updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(workflow_id) DO UPDATE SET
+                        intake_id = excluded.intake_id,
+                        target_repo = excluded.target_repo,
+                        base_commit_sha = excluded.base_commit_sha,
+                        state = excluded.state,
+                        context_id = excluded.context_id,
+                        repro_case_id = excluded.repro_case_id,
+                        repair_plan_id = excluded.repair_plan_id,
+                        verification_attempt_id = excluded.verification_attempt_id,
+                        regression_summary_json = excluded.regression_summary_json,
+                        human_decision = excluded.human_decision,
+                        human_notes = excluded.human_notes,
+                        error_message = excluded.error_message,
+                        version = excluded.version,
+                        workflow_json = excluded.workflow_json,
+                        updated_at = excluded.updated_at
                     """,
                     (
                         workflow.workflow_id,
@@ -1462,6 +1478,67 @@ class ForgeStore:
             ]
         finally:
             conn.close()
+
+    def append_engineering_workflow_event(
+        self,
+        workflow_id: str,
+        to_state: Any,
+        from_state: Optional[Any] = None,
+        stage: str = "custom",
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Append an event to the engineering workflow ledger."""
+        from forge.workflow.models import EngineeringWorkflowEvent, EngineeringWorkflowState
+
+        conn = self._conn()
+        try:
+            with conn:
+                cur_seq = conn.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM engineering_workflow_events WHERE workflow_id = ?",
+                    (workflow_id,),
+                )
+                seq = cur_seq.fetchone()[0]
+                eid = f"wfe_{uuid.uuid4().hex[:12]}"
+                clean_payload = json.loads(redact_secrets(json.dumps(payload or {})))
+                to_val = to_state.value if hasattr(to_state, "value") else str(to_state)
+                from_val = (
+                    from_state.value
+                    if (from_state and hasattr(from_state, "value"))
+                    else (str(from_state) if from_state else None)
+                )
+                now_dt = datetime.now(timezone.utc)
+                now_str = now_dt.isoformat()
+
+                conn.execute(
+                    """
+                    INSERT INTO engineering_workflow_events (
+                        event_id, workflow_id, sequence, from_state, to_state, stage, payload_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        eid,
+                        workflow_id,
+                        seq,
+                        from_val,
+                        to_val,
+                        stage,
+                        json.dumps(clean_payload),
+                        now_str,
+                    ),
+                )
+                return EngineeringWorkflowEvent(
+                    event_id=eid,
+                    workflow_id=workflow_id,
+                    sequence=seq,
+                    from_state=EngineeringWorkflowState(from_val) if from_val else None,
+                    to_state=EngineeringWorkflowState(to_val),
+                    stage=stage,
+                    payload=clean_payload,
+                    created_at=now_dt,
+                )
+        finally:
+            conn.close()
+
 
     def save_multi_check_verification(self, result: Any) -> None:
         """Persist a MultiCheckVerificationResult to SQLite."""

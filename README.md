@@ -27,20 +27,21 @@ Phase 5: Supervised End-to-End Engineering Workflow ── [IN PROGRESS] (Milest
 Phase 6: Autonomous Release & Production Hardening  ── [PLANNED]
 ```
 
-### Phase 5: Supervised End-to-End Engineering Workflow (In Progress — M1–M4 Completed)
+### Phase 5: Supervised End-to-End Engineering Workflow (In Progress — M1–M5 Completed)
 - **Kickoff & Architectural Foundation (Completed)**: Unifies repository acquisition, diff review, defect reproduction, and bounded repair verification into a supervised defect-to-verified-fix workflow. Codifies a 19-state typed state machine (`CREATED` through `AWAITING_HUMAN_REVIEW` to terminal `APPROVED` / `REJECTED`), transactional event ledger, cryptographic revision pinning, fail-closed container boundaries (`SANDBOX_UNAVAILABLE`), honest outcome taxonomy (`NOT_REPRODUCED`, `FLAKY`, `BROKEN_BUILD`, `REGRESSION_DETECTED`), and an exportable certified Engineering Dossier (`patch.diff`, verification proof, SARIF).
 - **M1 — Unified Task Intake & Repository Context Pipeline (Implemented & Verified)**: Standardizes defect intake across review findings (`review_finding`), unified git diffs (`unified_diff`), issue problem statements (`issue_description`), and test specifications (`test_specification`) into a validated `WorkflowIntakeSpec`. Cryptographically pins exact 40-character commit SHA (`resolve_and_pin_revision`), intercepts revision drift (`RevisionDriftError`), detects dirty working trees (`DirtyRepositoryError`), and sanitizes affected file paths (rejecting path traversal `..` and absolute paths). Assembles scoped, deterministic repository context (`RepositoryContext`) under explicit character and token budgets (`ContextBudget`, `ContextBudgetSummary`), filtering relevant AST symbols, extracting line-numbered source excerpts, wrapping discovered repository instructions in passive untrusted boundary banners, and providing CLI commands (`forge workflow intake create/validate/show` and `forge workflow context build/show`). Verified with 26 focused unit tests and 713 regression tests.
 - **M2 — Supervised Workflow State Machine & Transactional Ledger (Implemented & Verified)**: Delivers a typed, guarded 19-state lifecycle machine with code-enforced transition validation, transactional SQLite storage (`workflow_intakes`, `engineering_workflows`, `engineering_workflow_events`), optimistic concurrency control via monotonic integer versioning (`WorkflowConcurrencyError` on conflicting updates), append-only sequential event auditing with automatic secret redaction, safe crash recovery and unblocking (`REPRO_BLOCKED` and `VERIFICATION_BLOCKED` safely resumed; terminal states strictly reject resumption), and a mandatory human authorization gate (`AWAITING_HUMAN_REVIEW` strictly required before `APPROVED`). Features CLI commands (`forge workflow start`, `forge workflow status`, `forge workflow list`, `forge workflow resume`, `forge workflow review`). Verified with 21 unit and integration tests and 734 full-suite tests.
 - **M3 — Automated Evidence Chaining from Reproduction to Repair (Implemented & Verified)**: Connects verified defect reproduction directly into bounded repair planning. Safely derives non-shell reproduction commands from test specifications or issue reproduction hints (`extract_reproduction_command_from_intake`). Validates reproduction evidence integrity against commit revision pinning, finding identity, non-empty/untruncated content, exit code contradictions, and trusted oracle provenance (`validate_reproduction_evidence`). Manages guarded transitions through `reproduce_defect`, `plan_repair`, and sequential `advance_workflow` in `EngineeringWorkflowOrchestrator`, halting on inconclusive or failed outcomes, blocking safely without host fallback on Docker absence (`REPRO_BLOCKED`), and atomically attaching valid candidate patches with optimistic concurrency in SQLite (`attach_repair_plan_to_workflow`). Features CLI commands (`forge workflow repro`, `forge workflow plan-repair`, `forge workflow advance`). Verified with 31 unit tests and 765 full-suite tests.
 - **M4 — Multi-Check Regression & Safety Verification (Implemented & Verified)**: Delivers a bounded, isolated multi-check verification pipeline executing across baseline and candidate disposable scratch workspaces inside Docker containers (`MultiCheckVerifier`). Chains reproduction check (defect oracle), baseline test suite (`pytest -q tests/`), static linting (`flake8`/`ruff`), and security analysis (`bandit`), with command allowlisting and shell injection defense (`validate_verification_check_command`). Categorizes outcomes honestly (`PASSED`, `FAILED`, `BLOCKED`, `TIMED_OUT`, `INCONCLUSIVE`, `BASELINE_FAILED`). Distinguishes candidate regressions (`REGRESSION_DETECTED`) from pre-existing baseline failures (`BASELINE_FAILED`). Transitions clean repairs safely through `VERIFIED -> REGRESSION_CHECKING -> AWAITING_HUMAN_REVIEW` while strictly halting for human review before any approval. Persists verification attempts in SQLite `multi_check_verifications`. Features CLI commands (`forge workflow verify` and `forge workflow advance --verify`). Verified with 24 unit and integration tests and 789 full-suite tests.
+- **M5 — Certified Engineering Dossier & Operator Export (Implemented & Verified)**: Delivers certified engineering dossier generation and offline operator export for approved workflows. Strictly conditions export on explicit human operator approval (`APPROVED` state with `human_decision == "approve"`), revalidating workflow version, pinned commit SHA, patch digest, evidence provenance, and sequential ledger integrity. Exports a deterministic package: `patch.diff` (unmodified bounded diff $\le 100$ lines, $\le 20$ KB), `verification_certificate.json` (machine-readable proof and delta comparison), `findings.sarif` (standards-compliant SARIF 2.1.0 document), `audit_ledger.json` (complete sequential secret-scrubbed audit trail), `APPLY.md` (dry-run, apply, verification, and rollback runbook), and `manifest.json` (canonical SHA-256 integrity checksums + optional HMAC-SHA256 signature). Enforces path containment, directory safety policy, and offline validation (`validate_engineering_dossier`). Features CLI commands (`forge workflow export` and `forge workflow validate-dossier`). Verified with 40 unit and integration tests and 829 full-suite tests.
 - **Milestone Sequence (Roadmap)**:
   - *M1 — Unified Task Intake & Repository Context Pipeline*: Completed and verified.
   - *M2 — Supervised Workflow State Machine & Transactional Ledger*: Completed and verified.
   - *M3 — Automated Evidence Chaining from Reproduction to Repair*: Completed and verified.
   - *M4 — Multi-Check Regression & Safety Verification*: Completed and verified.
-  - *M5 — Certified Engineering Dossier & Operator Export*: Operator-approved export containing `patch.diff`, cryptographic integrity digests, SARIF findings, and application runbook.
+  - *M5 — Certified Engineering Dossier & Operator Export*: Completed and verified.
   - *M6 — End-to-End Workflow Acceptance, Reliability & Release*: Comprehensive 10-domain acceptance corpus, adversarial stress tests, and formal release readiness.
-- **Strict Boundary Notice**: Target repository immutability is strictly enforced. Autonomous git commits, branch pushes, pull requests, merges, and deployments remain strictly forbidden. Automated workflow strictly halts at `AWAITING_HUMAN_REVIEW`.
+- **Strict Boundary Notice**: Target repository immutability is strictly enforced. Autonomous git commits, branch pushes, pull requests, merges, and deployments remain strictly forbidden. Automated workflow strictly halts at `AWAITING_HUMAN_REVIEW`. Only explicit operator approval unlocks dossier export.
 
 ### Phase 4: Targeted Autonomous Repair (Completed)
 - **M1 — Evidence-Grounded Repair Planning & Patch Generation (Implemented)**: Converts calibrated findings and verified reproduction evidence into structured, bounded repair plans and candidate unified diffs. Enforces strict evidence grounding (ungrounded findings rejected), prompt-injection mitigation via untrusted context framing, protected file immunity (`AGENTS.md`, `README.md`, `.gitignore`, `pyproject.toml`, `.github/*`), strict size budgeting ($\le 100$ lines, $\le 5$ hunks, $\le 1$ file, $\le 20$ KB), target repository immutability, mandatory human approval gates, and SQLite persistence.
@@ -214,6 +215,31 @@ forge workflow verify wf_eng_38b1f8ac9210 --format json
 
 # 6. Sequentially advance workflow all the way through multi-check verification to human review gate
 forge workflow advance wf_eng_38b1f8ac9210 --repo /path/to/repo --verify
+```
+
+### Certified Engineering Dossier & Operator Export (Phase 5 Milestone 5)
+```bash
+# 1. Export an approved workflow into a certified engineering dossier package
+forge workflow export wf_eng_38b1f8ac9210 --output-dir ./dossier_output
+
+# 2. Export with repository path for HEAD revision drift validation
+forge workflow export wf_eng_38b1f8ac9210 --output-dir ./dossier_output --repo /path/to/repo
+
+# 3. Export with cryptographic HMAC-SHA256 signature using an operator key
+forge workflow export wf_eng_38b1f8ac9210 --output-dir ./dossier_output --key "operator-secret-token" --key-id "sec-ops-1"
+
+# 4. Export with key loaded securely from file and force overwrite
+forge workflow export wf_eng_38b1f8ac9210 --output-dir ./dossier_output --force --key-file /path/to/key.txt
+
+# 5. Export and output machine-readable JSON summary
+forge workflow export wf_eng_38b1f8ac9210 --output-dir ./dossier_output --format json
+
+# 6. Validate an exported engineering dossier offline (checks SHA-256 digests and file completeness)
+forge workflow validate-dossier ./dossier_output
+
+# 7. Validate an exported engineering dossier with HMAC-SHA256 signature verification
+forge workflow validate-dossier ./dossier_output --key "operator-secret-token"
+forge workflow validate-dossier ./dossier_output --key-file /path/to/key.txt --format json
 ```
 
 ### Evidence-Grounded Repair Planning & Isolated Verification (Phase 4 Milestones 1–2)
@@ -522,4 +548,5 @@ cp .env.example .env
   - Supervised Workflow State Machine & Transactional Ledger: [`docs/specs/phase-5-m2-workflow-ledger.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m2-workflow-ledger.md)
   - Automated Evidence Chaining from Reproduction to Repair: [`docs/specs/phase-5-m3-evidence-chaining.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m3-evidence-chaining.md)
   - Multi-Check Regression & Safety Verification: [`docs/specs/phase-5-m4-multi-check-verification.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m4-multi-check-verification.md)
+  - Certified Engineering Dossier & Operator Export: [`docs/specs/phase-5-m5-dossier-export.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m5-dossier-export.md)
 - Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)
