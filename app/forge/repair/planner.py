@@ -559,6 +559,43 @@ class RepairPlanner:
                 except Exception:
                     test_content = None
 
+        # 5b. Deterministically Resolve Edit Anchor from Trusted Repository Content
+        from forge.repair.anchoring import (
+            AnchorResolutionStatus,
+            EditAnchorContract,
+            resolve_source_anchor,
+            construct_patch_from_edit_anchor,
+        )
+
+        anchor: Optional[EditAnchorContract] = None
+        try:
+            anchor = resolve_source_anchor(
+                repo_path=repo_resolved,
+                target_file=target_file,
+                base_commit_sha=resolved_sha,
+                finding=finding,
+                evidence_records=evidence_records,
+                allowed_files=[target_file],
+            )
+            if anchor.status in (
+                AnchorResolutionStatus.SCOPE_VIOLATION,
+                AnchorResolutionStatus.PROTECTED_PATH,
+                AnchorResolutionStatus.STALE_REVISION,
+                AnchorResolutionStatus.DIGEST_MISMATCH,
+            ):
+                return self._build_rejected_plan(
+                    finding_id=finding_id,
+                    target_repo=str(repo_resolved),
+                    base_commit_sha=resolved_sha,
+                    cited_evidence_ids=cited_ids,
+                    target_file=target_file,
+                    violations=[anchor.rejection_reason or f"Anchor resolution failed with status '{anchor.status.value}'"],
+                    run_id=run_id,
+                    store=store,
+                )
+        except Exception:
+            anchor = None
+
         # 6. Assemble Prompt with Untrusted Data Boundary Framing
         prompt = self._build_prompt(
             finding=finding,
@@ -568,6 +605,7 @@ class RepairPlanner:
             raw_text=raw_text if file_path_disk.is_file() else None,
             test_file=test_file,
             test_content=test_content,
+            anchor=anchor,
         )
 
         # 7. Request Structured Repair Proposal from Provider with Bounded Retries
@@ -765,6 +803,21 @@ class RepairPlanner:
                     budget=self.budget,
                     base_commit_sha=resolved_sha,
                 )
+                if not constr_valid and anchor is not None and getattr(anchor, "status", None) and getattr(anchor.status, "value", str(anchor.status)) == "resolved":
+                    if any("intervening lines" in r.lower() or "search block not found" in r.lower() for r in constr_reasons):
+                        # Attempt grounding via verified source anchor
+                        anch_valid, anch_diff, anch_reasons, anch_metrics = construct_patch_from_edit_anchor(
+                            anchor=anchor,
+                            replacement_content=diagnosis.replace_block,
+                            repo_path=repo_resolved,
+                            budget=self.budget,
+                        )
+                        if anch_valid:
+                            constr_valid = True
+                            constructed_diff = anch_diff
+                            constr_reasons = []
+                            metrics = anch_metrics
+
                 diff_text = sanitize_patch_content(constructed_diff)
                 last_diff_text = diff_text
                 last_diff_valid = constr_valid
@@ -962,6 +1015,7 @@ class RepairPlanner:
         raw_text: Optional[str] = None,
         test_file: Optional[str] = None,
         test_content: Optional[str] = None,
+        anchor: Optional[Any] = None,
     ) -> str:
         """Construct prompt with explicit untrusted context boundaries."""
         evidence_snippets = []
@@ -970,8 +1024,23 @@ class RepairPlanner:
             evidence_snippets.append(snippet)
         evidence_str = "\n".join(evidence_snippets) if evidence_snippets else "None provided."
 
-        defect_lines = _extract_defect_line_numbers(evidence, target_file)
-        anchor_section = _build_focused_anchor_section(raw_text, target_file, defect_lines)
+        if anchor and getattr(anchor, "status", None) and getattr(anchor.status, "value", str(anchor.status)) == "resolved":
+            anchor_section = f"""
+=== DETERMINISTICALLY RESOLVED SOURCE ANCHOR (FROM TRUSTED REPOSITORY CONTENT) ===
+File: {target_file} (Lines {anchor.start_line}-{anchor.end_line})
+Exact source block verified from pinned repository content:
+```
+{anchor.anchor_text}
+```
+INSTRUCTION: Target ONLY this exact statement block.
+Set "search_block" to this exact anchor text.
+Set "replace_block" to your minimal replacement code.
+Do NOT replace whole functions or omit docstrings/comments.
+=== END DETERMINISTICALLY RESOLVED SOURCE ANCHOR ===
+"""
+        else:
+            defect_lines = _extract_defect_line_numbers(evidence, target_file)
+            anchor_section = _build_focused_anchor_section(raw_text, target_file, defect_lines)
 
         test_oracle_section = ""
         if test_file and test_content:

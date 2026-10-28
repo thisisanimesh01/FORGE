@@ -37,6 +37,12 @@ from forge.repair.models import (
     RepairVerificationResult,
     StructuredPatchProposalSchema,
 )
+from forge.repair.anchoring import (
+    AnchorResolutionStatus,
+    EditAnchorContract,
+    resolve_source_anchor,
+    construct_patch_from_edit_anchor,
+)
 from forge.repair.planner import RepairPlanner
 from forge.repair.verifier import (
     PatchApplicationError,
@@ -77,8 +83,10 @@ __all__ = [
     "AcceptanceReport",
     "AcceptanceScenarioDefinition",
     "AcceptanceScenarioResult",
+    "AnchorResolutionStatus",
     "AutonomousMutationForbiddenError",
     "BudgetExceededError",
+    "EditAnchorContract",
     "HumanApprovalRequiredError",
     "InvalidWorkflowTransitionError",
     "PatchApplicationError",
@@ -113,6 +121,7 @@ __all__ = [
     "assert_human_approval_gate",
     "compute_acceptance_metrics",
     "compute_patch_sha256",
+    "construct_patch_from_edit_anchor",
     "construct_unified_diff_from_search_replace",
     "evaluate_repair_outcome",
     "is_test_path",
@@ -120,6 +129,7 @@ __all__ = [
     "prepare_disposable_workspace",
     "render_acceptance_json",
     "render_acceptance_markdown",
+    "resolve_source_anchor",
     "run_acceptance_suite",
     "sanitize_patch_content",
     "validate_base_sha",

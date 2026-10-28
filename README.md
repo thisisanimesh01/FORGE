@@ -30,8 +30,20 @@ Patch Generation Reliability & Diff Syntax Enforcement ── [COMPLETED]
 Structured Patch Construction & Deterministic Synthesis ── [COMPLETED]
 Structured Proposal Wire-Schema Reliability & Patch Representation Contract ── [COMPLETED]
 Deterministic Patch Anchoring & Minimal Replacements ── [COMPLETED]
+Deterministic Edit Anchoring & Source-Grounded Repair ── [COMPLETED]
 Phase 6: Autonomous Release & Production Hardening  ── [PLANNED]
 ```
+
+### Deterministic Edit Anchoring & Source-Grounded Repair (Completed)
+- **Problem & Root Cause**: Forensics across Pilot 01 Attempts 1–7 demonstrated that requiring compact local coding models (`qwen2.5-coder:1.5b`) to author both the exact verbatim search coordinates and replacement blocks leads to recurring failures when files contain docstrings, comments, or multi-line structures. Models omit intervening docstrings or comments, failing verbatim matching. However, AST parsing and reproduction evidence can localize the exact statement deterministically without relying on model-generated coordinates.
+- **Architectural Enhancements**:
+  - *Separation of Localization from Replacement*: Separates deterministic source localization (executed against trusted repository files via Python AST analysis and test reproduction traces) from replacement proposal generation (proposed by the model).
+  - *Typed Edit Anchor Contract (`EditAnchorContract`)*: Formalizes target path, base commit SHA, source SHA-256 digest, exact anchor text, 1-indexed line coordinates, surrounding context, evidence linkage, and typed resolution status (`AnchorResolutionStatus`).
+  - *Safe Anchor Resolution (`resolve_source_anchor`)*: Enforces path traversal and protected path defense, scope containment, revision drift interception, and deterministic AST statement localization from failing test assertion traces to the target function body. Disambiguates or fails closed (`ANCHOR_AMBIGUOUS`, `ANCHOR_UNRESOLVED`).
+  - *Deterministic Patch Construction (`construct_patch_from_edit_anchor`)*: Synthesizes standard unified diffs from verified anchors and replacement blocks via `difflib.unified_diff`. Rejects no-ops, empty content, and structural/indentation mismatches (such as whole-function definitions replacing internal statement anchors). Verifies in-memory patch applicability and Python AST syntax without modifying target files.
+  - *Repair Planner Integration*: Injects deterministically resolved source anchors (`=== DETERMINISTICALLY RESOLVED SOURCE ANCHOR ===`) into prompt context and provides graceful anchor-grounded recovery when model search blocks omit intervening lines but replacement content is valid.
+  - *Fail-Closed & Sandbox Invariants*: Retains strict target repository immutability, `FORGE_ALLOW_CLOUD_FALLBACK=false`, and mandatory human authorization gate.
+- **Verification**: Verified with 12 dedicated unit tests (`tests/unit/test_deterministic_edit_anchoring.py`), 906 full regression tests, 56/56 repair and review benchmarks, and 2/2 live Docker integration tests.
 
 ### Deterministic Patch Anchoring & Minimal Replacements (Completed)
 - **Problem & Root Cause**: Pilot 01 Attempt 6 revealed that while local Ollama (`qwen2.5-coder:1.5b`) emitted structured search/replace keys reliably, it attempted to replace entire multi-line functions while omitting docstrings or comments inside `search_block`. Because FORGE enforces strict verbatim matching without fuzzy trimming (`count == 1`), the search block failed to match. Furthermore, error diagnostics did not detect omitted intervening lines or guide the model toward minimal statement-level replacement.

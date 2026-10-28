@@ -251,5 +251,6 @@ Phase 5 has been fully delivered, verified, and released across all 6 planned mi
 - **Reliability Hardening 4**: Structured Patch Construction & Deterministic Search-and-Replace Synthesis (`docs/specs/structured-patch-construction.md`).
 - **Reliability Hardening 5**: Structured Proposal Wire-Schema Reliability & Patch Representation Contract (`docs/specs/structured-proposal-wire-schema.md`).
 - **Reliability Hardening 6**: Deterministic Patch Anchoring, Statement-Level Search-and-Replace & Verbatim Context Delivery (`docs/specs/patch-anchoring-minimal-replacements.md`).
+- **Reliability Hardening 7**: Deterministic Edit Anchoring & Source-Grounded Repair (`docs/specs/deterministic-edit-anchoring.md`).
 
 **Phase Status**: **CLOSED & RELEASED FOR SUPERVISED USE**. Zero automated mutations, zero git commits or branch pushes on target repositories. Mandatory human approval gate strictly enforced before dossier export.
