@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from forge.config import redact_secrets
@@ -48,6 +49,93 @@ from forge.schemas import EventType, EvidenceRecord, Finding
 
 
 MAX_CONTEXT_CHARS = 10_000
+MAX_RESPONSE_CHARS = 50_000
+MAX_PLANNING_SECONDS = 120.0
+MAX_REPAIR_PLANNER_RETRIES = 3
+DEFAULT_MAX_OUTPUT_TOKENS = 4096
+
+
+def build_repair_response_format() -> Dict[str, Any]:
+    """Construct OpenAI-compatible response_format schema for RepairModelResponseSchema."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "RepairModelResponseSchema",
+            "schema": RepairModelResponseSchema.model_json_schema(),
+            "strict": True,
+        },
+    }
+
+
+def parse_json_payload(raw_content: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Parse a strict JSON object payload from raw LLM output or markdown code fences without permissive rewriting.
+
+    Returns:
+        (parsed_dict, None) if parsing succeeded.
+        (None, diagnostic_error) if parsing failed.
+    """
+    if len(raw_content) > MAX_RESPONSE_CHARS:
+        return None, f"Model response exceeded maximum allowed length ({len(raw_content)} > {MAX_RESPONSE_CHARS} chars)"
+
+    if not raw_content or not raw_content.strip():
+        return None, "Model response was empty"
+
+    cleaned = raw_content.strip()
+    last_err: Optional[Exception] = None
+
+    # 1. Try direct parse
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, dict):
+            return data, None
+        return None, f"Model response JSON root must be an object, got {type(data).__name__}"
+    except json.JSONDecodeError as direct_err:
+        last_err = direct_err
+
+    # 2. Try extracting from ```json ... ``` code fence
+    fence_pattern = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
+    match = fence_pattern.search(cleaned)
+    if match:
+        fence_content = match.group(1).strip()
+        try:
+            data = json.loads(fence_content)
+            if isinstance(data, dict):
+                return data, None
+            return None, f"Model response JSON root in code fence must be an object, got {type(data).__name__}"
+        except json.JSONDecodeError as fence_err:
+            last_err = fence_err
+
+    # 3. Try finding outer braces { ... }
+    first_brace = cleaned.find("{")
+    last_brace = cleaned.rfind("}")
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        candidate = cleaned[first_brace : last_brace + 1]
+        try:
+            data = json.loads(candidate)
+            if isinstance(data, dict):
+                return data, None
+            return None, f"Model response JSON root must be an object, got {type(data).__name__}"
+        except json.JSONDecodeError as brace_err:
+            last_err = brace_err
+
+    # Format concise, non-secret diagnostic explaining syntax error
+    err_line = getattr(last_err, "lineno", None)
+    err_col = getattr(last_err, "colno", None)
+    err_msg = last_err.msg if hasattr(last_err, "msg") else str(last_err)
+    loc_info = f" at line {err_line}, column {err_col}" if err_line and err_col else ""
+
+    if "Expecting property name" in err_msg or "Expecting value" in err_msg or "trailing comma" in err_msg.lower():
+        diag = f"Invalid JSON syntax: Model response was not valid JSON ({err_msg}{loc_info}). Trailing commas before '}}' or ']' are forbidden in JSON."
+    else:
+        diag = f"Invalid JSON syntax: Model response was not valid JSON ({err_msg}{loc_info})."
+
+    return None, redact_secrets(diag)
+
+
+def _extract_json_payload(raw_content: str) -> Optional[Dict[str, Any]]:
+    """Backward-compatible wrapper for parse_json_payload returning parsed dict or None."""
+    payload, _ = parse_json_payload(raw_content)
+    return payload
 
 
 def _extract_git_head_commit(repo_path: Path) -> Optional[str]:
@@ -65,38 +153,6 @@ def _extract_git_head_commit(repo_path: Path) -> Optional[str]:
                 return sha
     except Exception:
         pass
-    return None
-
-
-def _extract_json_payload(raw_content: str) -> Optional[Dict[str, Any]]:
-    """Robustly extract a JSON payload from raw LLM output or markdown code fences."""
-    cleaned = raw_content.strip()
-
-    # Try direct parse
-    try:
-        return json.loads(cleaned)
-    except Exception:
-        pass
-
-    # Try extracting from ```json ... ``` code fence
-    fence_pattern = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
-    match = fence_pattern.search(cleaned)
-    if match:
-        try:
-            return json.loads(match.group(1).strip())
-        except Exception:
-            pass
-
-    # Try finding outer braces { ... }
-    first_brace = cleaned.find("{")
-    last_brace = cleaned.rfind("}")
-    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-        candidate = cleaned[first_brace : last_brace + 1]
-        try:
-            return json.loads(candidate)
-        except Exception:
-            pass
-
     return None
 
 
@@ -223,12 +279,14 @@ class RepairPlanner:
         model_name: Optional[str] = None,
         budget: Optional[RepairBudget] = None,
         max_retries: int = 2,
+        max_planning_seconds: float = MAX_PLANNING_SECONDS,
     ):
         self.provider_name = provider_name
         self.model_name = model_name
         self.budget = budget or RepairBudget()
         self._llm_provider = llm_provider
-        self.max_retries = max(0, max_retries)
+        self.max_retries = min(MAX_REPAIR_PLANNER_RETRIES, max(0, max_retries))
+        self.max_planning_seconds = max(0.001, max_planning_seconds)
 
     def _resolve_llm_provider(self) -> LLMProvider:
         """Resolve LLM provider instance."""
@@ -497,32 +555,78 @@ class RepairPlanner:
         last_diff_valid: bool = False
 
         total_attempts = 1 + self.max_retries
+        start_time = time.monotonic()
+        response_format = build_repair_response_format()
+
         for attempt in range(total_attempts):
+            elapsed = time.monotonic() - start_time
+            if elapsed > self.max_planning_seconds:
+                last_violations = [f"Repair planning exceeded time budget ({self.max_planning_seconds:.1f}s)"]
+                for v in last_violations:
+                    if v not in all_violations:
+                        all_violations.append(v)
+                break
+
             llm_req = LLMRequest(
                 messages=messages,
                 temperature=0.0,
+                max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
+                response_format=response_format,
             )
 
             try:
                 llm_resp = provider.generate(llm_req)
                 resp_content = llm_resp.content or ""
             except Exception as e:
+                sanitized_err = redact_secrets(str(e))
                 return self._build_rejected_plan(
                     finding_id=finding_id,
                     target_repo=str(repo_resolved),
                     base_commit_sha=resolved_sha,
                     cited_evidence_ids=cited_ids,
                     target_file=target_file,
-                    violations=[f"LLM provider generation failed: {e}"],
+                    violations=[f"LLM provider generation failed: {sanitized_err}"],
                     run_id=run_id,
                     store=store,
                 )
 
+            # Check elapsed planning time after generation
+            if (time.monotonic() - start_time) > self.max_planning_seconds:
+                time_err = f"Repair planning exceeded time budget ({self.max_planning_seconds:.2f}s)"
+                last_violations = [time_err]
+                if time_err not in all_violations:
+                    all_violations.append(time_err)
+                break
+
+            # Check response size bound
+            if len(resp_content) > MAX_RESPONSE_CHARS:
+                len_err = f"Model response exceeded maximum allowed length ({len(resp_content)} > {MAX_RESPONSE_CHARS} chars)"
+                last_violations = [len_err]
+                if len_err not in all_violations:
+                    all_violations.append(len_err)
+                if hasattr(provider, "scripted_responses") and not getattr(provider, "scripted_responses", None) and not getattr(provider, "response_generator", None):
+                    break
+                if attempt < self.max_retries:
+                    messages.append(ChatMessage(role=MessageRole.ASSISTANT, content=resp_content[:1000] + "\n... [TRUNCATED]"))
+                    messages.append(
+                        ChatMessage(
+                            role=MessageRole.USER,
+                            content=(
+                                f"Your previous response was too long ({len(resp_content)} chars). "
+                                f"Please return a concise, valid JSON object under {MAX_RESPONSE_CHARS} chars matching the requested schema."
+                            ),
+                        )
+                    )
+                    continue
+                else:
+                    break
+
             messages.append(ChatMessage(role=MessageRole.ASSISTANT, content=resp_content))
 
-            payload = _extract_json_payload(resp_content)
+            payload, parse_diag = parse_json_payload(resp_content)
             if not payload:
-                last_violations = ["Model response was not valid JSON or could not be parsed"]
+                diag_msg = parse_diag or "Model response was not valid JSON or could not be parsed"
+                last_violations = [diag_msg]
                 for v in last_violations:
                     if v not in all_violations:
                         all_violations.append(v)
@@ -533,8 +637,10 @@ class RepairPlanner:
                         ChatMessage(
                             role=MessageRole.USER,
                             content=(
-                                "Your previous response was not valid JSON or could not be parsed. "
-                                "Please return ONLY a valid JSON object matching the requested schema without any markdown commentary outside the JSON."
+                                f"Your previous response could not be parsed as valid JSON:\n"
+                                f"- {diag_msg}\n\n"
+                                f"Please return ONLY a valid, complete JSON object matching the requested schema. "
+                                f"Ensure all JSON syntax is strictly valid with no trailing commas before closing braces '}}' or brackets ']'."
                             ),
                         )
                     )
@@ -546,7 +652,8 @@ class RepairPlanner:
                 diagnosis = RepairModelResponseSchema.model_validate(payload)
                 last_diagnosis = diagnosis
             except Exception as e:
-                last_violations = [f"Model response did not conform to repair schema: {e}"]
+                schema_err = redact_secrets(str(e))
+                last_violations = [f"Model response did not conform to repair schema: {schema_err}"]
                 for v in last_violations:
                     if v not in all_violations:
                         all_violations.append(v)
@@ -557,8 +664,9 @@ class RepairPlanner:
                         ChatMessage(
                             role=MessageRole.USER,
                             content=(
-                                f"Your previous response did not conform to the schema: {e}. "
-                                "Please return a valid JSON object with all required fields."
+                                f"Your previous response did not conform to the schema:\n"
+                                f"- {schema_err}\n\n"
+                                f"Please return a valid JSON object with all required fields."
                             ),
                         )
                     )

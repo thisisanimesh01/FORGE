@@ -56,6 +56,10 @@ class LLMRequest(BaseModel):
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: Optional[int] = Field(default=None, ge=1)
     model: Optional[str] = Field(default=None, description="Override model identifier")
+    response_format: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Structured output format specification (e.g. json_object or json_schema)",
+    )
 
 
 class LLMResponse(BaseModel):

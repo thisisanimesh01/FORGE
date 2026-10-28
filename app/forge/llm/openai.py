@@ -96,6 +96,9 @@ class OpenAICompatibleProvider:
         if request.max_tokens:
             payload["max_tokens"] = request.max_tokens
 
+        if request.response_format:
+            payload["response_format"] = request.response_format
+
         if request.tools:
             payload["tools"] = [
                 {
@@ -170,7 +173,33 @@ class OpenAICompatibleProvider:
                 raise LLMContextLengthError(
                     f"LLM context length exceeded: {redact_secrets(resp.text[:200])}"
                 )
-            raise LLMProviderError(f"LLM API bad request (HTTP 400): {redact_secrets(resp.text[:300])}")
+            if "response_format" in err_text or "json_schema" in err_text:
+                # Provider rejected structured output specification; attempt graceful downgrade on the same provider
+                rf = payload.get("response_format")
+                if isinstance(rf, dict) and rf.get("type") == "json_schema":
+                    payload["response_format"] = {"type": "json_object"}
+                    try:
+                        fallback_resp = client.post(endpoint, json=payload, headers=headers)
+                        if fallback_resp.status_code == 200:
+                            resp = fallback_resp
+                        elif fallback_resp.status_code == 400 and "response_format" in fallback_resp.text.lower():
+                            del payload["response_format"]
+                            no_rf_resp = client.post(endpoint, json=payload, headers=headers)
+                            if no_rf_resp.status_code == 200:
+                                resp = no_rf_resp
+                    except Exception:
+                        pass
+                elif "response_format" in payload:
+                    del payload["response_format"]
+                    try:
+                        no_rf_resp = client.post(endpoint, json=payload, headers=headers)
+                        if no_rf_resp.status_code == 200:
+                            resp = no_rf_resp
+                    except Exception:
+                        pass
+
+            if resp.status_code == 400:
+                raise LLMProviderError(f"LLM API bad request (HTTP 400): {redact_secrets(resp.text[:300])}")
 
         if resp.status_code >= 500:
             raise LLMUnavailableError(

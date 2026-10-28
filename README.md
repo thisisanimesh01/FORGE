@@ -568,6 +568,8 @@ FORGE standardizes on local Ollama execution (`http://localhost:11434/v1`). Host
    - **No Silent Cloud Routing**: Requesting `ollama_cloud` fails immediately with `LLMUnavailableError`.
    - **Local Network Failure**: If local Ollama is down or connection is refused, FORGE fails closed with `LLMUnavailableError` without falling back to cloud providers or fake mocks (`FORGE_ALLOW_CLOUD_FALLBACK=false`).
    - **Model Availability**: If the requested model is not installed locally, Ollama returns an error and FORGE surfaces the failure honestly.
+   - **Structured Output Support**: FORGE sends an explicit OpenAI-compatible `response_format` with `json_schema` derived from `RepairModelResponseSchema` to ensure strict JSON output.
+   - **Syntax Error Recovery & Bounded Retries**: If a model generates malformed JSON (such as a trailing comma before a closing brace), FORGE rejects permissive rewriting and instead performs a bounded retry (max 3 retries, 120s timeout, 50,000 char limit) with concise diagnostic feedback so the local model can correct its output. If retries are exhausted, it fails closed safely.
 
 ---
 
@@ -611,4 +613,7 @@ FORGE standardizes on local Ollama execution (`http://localhost:11434/v1`). Host
   - Automated Evidence Chaining from Reproduction to Repair: [`docs/specs/phase-5-m3-evidence-chaining.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m3-evidence-chaining.md)
   - Multi-Check Regression & Safety Verification: [`docs/specs/phase-5-m4-multi-check-verification.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m4-multi-check-verification.md)
   - Certified Engineering Dossier & Operator Export: [`docs/specs/phase-5-m5-dossier-export.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m5-dossier-export.md)
+  - End-to-End Workflow Acceptance, Reliability & Release: [`docs/specs/phase-5-m6-acceptance.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m6-acceptance.md)
+  - Repair Planner Grounding, Applicability & Scope Safety: [`docs/specs/repair-planner-reliability.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/repair-planner-reliability.md)
+  - Local Ollama Structured Output & Syntax Error Recovery: [`docs/specs/local-ollama-structured-output.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/local-ollama-structured-output.md)
 - Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)
