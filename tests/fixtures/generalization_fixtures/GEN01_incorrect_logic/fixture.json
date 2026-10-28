@@ -1,0 +1,13 @@
+{
+  "fixture_id": "GEN01_incorrect_logic",
+  "name": "Discount Addition Instead of Subtraction",
+  "description": "calculate_discount adds the discount amount to price instead of subtracting it.",
+  "category": "incorrect_logic",
+  "target_file": "src/pricing.py",
+  "test_file": "tests/test_pricing.py",
+  "reproduction_command": "python3 -m unittest tests/test_pricing.py",
+  "expected_failure_pattern": "AssertionError",
+  "valid_search_block": "    # Defect: adds discount to price instead of subtracting it\n    return price + (price * discount_percent / 100.0)",
+  "valid_replace_block": "    # Fixed: subtract discount from price\n    return price - (price * discount_percent / 100.0)",
+  "plausible_incorrect_replace_block": "    return (price * discount_percent / 100.0)"
+}

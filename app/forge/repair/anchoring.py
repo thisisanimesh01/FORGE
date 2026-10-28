@@ -150,17 +150,102 @@ def _extract_test_call_site_symbols(
     return list(dict.fromkeys(discovered_symbols))
 
 
+def _score_candidate_statement(
+    stmt: ast.stmt,
+    raw_lines: List[str],
+    finding_tokens: set[str],
+    finding_text: str,
+    ev_tokens: set[str],
+    ev_text: str,
+    is_unraised_exception: bool,
+    is_runtime_error: bool,
+    is_value_assertion: bool,
+) -> float:
+    """Compute deterministic relevance score for a candidate statement based on evidence and AST properties."""
+    start = stmt.lineno
+    end = stmt.end_lineno if hasattr(stmt, "end_lineno") and stmt.end_lineno else start
+    stmt_lines = raw_lines[start - 1 : end]
+    stmt_text = "".join(stmt_lines)
+    stmt_lower = stmt_text.lower()
+    stmt_tokens = set(re.findall(r"\b[a-zA-Z0-9_.]+\b", stmt_lower))
+
+    score = 0.0
+    common_stopwords = {
+        "def", "self", "return", "if", "for", "in", "is", "not", "and", "or",
+        "true", "false", "none", "class", "try", "except", "while", "with", "as",
+    }
+
+    # Signal A: Keyword & token overlap
+    for token in stmt_tokens:
+        if token not in common_stopwords:
+            if token in finding_tokens:
+                score += 4.0
+            if token in ev_tokens:
+                score += 3.0
+            # Strong signal for numeric literals matching evidence/finding (e.g., 0.5, 0, 273.15, 65535)
+            if re.match(r"^\d+(?:\.\d+)?$", token):
+                if token in finding_text or token in ev_text:
+                    score += 15.0
+
+    # Signal B: Operator matches
+    has_math_op = any(op in stmt_text for op in ("+", "-", "*", "/"))
+    mentions_math = any(
+        kw in finding_text or kw in ev_text
+        for kw in ("add", "subtract", "plus", "minus", "multiply", "divide", "rate", "percent", "discount", "calculation", "math")
+    )
+    if has_math_op and mentions_math:
+        score += 10.0
+
+    # Signal C: Semantic alignment with failure category
+    if is_unraised_exception:
+        # Defect is missing or faulty guard that returned instead of raising
+        if isinstance(stmt, ast.If):
+            score += 20.0
+        elif isinstance(stmt, ast.Return) and any(dummy in stmt_lower for dummy in ("0", "false", "none", "''", '""', "clipped")):
+            score += 18.0
+        elif isinstance(stmt, ast.Raise):
+            score += 5.0
+    elif is_runtime_error:
+        # Defect is unhandled runtime error (IndexError, KeyError, etc.)
+        if "indexerror" in ev_text or "indexerror" in finding_text:
+            if "[" in stmt_text or "len(" in stmt_text:
+                score += 20.0
+        if isinstance(stmt, ast.If):
+            score += 10.0
+    elif is_value_assertion:
+        # Test compared return values (e.g. 120.0 != 80.0, 0.5 != 0.2)
+        if isinstance(stmt, ast.Return):
+            score += 15.0
+        elif isinstance(stmt, (ast.Assign, ast.AugAssign)):
+            score += 12.0
+        elif isinstance(stmt, ast.If):
+            # Penalize input-guard checking statements that raise unrelated exceptions
+            if any(isinstance(child, ast.Raise) for child in ast.walk(stmt)):
+                score -= 15.0
+            else:
+                score += 2.0
+
+    # Signal D: Compactness penalty (prefer minimal statement boundaries)
+    span = end - start
+    score -= 0.1 * span
+
+    return score
+
+
 def _locate_statement_in_python_ast(
     raw_text: str,
     target_lines: List[int],
     called_symbols: List[str],
     finding: Finding,
+    evidence_records: Optional[List[EvidenceRecord]] = None,
 ) -> Optional[Tuple[int, int]]:
     """Deterministically locate the candidate statement line range (1-indexed start, end) using AST."""
     try:
         tree = ast.parse(raw_text)
     except SyntaxError:
         return None
+
+    raw_lines = raw_text.splitlines(keepends=True)
 
     # Strategy 1: If direct line numbers are known, find smallest statement covering line
     if target_lines:
@@ -176,51 +261,90 @@ def _locate_statement_in_python_ast(
         if covering_stmt is not None:
             return covering_stmt
 
-    # Strategy 2: If called symbol is known, find matching FunctionDef
-    defect_keywords = {"zero", "division", "zerodivisionerror", "null", "none", "bound", "index", "defect", "error"}
+    # Prepare evidence and finding token context for semantic scoring
     finding_text = f"{finding.title} {finding.description}".lower()
+    finding_tokens = set(re.findall(r"\b[a-zA-Z0-9_.]+\b", finding_text))
+    ev_text = " ".join((e.content or "") + " " + (e.description or "") for e in (evidence_records or [])).lower()
+    ev_tokens = set(re.findall(r"\b[a-zA-Z0-9_.]+\b", ev_text))
 
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.name in called_symbols:
+    is_unraised_exception = "not raised" in ev_text or "not raised" in finding_text
+    is_runtime_error = any(
+        err in ev_text or err in finding_text
+        for err in ("indexerror", "keyerror", "zerodivisionerror", "typeerror", "attributeerror")
+    ) and not is_unraised_exception
+    is_value_assertion = "assertionerror" in ev_text and not is_unraised_exception
+
+    # Find candidate function nodes
+    candidate_fns: List[ast.AST] = []
+
+    # 1. By called symbols from test call-site traces
+    if called_symbols:
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in called_symbols:
+                candidate_fns.append(node)
+
+    # 2. By symbols mentioned in finding title/description
+    if not candidate_fns:
+        for sym in re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]{2,}\b", finding_text):
+            if sym in {"test", "error", "failing", "defect", "reproduced", "true", "false", "none"}:
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.lower() == sym.lower():
+                    if node not in candidate_fns:
+                        candidate_fns.append(node)
+
+    # 3. If no candidate function matched symbols, examine all functions/methods
+    if not candidate_fns:
+        all_fns = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        if all_fns:
+            candidate_fns.extend(all_fns)
+
+    # If still no functions (e.g. script), treat tree itself as container
+    containers: List[ast.AST] = candidate_fns if candidate_fns else [tree]
+
+    # Collect candidate statements from containers
+    best_range: Optional[Tuple[int, int]] = None
+    best_score: float = -float("inf")
+
+    for container in containers:
+        stmts_to_score: List[ast.stmt] = []
+        for n in ast.walk(container):
+            if n is container:
+                continue
+            if isinstance(n, ast.stmt) and hasattr(n, "lineno") and hasattr(n, "end_lineno"):
                 # Exclude docstrings
-                body_stmts = [
-                    s for s in node.body
-                    if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and isinstance(s.value.value, str))
-                ]
-                if not body_stmts:
+                if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str):
+                    continue
+                # Exclude nested function or class definitions as atomic statements
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     continue
 
-                # If only 1 body statement, that's our target statement
-                if len(body_stmts) == 1:
-                    s = body_stmts[0]
-                    return (s.lineno, s.end_lineno)
+                if isinstance(n, ast.If):
+                    # Include the If block itself if it is a compact early-exit guard (returns or raises)
+                    span = (n.end_lineno or n.lineno) - n.lineno
+                    if span <= 3 and any(isinstance(b, (ast.Return, ast.Raise)) for b in n.body):
+                        stmts_to_score.append(n)
+                else:
+                    stmts_to_score.append(n)
 
-                # If multiple statements: look for If statement or Return statement
-                for stmt in body_stmts:
-                    if isinstance(stmt, ast.If):
-                        # An If guard statement handling special cases / boundary conditions
-                        return (stmt.lineno, stmt.end_lineno)
+        for stmt in stmts_to_score:
+            score = _score_candidate_statement(
+                stmt=stmt,
+                raw_lines=raw_lines,
+                finding_tokens=finding_tokens,
+                finding_text=finding_text,
+                ev_tokens=ev_tokens,
+                ev_text=ev_text,
+                is_unraised_exception=is_unraised_exception,
+                is_runtime_error=is_runtime_error,
+                is_value_assertion=is_value_assertion,
+            )
+            if score > best_score:
+                best_score = score
+                best_range = (stmt.lineno, stmt.end_lineno or stmt.lineno)
 
-                # Fallback to the first non-docstring statement in function
-                first_s = body_stmts[0]
-                return (first_s.lineno, first_s.end_lineno)
-
-    # Strategy 3: Check finding title for symbol name
-    for sym in re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]{2,}\b", finding_text):
-        if sym in {"test", "error", "failing", "defect", "reproduced", "true", "false", "none"}:
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.lower() == sym.lower():
-                body_stmts = [
-                    s for s in node.body
-                    if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and isinstance(s.value.value, str))
-                ]
-                if body_stmts:
-                    for stmt in body_stmts:
-                        if isinstance(stmt, ast.If):
-                            return (stmt.lineno, stmt.end_lineno)
-                    return (body_stmts[0].lineno, body_stmts[0].end_lineno)
+    if best_range is not None and best_score > 0.0:
+        return best_range
 
     return None
 
@@ -413,6 +537,7 @@ def resolve_source_anchor(
         target_lines=target_lines,
         called_symbols=called_symbols,
         finding=finding,
+        evidence_records=evidence_records,
     )
 
     if stmt_range is None:
@@ -504,6 +629,61 @@ def resolve_source_anchor(
     )
 
 
+def validate_anchor_replacement_semantics(
+    anchor: EditAnchorContract,
+    replacement_content: str,
+    evidence_records: Optional[List[EvidenceRecord]] = None,
+    finding: Optional[Finding] = None,
+) -> Tuple[bool, List[str]]:
+    """Validate semantic safety of proposed replacement against verified evidence and anchor structure.
+
+    Guarantees:
+    - Defect perpetuation defense: rejects proposals that preserve or re-introduce the defect pattern.
+    - Unraised exception defense: if evidence specifies an unraised exception (e.g. 'ZeroDivisionError not raised'),
+      verifies that the replacement introduces the required error raising or handling rather than returning defaults.
+    - Guard stripping defense: if anchor is an 'if' guard statement, rejects unconditional replacements that remove
+      the guard while retaining a bare return, unless justified.
+    """
+    reasons: List[str] = []
+    anchor_stripped = anchor.anchor_text.strip()
+    repl_stripped = replacement_content.strip()
+
+    # 1. Check for unraised exception cited in reproduction evidence
+    unraised_exceptions: List[str] = []
+    if evidence_records:
+        for ev in evidence_records:
+            patterns = (ev.details or {}).get("matched_patterns", [])
+            for pat in patterns:
+                m = re.search(r"(\w+Error|\w+Exception)\s+not\s+raised", str(pat))
+                if m:
+                    unraised_exceptions.append(m.group(1))
+            if "not raised" in (ev.content or "").lower():
+                for line in (ev.content or "").splitlines():
+                    m = re.search(r"(\w+Error|\w+Exception)\s+not\s+raised", line)
+                    if m:
+                        unraised_exceptions.append(m.group(1))
+
+    unraised_exceptions = list(dict.fromkeys(unraised_exceptions))
+    for exc in unraised_exceptions:
+        if exc not in replacement_content:
+            reasons.append(
+                f"Semantic safety violation: Reproduction evidence confirms defect '{exc} not raised', "
+                f"but proposed replacement does not raise or reference '{exc}'."
+            )
+
+    # 2. Guard stripping defense
+    is_anchor_guard = anchor_stripped.startswith(("if ", "elif "))
+    is_repl_guard = repl_stripped.startswith(("if ", "elif ", "try:", "while "))
+    if is_anchor_guard and not is_repl_guard:
+        if repl_stripped.startswith("return "):
+            reasons.append(
+                "Semantic safety violation: Anchor is a conditional guard ('if ...:'), "
+                "but proposed replacement replaces it with an unconditional 'return', removing the guard entirely."
+            )
+
+    return len(reasons) == 0, reasons
+
+
 # =============================================================================
 # Deterministic Patch Construction from Edit Anchor
 # =============================================================================
@@ -513,6 +693,8 @@ def construct_patch_from_edit_anchor(
     replacement_content: str,
     repo_path: Path,
     budget: Optional[RepairBudget] = None,
+    evidence_records: Optional[List[EvidenceRecord]] = None,
+    finding: Optional[Finding] = None,
 ) -> Tuple[bool, str, List[str], Dict[str, Any]]:
     """Construct and validate a standard unified diff from a verified EditAnchorContract and replacement content.
 
@@ -522,6 +704,7 @@ def construct_patch_from_edit_anchor(
     - Verified digest: validates that repository file content still matches anchor.source_digest.
     - Standard diff format: synthesizes 100% compliant diff with column 0 markers and @@ hunk headers.
     - In-memory applicability: confirms in-memory splice and Python AST parsing without touching target repository.
+    - Semantic safety: defends against unraised exception omission, guard stripping, and defect perpetuation.
     """
     if anchor.status != AnchorResolutionStatus.RESOLVED:
         return (
@@ -537,6 +720,16 @@ def construct_patch_from_edit_anchor(
 
     if replacement_content == anchor.anchor_text:
         return False, "", ["Replacement content is identical to anchor text (unchanged replacement / no-op)"], {}
+
+    # Semantic safety validation
+    sem_valid, sem_reasons = validate_anchor_replacement_semantics(
+        anchor=anchor,
+        replacement_content=replacement_content,
+        evidence_records=evidence_records,
+        finding=finding,
+    )
+    if not sem_valid:
+        return False, "", sem_reasons, {}
 
     # Structural and indentation consistency check
     anchor_stripped = anchor.anchor_text.lstrip()

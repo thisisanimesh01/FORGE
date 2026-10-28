@@ -811,12 +811,16 @@ class RepairPlanner:
                             replacement_content=diagnosis.replace_block,
                             repo_path=repo_resolved,
                             budget=self.budget,
+                            evidence_records=evidence_records,
+                            finding=finding,
                         )
                         if anch_valid:
                             constr_valid = True
                             constructed_diff = anch_diff
                             constr_reasons = []
                             metrics = anch_metrics
+                        else:
+                            constr_reasons.extend(anch_reasons)
 
                 diff_text = sanitize_patch_content(constructed_diff)
                 last_diff_text = diff_text
@@ -912,6 +916,17 @@ class RepairPlanner:
                         diff_guidance.append(
                             f"CRITICAL: Your diff produced no net changes to `{target_file}` (unchanged replacement/no-op patch). "
                             f"You must make an effective code modification that resolves the defect."
+                        )
+                    if any("does not match anchor indentation" in v.lower() for v in attempt_violations):
+                        diff_guidance.append(
+                            f"CRITICAL: The replacement content has incorrect leading indentation. "
+                            f"Ensure every line of your replacement has the exact leading spaces matching the anchor block in `{target_file}`. "
+                            f"Do NOT strip leading spaces."
+                        )
+                    if any("semantic safety violation" in v.lower() for v in attempt_violations):
+                        diff_guidance.append(
+                            f"CRITICAL: Semantic safety validation failed. "
+                            f"Ensure your fix addresses the verified defect pattern (e.g. raises required exceptions) without introducing unconditional returns or removing necessary guards."
                         )
 
                     guidance_text = ("\n\n" + "\n\n".join(diff_guidance)) if diff_guidance else ""

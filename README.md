@@ -31,8 +31,19 @@ Structured Patch Construction & Deterministic Synthesis ── [COMPLETED]
 Structured Proposal Wire-Schema Reliability & Patch Representation Contract ── [COMPLETED]
 Deterministic Patch Anchoring & Minimal Replacements ── [COMPLETED]
 Deterministic Edit Anchoring & Source-Grounded Repair ── [COMPLETED]
+Repair Reliability & Generalization ── [COMPLETED]
 Phase 6: Autonomous Release & Production Hardening  ── [PLANNED]
 ```
+
+### Repair Reliability & Generalization (Completed)
+- **Problem & Root Cause**: Analysis of all eight attempts of Supervised Pilot 01 revealed that while structural schema and edit-anchoring mechanisms functioned, repair generation broke down due to two interrelated issues: (1) model proposals inverted defect logic (e.g., proposing `return 0.0` or stripping guards when reproduction evidence confirmed an unhandled exception), and (2) deterministic AST statement localization contained calculator-specific biases (unconditionally selecting `ast.If` blocks) while suppressing specific anchor-grounding rejection reasons (`anch_reasons`) during planner retries.
+- **Architectural Enhancements**:
+  - *Multi-Signal Semantic Statement Scoring*: Updated `_locate_statement_in_python_ast` in `app/forge/repair/anchoring.py` to deterministically score candidate statements inside target files across three defect categories: unraised exceptions (`... not raised`), runtime errors (`IndexError`, `KeyError`), and value assertions (`AssertionError: X != Y`). Scores statements based on keyword and token overlap, numeric literal matching against reproduction traces (e.g., `0.5`, `-273.15`, `65535`), math operator matching, and statement compactness. Fails closed with `ANCHOR_UNRESOLVED` when positive evidence is absent (`best_score <= 0.0`).
+  - *Semantic Safeguard Validation*: Added `validate_anchor_replacement_semantics` in `app/forge/repair/anchoring.py` to inspect proposed replacements against reproduction evidence. Explicitly rejects proposals that fail to raise cited unhandled exceptions as `Semantic safety violations`, and blocks guard-stripping proposals that replace conditional checks with unconditional returns.
+  - *Diagnostic Reason Propagation in Planner Retries*: Updated `RepairPlanner.plan_repair` to preserve anchor-grounding rejection reasons (`anch_reasons`) when synthesizing diffs, feeding concrete diagnostic feedback into the retry prompt (such as indentation mismatches or unraised exception violations) rather than misleading generic errors.
+  - *Five Independent Generalization Fixtures*: Built and verified five distinct defect fixtures under `tests/fixtures/generalization_fixtures/` covering incorrect logic calculation (`GEN01_incorrect_logic`), empty collection edge cases (`GEN02_edge_case_failure`), plausible incorrect repairs rejected by semantic safeguards (`GEN03_plausible_incorrect_rejected`), 16-space whitespace preservation (`GEN04_whitespace_sensitive`), and malformed/out-of-scope proposal rejection (`GEN05_malformed_semantically_wrong`).
+  - *Fail-Secure Invariants*: Retained zero modifications to target repositories, `FORGE_ALLOW_CLOUD_FALLBACK=false`, and mandatory human authorization gate.
+- **Verification**: Verified with 7 dedicated unit and live Ollama tests (`tests/unit/test_repair_generalization.py`), 913 full regression tests, 56/56 repair and review benchmarks, and 2/2 live Docker integration tests.
 
 ### Deterministic Edit Anchoring & Source-Grounded Repair (Completed)
 - **Problem & Root Cause**: Forensics across Pilot 01 Attempts 1–7 demonstrated that requiring compact local coding models (`qwen2.5-coder:1.5b`) to author both the exact verbatim search coordinates and replacement blocks leads to recurring failures when files contain docstrings, comments, or multi-line structures. Models omit intervening docstrings or comments, failing verbatim matching. However, AST parsing and reproduction evidence can localize the exact statement deterministically without relying on model-generated coordinates.
@@ -683,4 +694,10 @@ FORGE standardizes on local Ollama execution (`http://localhost:11434/v1`). Host
   - End-to-End Workflow Acceptance, Reliability & Release: [`docs/specs/phase-5-m6-acceptance.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m6-acceptance.md)
   - Repair Planner Grounding, Applicability & Scope Safety: [`docs/specs/repair-planner-reliability.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/repair-planner-reliability.md)
   - Local Ollama Structured Output & Syntax Error Recovery: [`docs/specs/local-ollama-structured-output.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/local-ollama-structured-output.md)
+  - Patch Generation Reliability & Diff Syntax Enforcement: [`docs/specs/patch-generation-reliability.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/patch-generation-reliability.md)
+  - Structured Patch Construction: [`docs/specs/structured-patch-construction.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/structured-patch-construction.md)
+  - Structured Proposal Wire-Schema Reliability: [`docs/specs/structured-proposal-wire-schema.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/structured-proposal-wire-schema.md)
+  - Deterministic Patch Anchoring & Minimal Replacements: [`docs/specs/patch-anchoring-minimal-replacements.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/patch-anchoring-minimal-replacements.md)
+  - Deterministic Edit Anchoring & Source-Grounded Repair: [`docs/specs/deterministic-edit-anchoring.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/deterministic-edit-anchoring.md)
+  - Repair Reliability & Generalization: [`docs/specs/repair-reliability-generalization.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/repair-reliability-generalization.md)
 - Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)

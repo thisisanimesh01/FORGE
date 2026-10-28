@@ -1,0 +1,13 @@
+{
+  "fixture_id": "GEN02_edge_case_failure",
+  "name": "Empty Inventory SKU Index Error",
+  "description": "get_first_available_sku accesses index 0 on an empty list, raising IndexError instead of returning 'UNAVAILABLE'.",
+  "category": "edge_case_failure",
+  "target_file": "src/inventory.py",
+  "test_file": "tests/test_inventory.py",
+  "reproduction_command": "python3 -m unittest tests/test_inventory.py",
+  "expected_failure_pattern": "IndexError",
+  "valid_search_block": "    if len(skus) <= 0:\n        return skus[0]  # Defect: IndexError when skus is empty",
+  "valid_replace_block": "    if not skus:\n        return \"UNAVAILABLE\"",
+  "malformed_replace_block": "    if not skus:\n        return skus[0]"
+}

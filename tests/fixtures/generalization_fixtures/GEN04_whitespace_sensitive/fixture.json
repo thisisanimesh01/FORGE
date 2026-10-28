@@ -1,0 +1,13 @@
+{
+  "fixture_id": "GEN04_whitespace_sensitive",
+  "name": "Deeply Nested VIP Tier Rate Indentation",
+  "description": "Nested record rate calculation is indented 16 spaces; exact whitespace preservation required.",
+  "category": "whitespace_sensitive",
+  "target_file": "src/nested_processor.py",
+  "test_file": "tests/test_nested_processor.py",
+  "reproduction_command": "python3 -m unittest tests/test_nested_processor.py",
+  "expected_failure_pattern": "AssertionError: 0.5 != 0.2",
+  "valid_search_block": "                # Defect: 16 spaces of indentation on statement\n                record[\"rate\"] = 0.50  # VIP rate should be 0.20",
+  "valid_replace_block": "                # Fixed: 16 spaces preserved\n                record[\"rate\"] = 0.20",
+  "stripped_indentation_replace_block": "record[\"rate\"] = 0.20"
+}

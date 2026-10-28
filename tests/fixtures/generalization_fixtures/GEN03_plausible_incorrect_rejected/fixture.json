@@ -1,0 +1,14 @@
+{
+  "fixture_id": "GEN03_plausible_incorrect_rejected",
+  "name": "Temperature Range Evaluation Under Absolute Zero",
+  "description": "check_temperature_threshold returns 'CLIPPED_LOW' instead of raising ValueError on sub-absolute zero values.",
+  "category": "plausible_incorrect_rejected",
+  "target_file": "src/sensor.py",
+  "test_file": "tests/test_sensor.py",
+  "reproduction_command": "python3 -m unittest tests/test_sensor.py",
+  "expected_failure_pattern": "ValueError not raised",
+  "valid_search_block": "    if celsius < -273.15:\n        return \"CLIPPED_LOW\"  # Defect: should raise ValueError(\"Temperature below absolute zero\")",
+  "valid_replace_block": "    if celsius < -273.15:\n        raise ValueError(\"Temperature below absolute zero\")",
+  "plausible_incorrect_replace_block": "    if celsius < -273.15:\n        return -273.15",
+  "unconditional_return_replace_block": "    return -273.15"
+}

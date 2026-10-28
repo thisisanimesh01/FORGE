@@ -1,0 +1,15 @@
+{
+  "fixture_id": "GEN05_malformed_semantically_wrong",
+  "name": "Network Port Range Validation",
+  "description": "validate_port_number returns False instead of raising ValueError on out-of-range port numbers.",
+  "category": "malformed_semantically_wrong",
+  "target_file": "src/network.py",
+  "test_file": "tests/test_network.py",
+  "reproduction_command": "python3 -m unittest tests/test_network.py",
+  "expected_failure_pattern": "ValueError not raised",
+  "valid_search_block": "    if not (1 <= port <= 65535):\n        return False  # Defect: should raise ValueError(f\"Invalid port: {port}\")",
+  "valid_replace_block": "    if not (1 <= port <= 65535):\n        raise ValueError(f\"Invalid port: {port}\")",
+  "syntax_error_replace_block": "    if not (1 <= port <= 65535) return True",
+  "noop_replace_block": "    if not (1 <= port <= 65535):\n        return False  # Defect: should raise ValueError(f\"Invalid port: {port}\")",
+  "out_of_scope_file": "src/auth.py"
+}

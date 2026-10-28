@@ -42,6 +42,7 @@ from forge.repair.anchoring import (
     EditAnchorContract,
     resolve_source_anchor,
     construct_patch_from_edit_anchor,
+    validate_anchor_replacement_semantics,
 )
 from forge.repair.planner import RepairPlanner
 from forge.repair.verifier import (
@@ -132,6 +133,7 @@ __all__ = [
     "resolve_source_anchor",
     "run_acceptance_suite",
     "sanitize_patch_content",
+    "validate_anchor_replacement_semantics",
     "validate_base_sha",
     "validate_patch_applicability",
     "validate_verification_command",
