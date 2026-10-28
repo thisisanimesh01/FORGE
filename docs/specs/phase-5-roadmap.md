@@ -247,5 +247,6 @@ Phase 5 has been fully delivered, verified, and released across all 6 planned mi
 - **Milestone 6**: End-to-End Workflow Acceptance, Reliability & Release (`docs/specs/phase-5-m6-acceptance.md`).
 - **Reliability Hardening 1**: Repair Planner Grounded Target Selection, In-Memory Diff Applicability & Scope Safety (`docs/specs/repair-planner-reliability.md`).
 - **Reliability Hardening 2**: Local Ollama Structured Output, JSON Schema Wire Formatting & Bounded Syntax Error Recovery (`docs/specs/local-ollama-structured-output.md`).
+- **Reliability Hardening 3**: Patch Generation Reliability, Unified Diff Syntax Enforcement & No-Op Prevention (`docs/specs/patch-generation-reliability.md`).
 
 **Phase Status**: **CLOSED & RELEASED FOR SUPERVISED USE**. Zero automated mutations, zero git commits or branch pushes on target repositories. Mandatory human approval gate strictly enforced before dossier export.

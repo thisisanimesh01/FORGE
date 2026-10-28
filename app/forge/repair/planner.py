@@ -711,11 +711,37 @@ class RepairPlanner:
                     break
                 if attempt < self.max_retries:
                     err_summary = "\n".join(f"- {v}" for v in attempt_violations)
+                    diff_guidance: List[str] = []
+                    if any("no additions or deletions" in v.lower() or "empty/no-op" in v.lower() for v in attempt_violations):
+                        diff_guidance.append(
+                            "CRITICAL: Your diff contained 0 added lines (+) and 0 removed lines (-). "
+                            "In standard unified diff format, lines you want to add MUST start with '+' as the very first character "
+                            "(e.g., '+        if b == 0:'). Unchanged context lines must start with a single space ' '. "
+                            "Do NOT output raw Python code with leading indentation spaces; every line inside a hunk must begin with '+', '-', or ' '."
+                        )
+                    if any("context mismatch" in v.lower() for v in attempt_violations):
+                        diff_guidance.append(
+                            f"CRITICAL: Context lines in your diff did not match `{target_file}` at the specified line numbers. "
+                            f"Check the numbered file content in the prompt, verify line numbers and indentation exactly, and match surrounding context lines."
+                        )
+                    if any("no @@ hunk headers" in v.lower() or "no file headers" in v.lower() or "malformed diff" in v.lower() for v in attempt_violations):
+                        diff_guidance.append(
+                            f"CRITICAL: Diff is missing proper unified diff headers or contains malformed lines. It must start with:\n"
+                            f"--- a/{target_file}\n+++ b/{target_file}\n@@ -<start>,<count> +<start>,<count> @@"
+                        )
+                    if any("no net changes" in v.lower() or "unchanged replacement" in v.lower() for v in attempt_violations):
+                        diff_guidance.append(
+                            f"CRITICAL: Your diff produced no net changes to `{target_file}` (unchanged replacement/no-op patch). "
+                            f"You must make an effective code modification that resolves the defect."
+                        )
+
+                    guidance_text = ("\n\n" + "\n\n".join(diff_guidance)) if diff_guidance else ""
                     messages.append(
                         ChatMessage(
                             role=MessageRole.USER,
                             content=(
-                                f"Your proposed patch candidate had validation errors:\n{err_summary}\n\n"
+                                f"Your proposed patch candidate had validation errors:\n{err_summary}"
+                                f"{guidance_text}\n\n"
                                 f"Please provide a corrected patch candidate. Ensure that hunk headers (@@ -start,count +start,count @@) "
                                 f"and context lines match the target file `{target_file}` exactly as provided in the prompt."
                             ),
@@ -740,18 +766,22 @@ class RepairPlanner:
         patch_id = f"pat_{finding_id}_{sha256_digest[:8]}"
         plan_id = f"rpl_{finding_id}_{resolved_sha[:8]}_{sha256_digest[:8]}"
 
-        patch_candidate = PatchCandidate(
-            patch_id=patch_id,
-            contract_id=f"rep_{plan_id}",
-            finding_id=finding_id,
-            base_commit_sha=resolved_sha,
-            target_files=last_metrics.get("touched_files", [target_file]),
-            unified_diff=last_diff_text,
-            added_lines=last_metrics.get("added_lines", 0),
-            removed_lines=last_metrics.get("removed_lines", 0),
-            hunk_count=last_metrics.get("hunk_count", 1),
-            sha256_digest=sha256_digest,
-        )
+        patch_candidate = None
+        try:
+            patch_candidate = PatchCandidate(
+                patch_id=patch_id,
+                contract_id=f"rep_{plan_id}",
+                finding_id=finding_id,
+                base_commit_sha=resolved_sha,
+                target_files=last_metrics.get("touched_files", [target_file]),
+                unified_diff=last_diff_text,
+                added_lines=last_metrics.get("added_lines", 0),
+                removed_lines=last_metrics.get("removed_lines", 0),
+                hunk_count=max(1, last_metrics.get("hunk_count", 1)),
+                sha256_digest=sha256_digest,
+            )
+        except Exception:
+            patch_candidate = None
 
         is_plan_valid = len(final_violations) == 0
         plan_validation = PlanValidationResult(
@@ -846,8 +876,20 @@ Instructions:
 2. Formulate a minimal, bounded patch candidate in standard unified diff format (starting with `--- a/{target_file}` and `+++ b/{target_file}`).
 3. The diff must modify at most {self.budget.max_lines_changed} lines and {self.budget.max_hunks} hunks in ONLY `{target_file}`.
 4. Line numbers and context lines in the unified diff must match the target file `{target_file}` content exactly. Do NOT modify any test files or non-target files.
-5. Provide a clear verification plan (e.g. pytest command) to confirm the fix without regressing other functionality.
-6. Return ONLY a valid JSON object matching this schema:
+5. Unified Diff Syntax Requirements:
+   - Header must start with:
+     --- a/{target_file}
+     +++ b/{target_file}
+     @@ -<old_start>,<old_count> +<new_start>,<new_count> @@
+   - Line numbers <old_start> and context lines must match the numbered lines shown in the UNTRUSTED REPOSITORY CONTEXT above.
+   - EVERY line in the hunk body MUST have a diff marker character at column 0:
+     '+' for lines to ADD (e.g. '+        if b == 0:')
+     '-' for lines to REMOVE (e.g. '-        return a / b')
+     ' ' (single space) for UNCHANGED context lines matching the original file (e.g. '     def divide(self, a, b):')
+   - WARNING: Do NOT write plain Python code with leading indentation spaces inside a hunk. A line starting with spaces is treated as an unchanged context line! If a line does not begin with '+' or '-', it is not an addition or deletion. Diffs with no '+' or '-' markers will be rejected as empty/no-op diffs.
+   - The patch must actually modify the target file to fix the defect; unchanged replacement diffs are forbidden.
+6. Provide a clear verification plan (e.g. pytest command) to confirm the fix without regressing other functionality.
+7. Return ONLY a valid JSON object matching this schema:
 {{
   "root_cause": "Detailed explanation of defect mechanism in {target_file}",
   "proposed_change": "Summary of code change in {target_file}",

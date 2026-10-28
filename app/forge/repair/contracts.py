@@ -396,6 +396,35 @@ def parse_and_validate_unified_diff(
     if hunk_count > 0 and added_lines == 0 and removed_lines == 0:
         reasons.append("Patch candidate contains no additions or deletions (empty/no-op diff)")
 
+    # Check for malformed hunk lines (must start with '+', '-', ' ', '\\', or be empty)
+    hunk_body_pattern = re.compile(
+        r"^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@[^\n]*\n([\s\S]*?)(?=^@@|\Z)",
+        re.MULTILINE,
+    )
+    all_hunk_bodies = list(hunk_body_pattern.finditer(unified_diff))
+    for hb in all_hunk_bodies:
+        hunk_text = hb.group(1)
+        for line in hunk_text.splitlines():
+            if line.startswith(("+", "-", " ", "\\")) or line == "":
+                continue
+            reasons.append(
+                f"Malformed diff hunk: line does not start with diff marker ('+', '-', or space): {line[:60]!r}"
+            )
+            break
+
+    # Static check for unchanged replacement / no-op patch
+    if hunk_count > 0 and all_hunk_bodies and added_lines > 0:
+        all_hunks_unchanged = True
+        for hb in all_hunk_bodies:
+            hunk_text = hb.group(1)
+            hunk_added = [l[1:] for l in hunk_text.splitlines() if l.startswith("+") and not l.startswith("+++")]
+            hunk_removed = [l[1:] for l in hunk_text.splitlines() if l.startswith("-") and not l.startswith("---")]
+            if not (hunk_added and hunk_removed and hunk_added == hunk_removed):
+                all_hunks_unchanged = False
+                break
+        if all_hunks_unchanged:
+            reasons.append("Patch candidate contains no effective modifications (unchanged replacement/no-op patch)")
+
     metrics = {
         "touched_files": sorted(touched_files),
         "hunk_count": hunk_count,
@@ -549,6 +578,12 @@ def validate_patch_applicability(
                 ast.parse(new_content)
             except SyntaxError as e:
                 reasons.append(f"Patch introduces Python syntax error in '{target_file}': {e}")
+
+        # Check that patch actually modified file content (prevent unchanged replacement)
+        if not is_new_file and "".join(current_lines) == orig_text:
+            reasons.append(
+                f"Patch candidate produces no net changes to '{target_file}' (unchanged replacement/no-op patch)"
+            )
 
     return len(reasons) == 0, reasons
 

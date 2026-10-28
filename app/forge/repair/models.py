@@ -84,7 +84,13 @@ class RepairModelResponseSchema(BaseModel):
     verification_plan: str = Field(description="Test command or verification step to validate repair")
     confidence: float = Field(default=0.8, ge=0.0, le=1.0, description="Confidence score")
     uncertainty_notes: Optional[str] = Field(default=None, description="Known uncertainties or assumptions")
-    unified_diff: str = Field(description="Unified diff candidate patch")
+    unified_diff: str = Field(
+        description=(
+            "Standard unified diff candidate patch starting with '--- a/<file>\\n+++ b/<file>\\n@@ -start,count +start,count @@'. "
+            "Lines to add MUST start with '+', lines to remove MUST start with '-', and unchanged context lines MUST start with ' ' (single space). "
+            "Empty diffs or diffs without '+' or '-' markers are forbidden."
+        )
+    )
 
 
 class PlanValidationResult(BaseModel):

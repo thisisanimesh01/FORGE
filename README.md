@@ -25,8 +25,30 @@ Phase 4 Readiness & Sandbox Gate        ── [COMPLETED]
 Phase 4: Targeted Autonomous Repair     ── [COMPLETED] (Milestones 1–6)
 Phase 5: Supervised End-to-End Engineering Workflow ── [COMPLETED] (Milestones 1–6)
 Repair Planner Reliability & Grounded Verification ── [COMPLETED]
+Local Ollama Structured Output Reliability ── [COMPLETED]
+Patch Generation Reliability & Diff Syntax Enforcement ── [COMPLETED]
 Phase 6: Autonomous Release & Production Hardening  ── [PLANNED]
 ```
+
+### Patch Generation Reliability & Diff Syntax Enforcement (Completed)
+- **Problem & Root Cause**: Pilot 01 Attempt 3 exposed that compact coding models emit Python code indented with spaces inside diff hunks instead of prefixing additions with `+` in column 0. The diff validator correctly detected zero additions and deletions, rejecting the patch as an empty diff. However, retry loops lacked explicit column 0 diff marker feedback, and static validation lacked checks for unchanged replacement / no-op diffs.
+- **Architectural Enhancements**:
+  - *Unified Diff Schema Contract*: `RepairModelResponseSchema.unified_diff` description explicitly mandates standard unified diff formatting starting with `--- a/<file>` and `+++ b/<file>`, with lines to add starting with `+`, lines to remove starting with `-`, and context lines starting with `' '`.
+  - *Prompt Syntax Requirements*: `RepairPlanner._build_prompt` codifies column 0 diff marker requirements, warning explicitly that lines starting with indentation spaces are treated as unchanged context lines.
+  - *Malformed Hunk Detection*: `parse_and_validate_unified_diff` scans all hunk body lines to ensure every line begins with a valid diff marker (`+`, `-`, `' '`, `\`, or empty string), rejecting un-prefixed code snippets immediately.
+  - *Static Unchanged Replacement Detection*: `parse_and_validate_unified_diff` checks whether all added lines in each hunk match the removed lines, rejecting no-op replacements.
+  - *In-Memory Net Change Verification*: `validate_patch_applicability` verifies that applying the patch candidate produces a non-zero net modification to the target file (`"".join(current_lines) != orig_text`).
+  - *Targeted Retry Diagnostics*: `RepairPlanner.plan_repair` provides specific diagnostic guidance on empty diffs, context mismatches, missing headers, and no-op replacements, guiding the local model to correct syntax without weakening any validation boundary.
+  - *Safe Candidate Construction*: Guards `PatchCandidate` instantiation with `max(1, hunk_count)` and `try/except` to ensure fail-closed plan rejection when diffs are malformed.
+- **Verification**: Verified with 11 dedicated regression tests (`tests/unit/test_patch_generation_reliability.py`), 877 full regression tests, 2/2 live Docker integration tests, and 11/11 passing repair benchmarks.
+
+### Local Ollama Structured Output Reliability (Completed)
+- **Problem & Root Cause**: Pilot 01 Attempt 2 exposed that local coding models emitted trailing commas before closing braces/brackets, failing RFC 8259 JSON parsing. Requests did not pass OpenAI-compatible `response_format` schemas on the wire, and retry loops lacked syntax diagnostic feedback.
+- **Architectural Enhancements**:
+  - *Structured Output / JSON Schema Wire Formatting*: `LLMRequest` supports `response_format` containing OpenAI-compatible `json_schema` derived from `RepairModelResponseSchema`. `OpenAICompatibleProvider` serializes `response_format` on the wire and supports graceful single-provider 400 downgrade.
+  - *Strict RFC 8259 Parsing*: `parse_json_payload` safely parses JSON from direct content, markdown code fences, or `{ ... }` bounds, strictly rejecting trailing commas without silent mutation, and returning non-secret syntax diagnostics.
+  - *Bounded Same-Provider Retries*: Enforces a hard cap of 3 retries (total attempts $\le 4$), 120s wall-clock time limit, 50,000 char response bound, and 4096 output token limit.
+- **Verification**: Verified with 17 dedicated unit tests (`tests/unit/test_structured_output_reliability.py`), 866 full regression tests, and 11/11 passing repair benchmarks.
 
 ### Repair Planner Reliability & Grounded Verification (Completed)
 - **Problem & Root Cause**: Pilot 01 exposed that intakes created from failing test specifications defaulted `affected_files` solely to test files. Downstream repair planning targeted tests instead of implementation code, causing context mismatches and verification crashes.
