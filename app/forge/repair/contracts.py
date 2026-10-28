@@ -788,6 +788,39 @@ def construct_unified_diff_from_search_replace(
 
     count = orig_text.count(search_block)
     if count == 0:
+        # Check if model emitted line number prefixes (e.g. "  26: " or "26 | ")
+        if re.search(r"^\s*\d+[\s:|]", search_block, re.MULTILINE):
+            return (
+                False,
+                "",
+                [
+                    f"Search block not found in '{norm_target}': Search block appears to contain line number prefixes "
+                    f"(e.g. '  26: ' or '26 | '). Do not include line numbers in search_block; copy only verbatim source code."
+                ],
+                {},
+            )
+
+        # Check if the search block omits intervening lines (e.g., spans from function header to body skipping docstring)
+        sb_lines = [l.strip() for l in search_block.splitlines() if l.strip()]
+        if len(sb_lines) >= 2:
+            first_line = sb_lines[0]
+            last_line = sb_lines[-1]
+            if first_line in orig_text and last_line in orig_text:
+                pos1 = orig_text.find(first_line)
+                pos2 = orig_text.rfind(last_line)
+                if 0 <= pos1 < pos2:
+                    return (
+                        False,
+                        "",
+                        [
+                            f"Search block not found in '{norm_target}': Beginning and ending lines were found, but "
+                            f"intervening lines (e.g. docstrings, comments, or unchanged statements) appear to have "
+                            f"been omitted. Do NOT omit intervening source lines. Target a smaller, statement-level block "
+                            f"(1-3 lines) containing only the exact lines to modify."
+                        ],
+                        {},
+                    )
+
         return (
             False,
             "",

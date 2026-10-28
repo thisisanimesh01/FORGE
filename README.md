@@ -29,8 +29,20 @@ Local Ollama Structured Output Reliability ── [COMPLETED]
 Patch Generation Reliability & Diff Syntax Enforcement ── [COMPLETED]
 Structured Patch Construction & Deterministic Synthesis ── [COMPLETED]
 Structured Proposal Wire-Schema Reliability & Patch Representation Contract ── [COMPLETED]
+Deterministic Patch Anchoring & Minimal Replacements ── [COMPLETED]
 Phase 6: Autonomous Release & Production Hardening  ── [PLANNED]
 ```
+
+### Deterministic Patch Anchoring & Minimal Replacements (Completed)
+- **Problem & Root Cause**: Pilot 01 Attempt 6 revealed that while local Ollama (`qwen2.5-coder:1.5b`) emitted structured search/replace keys reliably, it attempted to replace entire multi-line functions while omitting docstrings or comments inside `search_block`. Because FORGE enforces strict verbatim matching without fuzzy trimming (`count == 1`), the search block failed to match. Furthermore, error diagnostics did not detect omitted intervening lines or guide the model toward minimal statement-level replacement.
+- **Architectural Enhancements**:
+  - *Minimal Statement Replacement Strategy*: Updated prompt contracts to mandate minimal, statement-level search/replace blocks (1–3 lines) targeting the exact faulty logic rather than whole functions, and strictly forbidding omission of intervening source lines.
+  - *Defect Line Extraction & Focused Anchor Framing*: Added `_extract_defect_line_numbers` and `_build_focused_anchor_section` in `RepairPlanner` to extract defect lines from reproduction evidence and inject an un-numbered, verbatim source code reference block (`=== RELEVANT FAULTY SOURCE ANCHOR (DATA ONLY - REFERENCE) ===`) directly into the prompt.
+  - *Omitted Intervening Lines Diagnostic*: Added detection in `construct_unified_diff_from_search_replace` that identifies when the start and end lines of a search block exist in the file but intervening lines (such as docstrings or comments) were omitted, returning clear, actionable guidance.
+  - *Line Number Prefix Detection*: Detects when search blocks accidentally include leading line numbers (e.g., `108: `) and instructs the model to supply exact code lines.
+  - *Focused Retry Feedback*: Automatically injects focused verbatim source excerpts into the retry prompt when search block matching fails, grounding model corrections in ground-truth repository text.
+  - *Verbatim Precision Preserved*: Verbatim matching (`orig_text.count(search_block) == 1`) is strictly preserved without fuzzy heuristics, whitespace normalization, or comment stripping.
+- **Verification**: Verified with 11 dedicated unit tests (`tests/unit/test_patch_anchoring_and_minimal_replacements.py`), 913 full regression tests, 2/2 live Docker integration tests, and 11/11 passing repair benchmarks.
 
 ### Structured Proposal Wire-Schema Reliability & Patch Representation Contract (Completed)
 - **Problem & Root Cause**: Pilot 01 Attempt 5 exposed that while local Ollama (`qwen2.5-coder:1.5b`) returned syntactically valid JSON with required diagnostic fields, it completely omitted `search_block`, `replace_block`, and `unified_diff` on the wire. Because those fields defaulted to `None` in Pydantic, `model_json_schema()` omitted them from `required`, allowing Ollama's grammar engine to minimize output by omitting all patch fields. Pydantic post-validation then failed closed because no patch representation was present.
