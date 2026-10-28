@@ -662,12 +662,30 @@ class RepairPlanner:
                 if hasattr(provider, "scripted_responses") and not getattr(provider, "scripted_responses", None) and not getattr(provider, "response_generator", None):
                     break
                 if attempt < self.max_retries:
+                    schema_guidance = ""
+                    lower_err = schema_err.lower()
+                    if "missing patch representation" in lower_err:
+                        schema_guidance = (
+                            "\nCRITICAL: Missing patch representation. You must provide a patch proposal. "
+                            "Provide non-null, non-empty 'search_block' and 'replace_block' targeting the file, with 'unified_diff': null."
+                        )
+                    elif "partial structured proposal" in lower_err:
+                        schema_guidance = (
+                            "\nCRITICAL: Partial structured proposal. You must provide BOTH 'search_block' and 'replace_block' together. "
+                            "Neither block may be omitted or empty."
+                        )
+                    elif "ambiguous patch representation" in lower_err:
+                        schema_guidance = (
+                            "\nCRITICAL: Ambiguous patch representation. Provide either 'search_block' and 'replace_block' with 'unified_diff': null, "
+                            "or 'unified_diff' with 'search_block': null and 'replace_block': null. Do not provide both."
+                        )
+
                     messages.append(
                         ChatMessage(
                             role=MessageRole.USER,
                             content=(
                                 f"Your previous response did not conform to the schema:\n"
-                                f"- {schema_err}\n\n"
+                                f"- {schema_err}{schema_guidance}\n\n"
                                 f"Please return a valid JSON object with all required fields."
                             ),
                         )
@@ -920,7 +938,7 @@ Instructions:
 4. Do NOT modify any test files or non-target files.
 5. The modification must actually fix the defect; identical replacement (search_block == replace_block) is forbidden.
 6. Provide a clear verification plan (e.g. pytest command) to confirm the fix without regressing other functionality.
-7. Return ONLY a valid JSON object matching this schema:
+7. Return ONLY a valid JSON object matching this schema. Provide non-null 'search_block' and 'replace_block' and set 'unified_diff' to null:
 {{
   "root_cause": "Detailed explanation of defect mechanism in {target_file}",
   "proposed_change": "Summary of code change in {target_file}",
@@ -928,6 +946,7 @@ Instructions:
   "search_block": "exact verbatim lines from {target_file} to replace",
   "replace_block": "replacement lines to substitute in place of search_block",
   "change_rationale": "Concise rationale for code modification",
+  "unified_diff": null,
   "expected_behavior": "Correct behavior after patch",
   "regression_risks": ["Potential side effect or compatibility issue"],
   "verification_plan": "pytest tests/...",

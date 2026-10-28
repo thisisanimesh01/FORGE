@@ -28,8 +28,19 @@ Repair Planner Reliability & Grounded Verification ── [COMPLETED]
 Local Ollama Structured Output Reliability ── [COMPLETED]
 Patch Generation Reliability & Diff Syntax Enforcement ── [COMPLETED]
 Structured Patch Construction & Deterministic Synthesis ── [COMPLETED]
+Structured Proposal Wire-Schema Reliability & Patch Representation Contract ── [COMPLETED]
 Phase 6: Autonomous Release & Production Hardening  ── [PLANNED]
 ```
+
+### Structured Proposal Wire-Schema Reliability & Patch Representation Contract (Completed)
+- **Problem & Root Cause**: Pilot 01 Attempt 5 exposed that while local Ollama (`qwen2.5-coder:1.5b`) returned syntactically valid JSON with required diagnostic fields, it completely omitted `search_block`, `replace_block`, and `unified_diff` on the wire. Because those fields defaulted to `None` in Pydantic, `model_json_schema()` omitted them from `required`, allowing Ollama's grammar engine to minimize output by omitting all patch fields. Pydantic post-validation then failed closed because no patch representation was present.
+- **Architectural Enhancements**:
+  - *Explicit Wire Schema Contract*: Configured `RepairModelResponseSchema` via `json_schema_extra` to programmatically include `search_block`, `replace_block`, and `unified_diff` in `schema["required"]`. Because the fields are typed with `Optional[str]`, they generate nullable `anyOf: [string, null]`, forcing local LLM grammar engines to emit the keys without key omission on the wire.
+  - *Mutual Exclusivity & Single Representation Enforcement*: `validate_patch_proposal_representation` strictly accepts either structured search/replace blocks or a valid `unified_diff`. It rejects missing representations, partial structured proposals (e.g., `search_block` without `replace_block`), and ambiguous proposals (providing both structured blocks and `unified_diff`).
+  - *Prompt Framing & Schema Examples*: `RepairPlanner._build_prompt` includes `"unified_diff": null` in the schema template, explicitly instructing models to provide non-null structured blocks with null unified diffs.
+  - *Targeted Retry Feedback*: If validation fails due to missing patch representations, partial proposals, or ambiguous representations, `RepairPlanner.plan_repair` feeds back targeted, actionable correction guidance.
+  - *Full Backward Compatibility*: Older JSON payloads omitting `search_block` and `replace_block` keys validate cleanly as long as a valid `unified_diff` is provided.
+- **Verification**: Verified with 12 dedicated unit tests (`tests/unit/test_structured_proposal_wire_schema.py`), 902 full regression tests, 2/2 live Docker integration tests, and 11/11 passing repair benchmarks.
 
 ### Structured Patch Construction & Deterministic Synthesis (Completed)
 - **Problem & Root Cause**: Pilot 01 Attempt 4 forensics confirmed that compact local coding models (`qwen2.5-coder:1.5b`) repeatedly emit Python code indented with whitespace instead of prefixing additions with `+` in column 0 inside unified diff hunks, despite explicit prompt instructions. Requiring compact models to calculate hunk line numbers, diff headers, and column-0 markers places unnecessary syntactic strain on the model.

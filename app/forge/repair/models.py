@@ -82,9 +82,22 @@ class StructuredPatchProposalSchema(BaseModel):
     change_rationale: str = Field(default="", description="Concise explanation of the code modification rationale")
 
 
+def configure_repair_response_schema(schema: Dict[str, Any]) -> None:
+    """Ensure patch representation fields are declared required and nullable in wire JSON schema.
+
+    Local LLM grammar engines (such as Ollama / llama.cpp) strictly omit optional fields unless
+    they are present in schema['required']. Declaring them required while typing them as nullable
+    ensures the model generates explicit values (string or null) on the wire.
+    """
+    required = schema.setdefault("required", [])
+    for field in ("search_block", "replace_block", "unified_diff"):
+        if field not in required:
+            required.append(field)
+
+
 class RepairModelResponseSchema(BaseModel):
     """Strict schema for parsing structured LLM repair diagnosis and patch proposals."""
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", json_schema_extra=configure_repair_response_schema)
 
     root_cause: str = Field(description="Explanation of why the defect occurs")
     proposed_change: str = Field(description="Summary of proposed code modification")
@@ -108,13 +121,30 @@ class RepairModelResponseSchema(BaseModel):
 
     @model_validator(mode="after")
     def validate_patch_proposal_representation(self) -> "RepairModelResponseSchema":
-        has_sr = self.search_block is not None and self.replace_block is not None
+        has_search = self.search_block is not None and bool(self.search_block.strip())
+        has_replace = self.replace_block is not None and bool(self.replace_block.strip())
         has_diff = self.unified_diff is not None and bool(self.unified_diff.strip())
-        if not has_sr and not has_diff:
+
+        if has_search and not has_replace:
+            raise ValueError("Partial structured proposal: 'search_block' provided without corresponding 'replace_block'")
+        if has_replace and not has_search:
+            raise ValueError("Partial structured proposal: 'replace_block' provided without corresponding 'search_block'")
+
+        has_structured = has_search and has_replace
+
+        if has_structured and has_diff:
             raise ValueError(
-                "Repair proposal must provide either structured search/replace blocks "
+                "Ambiguous patch representation: Both structured search/replace blocks and 'unified_diff' were provided. "
+                "Provide either structured blocks ('search_block' and 'replace_block') with 'unified_diff': null, "
+                "or a legacy 'unified_diff' with structured blocks set to null."
+            )
+
+        if not has_structured and not has_diff:
+            raise ValueError(
+                "Missing patch representation: Repair proposal must provide either structured search/replace blocks "
                 "('search_block' and 'replace_block') or a valid 'unified_diff'"
             )
+
         return self
 
 
