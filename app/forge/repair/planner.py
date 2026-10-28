@@ -31,6 +31,7 @@ from forge.repair.contracts import (
     RepairBudget,
     RepairSafetyContract,
     compute_patch_sha256,
+    construct_unified_diff_from_search_replace,
     is_test_path,
     parse_and_validate_unified_diff,
     sanitize_patch_content,
@@ -44,6 +45,7 @@ from forge.repair.models import (
     RepairModelResponseSchema,
     RepairPlan,
     RepairPlanStatus,
+    StructuredPatchProposalSchema,
 )
 from forge.schemas import EventType, EvidenceRecord, Finding
 
@@ -674,10 +676,7 @@ class RepairPlanner:
                 else:
                     break
 
-            diff_text = sanitize_patch_content(diagnosis.unified_diff)
             declared_target = diagnosis.target_file or target_file
-            last_diff_text = diff_text
-
             attempt_violations: List[str] = []
             if Path(declared_target).as_posix() != Path(target_file).as_posix():
                 attempt_violations.append(
@@ -688,15 +687,36 @@ class RepairPlanner:
             if is_prot:
                 attempt_violations.append(f"Model-suggested target file '{declared_target}' is protected: {prot_reason}")
 
-            diff_valid, diff_reasons, metrics = parse_and_validate_unified_diff(dummy_contract, diff_text)
-            last_diff_valid = diff_valid
-            last_metrics = metrics
-            if not diff_valid:
-                attempt_violations.extend(diff_reasons)
+            if diagnosis.search_block is not None and diagnosis.replace_block is not None:
+                constr_valid, constructed_diff, constr_reasons, metrics = construct_unified_diff_from_search_replace(
+                    repo_path=repo_resolved,
+                    target_file=declared_target,
+                    search_block=diagnosis.search_block,
+                    replace_block=diagnosis.replace_block,
+                    allowed_files=[target_file],
+                    budget=self.budget,
+                    base_commit_sha=resolved_sha,
+                )
+                diff_text = sanitize_patch_content(constructed_diff)
+                last_diff_text = diff_text
+                last_diff_valid = constr_valid
+                last_metrics = metrics
+                if not constr_valid:
+                    attempt_violations.extend(constr_reasons)
+            elif diagnosis.unified_diff is not None:
+                diff_text = sanitize_patch_content(diagnosis.unified_diff)
+                last_diff_text = diff_text
+                diff_valid, diff_reasons, metrics = parse_and_validate_unified_diff(dummy_contract, diff_text)
+                last_diff_valid = diff_valid
+                last_metrics = metrics
+                if not diff_valid:
+                    attempt_violations.extend(diff_reasons)
+                else:
+                    appl_valid, appl_reasons = validate_patch_applicability(repo_resolved, diff_text, resolved_sha)
+                    if not appl_valid:
+                        attempt_violations.extend(appl_reasons)
             else:
-                appl_valid, appl_reasons = validate_patch_applicability(repo_resolved, diff_text, resolved_sha)
-                if not appl_valid:
-                    attempt_violations.extend(appl_reasons)
+                attempt_violations.append("Neither structured search/replace blocks nor unified_diff provided")
 
             if not attempt_violations:
                 last_violations = []
@@ -712,6 +732,26 @@ class RepairPlanner:
                 if attempt < self.max_retries:
                     err_summary = "\n".join(f"- {v}" for v in attempt_violations)
                     diff_guidance: List[str] = []
+                    if any("search block not found" in v.lower() for v in attempt_violations):
+                        diff_guidance.append(
+                            f"CRITICAL: The search_block was not found in `{target_file}`. "
+                            f"The search_block MUST match exact verbatim lines from the original file, including exact whitespace and indentation. "
+                            f"Do NOT include line number prefixes (e.g., '  15 | '). Copy the exact lines from the UNTRUSTED REPOSITORY CONTEXT provided in the prompt."
+                        )
+                    if any("matches" in v.lower() and "locations" in v.lower() for v in attempt_violations):
+                        diff_guidance.append(
+                            f"CRITICAL: The search_block matched multiple locations in `{target_file}`. "
+                            f"Include additional surrounding context lines in search_block so that it matches exactly one unique location in the file."
+                        )
+                    if any("replace block is identical" in v.lower() or "unchanged replacement" in v.lower() for v in attempt_violations):
+                        diff_guidance.append(
+                            f"CRITICAL: replace_block is identical to search_block (unchanged replacement/no-op). "
+                            f"You must provide an effective code modification that resolves the defect."
+                        )
+                    if any("empty or whitespace" in v.lower() for v in attempt_violations):
+                        diff_guidance.append(
+                            "CRITICAL: search_block or replace_block was empty. Both blocks must contain non-empty code."
+                        )
                     if any("no additions or deletions" in v.lower() or "empty/no-op" in v.lower() for v in attempt_violations):
                         diff_guidance.append(
                             "CRITICAL: Your diff contained 0 added lines (+) and 0 removed lines (-). "
@@ -729,7 +769,7 @@ class RepairPlanner:
                             f"CRITICAL: Diff is missing proper unified diff headers or contains malformed lines. It must start with:\n"
                             f"--- a/{target_file}\n+++ b/{target_file}\n@@ -<start>,<count> +<start>,<count> @@"
                         )
-                    if any("no net changes" in v.lower() or "unchanged replacement" in v.lower() for v in attempt_violations):
+                    if any("no net changes" in v.lower() for v in attempt_violations):
                         diff_guidance.append(
                             f"CRITICAL: Your diff produced no net changes to `{target_file}` (unchanged replacement/no-op patch). "
                             f"You must make an effective code modification that resolves the defect."
@@ -742,8 +782,7 @@ class RepairPlanner:
                             content=(
                                 f"Your proposed patch candidate had validation errors:\n{err_summary}"
                                 f"{guidance_text}\n\n"
-                                f"Please provide a corrected patch candidate. Ensure that hunk headers (@@ -start,count +start,count @@) "
-                                f"and context lines match the target file `{target_file}` exactly as provided in the prompt."
+                                f"Please provide a corrected patch proposal targeting `{target_file}`."
                             ),
                         )
                     )
@@ -873,33 +912,27 @@ Content (with line numbers):
 
 Instructions:
 1. Diagnose the root cause of the defect based strictly on the verified evidence, failing test oracle, and implementation code.
-2. Formulate a minimal, bounded patch candidate in standard unified diff format (starting with `--- a/{target_file}` and `+++ b/{target_file}`).
-3. The diff must modify at most {self.budget.max_lines_changed} lines and {self.budget.max_hunks} hunks in ONLY `{target_file}`.
-4. Line numbers and context lines in the unified diff must match the target file `{target_file}` content exactly. Do NOT modify any test files or non-target files.
-5. Unified Diff Syntax Requirements:
-   - Header must start with:
-     --- a/{target_file}
-     +++ b/{target_file}
-     @@ -<old_start>,<old_count> +<new_start>,<new_count> @@
-   - Line numbers <old_start> and context lines must match the numbered lines shown in the UNTRUSTED REPOSITORY CONTEXT above.
-   - EVERY line in the hunk body MUST have a diff marker character at column 0:
-     '+' for lines to ADD (e.g. '+        if b == 0:')
-     '-' for lines to REMOVE (e.g. '-        return a / b')
-     ' ' (single space) for UNCHANGED context lines matching the original file (e.g. '     def divide(self, a, b):')
-   - WARNING: Do NOT write plain Python code with leading indentation spaces inside a hunk. A line starting with spaces is treated as an unchanged context line! If a line does not begin with '+' or '-', it is not an addition or deletion. Diffs with no '+' or '-' markers will be rejected as empty/no-op diffs.
-   - The patch must actually modify the target file to fix the defect; unchanged replacement diffs are forbidden.
+2. Formulate a minimal, bounded search-and-replace modification proposal targeting ONLY `{target_file}`:
+   - `search_block`: Exact verbatim lines from `{target_file}` to be replaced. MUST match exactly one location in the file. Do NOT include line number prefixes (e.g., do NOT include '  15 | '). Preserve exact whitespace and indentation.
+   - `replace_block`: The complete replacement lines to substitute in place of `search_block`, including exact indentation.
+   - `change_rationale`: Concise explanation of why this code change fixes the defect.
+3. The proposed modification must modify at most {self.budget.max_lines_changed} lines and ONLY target `{target_file}`.
+4. Do NOT modify any test files or non-target files.
+5. The modification must actually fix the defect; identical replacement (search_block == replace_block) is forbidden.
 6. Provide a clear verification plan (e.g. pytest command) to confirm the fix without regressing other functionality.
 7. Return ONLY a valid JSON object matching this schema:
 {{
   "root_cause": "Detailed explanation of defect mechanism in {target_file}",
   "proposed_change": "Summary of code change in {target_file}",
   "target_file": "{target_file}",
+  "search_block": "exact verbatim lines from {target_file} to replace",
+  "replace_block": "replacement lines to substitute in place of search_block",
+  "change_rationale": "Concise rationale for code modification",
   "expected_behavior": "Correct behavior after patch",
   "regression_risks": ["Potential side effect or compatibility issue"],
   "verification_plan": "pytest tests/...",
   "confidence": 0.9,
-  "uncertainty_notes": null,
-  "unified_diff": "--- a/{target_file}\\n+++ b/{target_file}\\n@@ -<start>,<count> +<start>,<count> @@\\n <context>\\n-<old_line>\\n+<new_line>\\n <context>"
+  "uncertainty_notes": null
 }}
 """
 

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from forge.repair.contracts import PatchCandidate, PatchValidationResult, RepairBudget, RepairOutcome
 from forge.sandbox.contracts import ReproductionOutcome
@@ -72,6 +72,16 @@ class ProtectedPathPolicy:
         return False, None
 
 
+class StructuredPatchProposalSchema(BaseModel):
+    """Strict schema for bounded structured search-and-replace code modification proposals."""
+    model_config = ConfigDict(extra="ignore")
+
+    target_file: str = Field(description="Relative path of file to modify")
+    search_block: str = Field(description="Exact verbatim lines from the original target file to be replaced")
+    replace_block: str = Field(description="Replacement lines to substitute in place of the search block")
+    change_rationale: str = Field(default="", description="Concise explanation of the code modification rationale")
+
+
 class RepairModelResponseSchema(BaseModel):
     """Strict schema for parsing structured LLM repair diagnosis and patch proposals."""
     model_config = ConfigDict(extra="ignore")
@@ -84,13 +94,28 @@ class RepairModelResponseSchema(BaseModel):
     verification_plan: str = Field(description="Test command or verification step to validate repair")
     confidence: float = Field(default=0.8, ge=0.0, le=1.0, description="Confidence score")
     uncertainty_notes: Optional[str] = Field(default=None, description="Known uncertainties or assumptions")
-    unified_diff: str = Field(
+    search_block: Optional[str] = Field(default=None, description="Exact verbatim lines from original target file to be replaced")
+    replace_block: Optional[str] = Field(default=None, description="Replacement lines to substitute in place of search_block")
+    change_rationale: Optional[str] = Field(default=None, description="Concise explanation of the code modification rationale")
+    unified_diff: Optional[str] = Field(
+        default=None,
         description=(
             "Standard unified diff candidate patch starting with '--- a/<file>\\n+++ b/<file>\\n@@ -start,count +start,count @@'. "
             "Lines to add MUST start with '+', lines to remove MUST start with '-', and unchanged context lines MUST start with ' ' (single space). "
             "Empty diffs or diffs without '+' or '-' markers are forbidden."
-        )
+        ),
     )
+
+    @model_validator(mode="after")
+    def validate_patch_proposal_representation(self) -> "RepairModelResponseSchema":
+        has_sr = self.search_block is not None and self.replace_block is not None
+        has_diff = self.unified_diff is not None and bool(self.unified_diff.strip())
+        if not has_sr and not has_diff:
+            raise ValueError(
+                "Repair proposal must provide either structured search/replace blocks "
+                "('search_block' and 'replace_block') or a valid 'unified_diff'"
+            )
+        return self
 
 
 class PlanValidationResult(BaseModel):

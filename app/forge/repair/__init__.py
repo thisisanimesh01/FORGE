@@ -18,6 +18,7 @@ from forge.repair.contracts import (
     WorkspaceImmutabilityError,
     assert_human_approval_gate,
     compute_patch_sha256,
+    construct_unified_diff_from_search_replace,
     evaluate_repair_outcome,
     is_test_path,
     parse_and_validate_unified_diff,
@@ -34,6 +35,7 @@ from forge.repair.models import (
     RepairPlan,
     RepairPlanStatus,
     RepairVerificationResult,
+    StructuredPatchProposalSchema,
 )
 from forge.repair.planner import RepairPlanner
 from forge.repair.verifier import (
@@ -104,12 +106,14 @@ __all__ = [
     "ScenarioStatus",
     "ScopeContainmentError",
     "StaleBaseRevisionError",
+    "StructuredPatchProposalSchema",
     "WorkflowConcurrencyError",
     "WorkspaceImmutabilityError",
     "apply_unified_diff_to_file",
     "assert_human_approval_gate",
     "compute_acceptance_metrics",
     "compute_patch_sha256",
+    "construct_unified_diff_from_search_replace",
     "evaluate_repair_outcome",
     "is_test_path",
     "parse_and_validate_unified_diff",

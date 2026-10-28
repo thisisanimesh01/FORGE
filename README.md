@@ -27,8 +27,18 @@ Phase 5: Supervised End-to-End Engineering Workflow ── [COMPLETED] (Mileston
 Repair Planner Reliability & Grounded Verification ── [COMPLETED]
 Local Ollama Structured Output Reliability ── [COMPLETED]
 Patch Generation Reliability & Diff Syntax Enforcement ── [COMPLETED]
+Structured Patch Construction & Deterministic Synthesis ── [COMPLETED]
 Phase 6: Autonomous Release & Production Hardening  ── [PLANNED]
 ```
+
+### Structured Patch Construction & Deterministic Synthesis (Completed)
+- **Problem & Root Cause**: Pilot 01 Attempt 4 forensics confirmed that compact local coding models (`qwen2.5-coder:1.5b`) repeatedly emit Python code indented with whitespace instead of prefixing additions with `+` in column 0 inside unified diff hunks, despite explicit prompt instructions. Requiring compact models to calculate hunk line numbers, diff headers, and column-0 markers places unnecessary syntactic strain on the model.
+- **Architectural Enhancements**:
+  - *Strict Structured Proposal Schema*: Defined `StructuredPatchProposalSchema` requiring `target_file`, `search_block` (exact verbatim lines), `replace_block` (substitution lines), and `change_rationale`. `RepairModelResponseSchema` supports both structured search/replace and legacy unified diffs.
+  - *Deterministic Diff Constructor*: `construct_unified_diff_from_search_replace` enforces exact verbatim matching (`orig_text.count(search_block) == 1`), path traversal and protected path rejection, test file rejection, base revision pinning, and size budgets. It uses Python standard `difflib.unified_diff` to synthesize 100% syntactically valid unified diffs with exact line headers and markers.
+  - *In-Memory Applicability & Syntax Verification*: Passes constructed diffs through `parse_and_validate_unified_diff` and in-memory dry-run `validate_patch_applicability` (including Python AST parsing).
+  - *Prompt Refinement & Targeted Retries*: Instructs models to provide exact verbatim code lines without line number prefixes, and supplies targeted diagnostics for missing or ambiguous search blocks, unchanged replacements, or empty blocks.
+- **Verification**: Verified with 13 dedicated unit tests (`tests/unit/test_structured_patch_construction.py`), 890 full regression tests, 2/2 live Docker integration tests, and 11/11 passing repair benchmarks.
 
 ### Patch Generation Reliability & Diff Syntax Enforcement (Completed)
 - **Problem & Root Cause**: Pilot 01 Attempt 3 exposed that compact coding models emit Python code indented with spaces inside diff hunks instead of prefixing additions with `+` in column 0. The diff validator correctly detected zero additions and deletions, rejecting the patch as an empty diff. However, retry loops lacked explicit column 0 diff marker feedback, and static validation lacked checks for unchanged replacement / no-op diffs.

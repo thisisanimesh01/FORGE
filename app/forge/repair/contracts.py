@@ -13,10 +13,13 @@ Guarantees:
 
 from datetime import datetime, timezone
 import ast
+import difflib
 from enum import Enum
 import hashlib
+import os
 from pathlib import Path
 import re
+import subprocess
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -663,3 +666,186 @@ def assert_human_approval_gate(audit_record: RepairAuditRecord, action: str) -> 
             f"Action '{action}' blocked by Phase 4 safety gate: explicit human approval is mandatory. "
             f"Contract '{audit_record.contract_id}' has not been approved by a human operator."
         )
+
+
+def _extract_git_head_commit(repo_path: Path) -> Optional[str]:
+    """Extract current HEAD commit SHA from a local git repository without modifying state."""
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+        if res.returncode == 0:
+            return res.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def construct_unified_diff_from_search_replace(
+    repo_path: Path,
+    target_file: str,
+    search_block: str,
+    replace_block: str,
+    allowed_files: Optional[List[str]] = None,
+    budget: Optional[RepairBudget] = None,
+    base_commit_sha: Optional[str] = None,
+) -> Tuple[bool, str, List[str], Dict[str, Any]]:
+    """Deterministically construct and validate a standard unified diff from structured search-and-replace proposals.
+
+    Guarantees:
+    - Verbatim matching: search_block must match orig_text exactly once (count == 1).
+    - No guessing: fails closed if search_block is missing (count == 0) or ambiguous (count > 1).
+    - Scope containment: rejects traversal, symlink escapes, absolute paths, test files, and protected paths.
+    - Base revision pinning: verifies base commit revision if provided.
+    - Budget bounds: enforces patch size, hunks, and line budgets.
+    - Syntactic validity: constructs standard unified diff and validates applicability and Python syntax.
+    """
+    reasons: List[str] = []
+    norm_target = Path(target_file).as_posix().strip()
+
+    # 1. Path format and traversal validation
+    if not norm_target or norm_target == ".":
+        return False, "", ["Empty or root target file path cannot be modified"], {}
+
+    if norm_target.startswith("/") or norm_target.startswith("\\"):
+        return False, "", [f"Path traversal violation: absolute path rejected: '{target_file}'"], {}
+
+    if ".." in norm_target.split("/"):
+        return False, "", [f"Path traversal violation: '..' forbidden: '{target_file}'"], {}
+
+    # 2. Protected path validation
+    from forge.repair.models import ProtectedPathPolicy
+    is_prot, prot_reason = ProtectedPathPolicy.is_protected(norm_target)
+    if is_prot:
+        return False, "", [f"Target file '{norm_target}' is protected by security policy: {prot_reason}"], {}
+
+    # 3. Test path rejection
+    if is_test_path(norm_target):
+        return (
+            False,
+            "",
+            [f"Target file '{norm_target}' is a test file. Modifying test files to mask defects is strictly forbidden."],
+            {},
+        )
+
+    # 4. Scope containment against allowed_files
+    if allowed_files is not None:
+        allowed_set = {Path(f).as_posix().strip() for f in allowed_files}
+        if norm_target not in allowed_set:
+            return (
+                False,
+                "",
+                [f"Target file '{norm_target}' is not in declared allowed scope: {sorted(allowed_set)}"],
+                {},
+            )
+
+    # 5. Workspace containment and file existence
+    try:
+        target_disk = verify_workspace_containment(repo_path, norm_target)
+    except Exception as e:
+        return False, "", [f"Scope containment error for '{norm_target}': {e}"], {}
+
+    if not target_disk.is_file():
+        return False, "", [f"Target file '{norm_target}' does not exist in repository"], {}
+
+    # 6. Base revision verification
+    actual_sha = _extract_git_head_commit(repo_path)
+    if base_commit_sha is not None and actual_sha is not None:
+        try:
+            validate_base_sha(actual_sha, base_commit_sha)
+        except StaleBaseRevisionError as e:
+            return False, "", [str(e)], {}
+
+    # 7. Block content validation
+    if not search_block or not search_block.strip():
+        return False, "", ["Search block is empty or whitespace-only"], {}
+
+    if not replace_block or not replace_block.strip():
+        return False, "", ["Replace block is empty or whitespace-only"], {}
+
+    if search_block == replace_block:
+        return False, "", ["Replace block is identical to search block (unchanged replacement / no-op)"], {}
+
+    # 8. Read original text and check exact verbatim count
+    orig_text = target_disk.read_text(encoding="utf-8", errors="replace")
+
+    # Match newline convention if needed
+    if "\r\n" in orig_text and "\r\n" not in search_block:
+        search_block_alt = search_block.replace("\n", "\r\n")
+        if search_block_alt in orig_text:
+            search_block = search_block_alt
+            if "\r\n" not in replace_block:
+                replace_block = replace_block.replace("\n", "\r\n")
+    elif "\r\n" not in orig_text and "\r\n" in search_block:
+        search_block_alt = search_block.replace("\r\n", "\n")
+        if search_block_alt in orig_text:
+            search_block = search_block_alt
+            if "\r\n" in replace_block:
+                replace_block = replace_block.replace("\r\n", "\n")
+
+    count = orig_text.count(search_block)
+    if count == 0:
+        return (
+            False,
+            "",
+            [
+                f"Search block not found in '{norm_target}'. The search block must match exact verbatim lines "
+                f"in the target file including indentation and line breaks."
+            ],
+            {},
+        )
+    if count > 1:
+        return (
+            False,
+            "",
+            [
+                f"Search block matches {count} locations in '{norm_target}'. The search block must be unique "
+                f"and match exactly 1 location. Include additional surrounding context lines to disambiguate."
+            ],
+            {},
+        )
+
+    # 9. Deterministic substitution and unified diff construction
+    new_text = orig_text.replace(search_block, replace_block, 1)
+
+    orig_lines = orig_text.splitlines(keepends=True)
+    new_lines = new_text.splitlines(keepends=True)
+
+    diff_lines = list(
+        difflib.unified_diff(
+            orig_lines,
+            new_lines,
+            fromfile=f"a/{norm_target}",
+            tofile=f"b/{norm_target}",
+            n=3,
+        )
+    )
+    unified_diff = "".join(diff_lines)
+
+    if not unified_diff.strip():
+        return False, "", ["Generated unified diff is empty (no changes detected)"], {}
+
+    # 10. Budget and static diff validation
+    budget = budget or RepairBudget()
+    contract = RepairSafetyContract(
+        contract_id="contract_structured_patch",
+        finding_id="finding_structured_patch",
+        base_commit_sha=base_commit_sha or actual_sha or "0000000000000000000000000000000000000000",
+        target_repo_path=repo_path.resolve(),
+        scratch_workspace_path=(repo_path.parent / f".scratch_val_{os.getpid()}").resolve(),
+        allowed_files=allowed_files or [norm_target],
+        budget=budget,
+    )
+    diff_valid, diff_reasons, metrics = parse_and_validate_unified_diff(contract, unified_diff)
+    if not diff_valid:
+        return False, unified_diff, diff_reasons, metrics
+
+    # 11. In-memory patch applicability and syntax check
+    appl_valid, appl_reasons = validate_patch_applicability(repo_path, unified_diff, base_commit_sha=base_commit_sha)
+    if not appl_valid:
+        return False, unified_diff, appl_reasons, metrics
+
+    return True, unified_diff, [], metrics
