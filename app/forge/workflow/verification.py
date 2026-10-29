@@ -12,6 +12,7 @@ Guarantees:
 - Disposable workspaces: isolated temporary scratch directories cleaned up in guaranteed finally blocks.
 """
 
+import ast
 from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
@@ -26,6 +27,7 @@ from forge.repair.contracts import (
     validate_base_sha,
 )
 from forge.repair.models import ProtectedPathPolicy, RepairPlan
+from forge.repair.semantic_verifier import analyze_python_ast_semantics
 from forge.repair.verifier import apply_unified_diff_to_file, prepare_disposable_workspace
 from forge.sandbox.contracts import ExecutionEnvironmentSpec, ReproductionCommand
 from forge.sandbox.docker import DockerSandbox
@@ -176,6 +178,19 @@ def build_default_verification_plan(
             )
         )
 
+    # 5. Semantic AST Invariant Check (syntax, unreachable statements, guard preservation)
+    if repair_plan.target_file.endswith(".py"):
+        checks.append(
+            VerificationCheckSpec(
+                check_type=VerificationCheckType.SEMANTIC,
+                name="semantic:ast_invariants",
+                command=["python3", "-m", "py_compile", repair_plan.target_file],
+                timeout_seconds=30.0,
+                required=True,
+                expected_baseline_failure=False,
+            )
+        )
+
     patch_digest = (
         repair_plan.patch_candidate.sha256_digest
         if repair_plan.patch_candidate
@@ -312,6 +327,7 @@ class MultiCheckVerifier:
                     is_baseline=True,
                     plan=plan,
                     attempt_id=attempt_id,
+                    target_repo=target_resolved,
                 )
                 baseline_results.append(b_res)
                 if not b_res.tool_available and check.check_type in (VerificationCheckType.LINT, VerificationCheckType.SECURITY):
@@ -413,6 +429,7 @@ class MultiCheckVerifier:
                     is_baseline=False,
                     plan=plan,
                     attempt_id=attempt_id,
+                    target_repo=target_resolved,
                 )
                 candidate_results.append(c_res)
 
@@ -516,6 +533,23 @@ class MultiCheckVerifier:
                 duration_ms=duration_ms,
             )
 
+        # Check semantic AST results:
+        sem_cand = next(
+            (r for r in candidate_results if r.check_type == VerificationCheckType.SEMANTIC),
+            None,
+        )
+        if sem_cand and sem_cand.status == CheckStatus.FAILED:
+            return self._build_result(
+                attempt_id=attempt_id,
+                plan=plan,
+                outcome=VerificationAggregateOutcome.FAILED,
+                diagnostic=f"Semantic safety check '{sem_cand.name}' failed on candidate patch: {sem_cand.diagnostic}",
+                baseline_results=baseline_results,
+                candidate_results=candidate_results,
+                limitations=limitations,
+                duration_ms=duration_ms,
+            )
+
         # Check for blocked required checks
         for c in candidate_results:
             if c.status == CheckStatus.BLOCKED:
@@ -530,12 +564,29 @@ class MultiCheckVerifier:
                     duration_ms=duration_ms,
                 )
 
-        # All checks passed cleanly
+        # Check if broader behavioral verification was unverified
+        unverified_reasons: List[str] = []
+        if not baseline_suite_b or baseline_suite_b.status in (CheckStatus.SKIPPED, CheckStatus.FAILED, CheckStatus.BLOCKED):
+            tool_msg = "test runner unavailable" if baseline_suite_b and baseline_suite_b.exit_code == 127 else "no passing baseline test suite"
+            unverified_reasons.append(f"broader regression suite was not executable ({tool_msg})")
+        if any(c.status == CheckStatus.SKIPPED for c in candidate_results):
+            skipped_names = [c.name for c in candidate_results if c.status == CheckStatus.SKIPPED]
+            unverified_reasons.append(f"optional checks skipped: {', '.join(skipped_names)}")
+
+        if unverified_reasons:
+            diagnostic = (
+                f"Candidate passed reproduction oracle ('{repro_cand.name}'). "
+                f"Note: broader behavioral correctness remains unverified because {'; '.join(unverified_reasons)}. "
+                "Careful human inspection is recommended before approval."
+            )
+        else:
+            diagnostic = "All verification checks passed cleanly. Defect resolved with zero regressions."
+
         return self._build_result(
             attempt_id=attempt_id,
             plan=plan,
             outcome=VerificationAggregateOutcome.PASSED,
-            diagnostic="All verification checks passed cleanly. Defect resolved with zero regressions.",
+            diagnostic=diagnostic,
             baseline_results=baseline_results,
             candidate_results=candidate_results,
             regression_detected=False,
@@ -550,11 +601,94 @@ class MultiCheckVerifier:
         is_baseline: bool,
         plan: MultiCheckVerificationPlan,
         attempt_id: str,
+        target_repo: Optional[Path] = None,
     ) -> VerificationCheckResult:
         """Execute a single check inside the sandbox and record bounded, redacted diagnostics."""
         binary = Path(check.command[0]).name
         provenance = f"forge:verify:{plan.workflow_id}:{check.check_type.value}:{'baseline' if is_baseline else 'candidate'}"
         scratch_id = workspace_path.name
+
+        # Special handling for SEMANTIC AST verification check
+        if check.check_type == VerificationCheckType.SEMANTIC:
+            target_path = workspace_path / plan.target_file
+            if not target_path.is_file():
+                return VerificationCheckResult(
+                    check_type=check.check_type,
+                    name=check.name,
+                    status=CheckStatus.FAILED,
+                    command=check.command,
+                    pinned_revision=plan.base_commit_sha,
+                    scratch_workspace_id=scratch_id,
+                    provenance=provenance,
+                    is_baseline=is_baseline,
+                    diagnostic=f"Target file '{plan.target_file}' missing from workspace.",
+                    tool_available=True,
+                )
+
+            if is_baseline:
+                try:
+                    ast.parse(target_path.read_text(encoding="utf-8", errors="replace"))
+                    return VerificationCheckResult(
+                        check_type=check.check_type,
+                        name=check.name,
+                        status=CheckStatus.PASSED,
+                        command=check.command,
+                        pinned_revision=plan.base_commit_sha,
+                        scratch_workspace_id=scratch_id,
+                        provenance=provenance,
+                        is_baseline=is_baseline,
+                        diagnostic="Baseline syntax and structure verified.",
+                        tool_available=True,
+                    )
+                except Exception as exc:
+                    return VerificationCheckResult(
+                        check_type=check.check_type,
+                        name=check.name,
+                        status=CheckStatus.FAILED,
+                        command=check.command,
+                        pinned_revision=plan.base_commit_sha,
+                        scratch_workspace_id=scratch_id,
+                        provenance=provenance,
+                        is_baseline=is_baseline,
+                        diagnostic=f"Baseline syntax check failed: {exc}",
+                        tool_available=True,
+                    )
+            else:
+                baseline_file = (target_repo / plan.target_file) if target_repo else None
+                orig_text = baseline_file.read_text(encoding="utf-8", errors="replace") if baseline_file and baseline_file.is_file() else ""
+                cand_text = target_path.read_text(encoding="utf-8", errors="replace")
+                sem_res = analyze_python_ast_semantics(
+                    original_source=orig_text,
+                    patched_source=cand_text,
+                    file_path=plan.target_file,
+                )
+                if not sem_res.is_valid:
+                    viol_summary = "; ".join(sem_res.violations)
+                    return VerificationCheckResult(
+                        check_type=check.check_type,
+                        name=check.name,
+                        status=CheckStatus.FAILED,
+                        command=check.command,
+                        pinned_revision=plan.base_commit_sha,
+                        scratch_workspace_id=scratch_id,
+                        provenance=provenance,
+                        is_baseline=is_baseline,
+                        stdout_excerpt=viol_summary[:1000],
+                        diagnostic=f"Semantic safety verification failed: {viol_summary}",
+                        tool_available=True,
+                    )
+                return VerificationCheckResult(
+                    check_type=check.check_type,
+                    name=check.name,
+                    status=CheckStatus.PASSED,
+                    command=check.command,
+                    pinned_revision=plan.base_commit_sha,
+                    scratch_workspace_id=scratch_id,
+                    provenance=provenance,
+                    is_baseline=is_baseline,
+                    diagnostic="Semantic safety invariants verified (0 unreachable statements, validation guards preserved).",
+                    tool_available=True,
+                )
 
         # Check tool availability
         if not self.check_tool_availability(binary):

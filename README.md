@@ -32,8 +32,20 @@ Structured Proposal Wire-Schema Reliability & Patch Representation Contract ─�
 Deterministic Patch Anchoring & Minimal Replacements ── [COMPLETED]
 Deterministic Edit Anchoring & Source-Grounded Repair ── [COMPLETED]
 Repair Reliability & Generalization ── [COMPLETED]
+Candidate Semantic Verification Hardening ── [COMPLETED]
 Phase 6: Autonomous Release & Production Hardening  ── [PLANNED]
 ```
+
+### Candidate Semantic Verification Hardening & AST Invariants (Completed)
+- **Problem & Root Cause**: In Supervised Pilot 03, the local model proposed replacing a function definition header with an immediate `return` statement calculating the discount. While this satisfied the target positive-price test in the reproduction check, it introduced dead unreachable code, displaced the function docstring, and completely bypassed pre-existing negative-price validation guards (`if price < 0: raise ValueError(...)`). Because `ast.parse` only checks syntactic grammar and the reproduction check lacked negative-price assertions, the regression was missed and the candidate erroneously passed verification to reach `awaiting_human_review`.
+- **Architectural Enhancements**:
+  - *AST Reachability Analysis*: Implemented `collect_unreachable_statements` in `app/forge/repair/semantic_verifier.py` to traverse function and block statement sequences and flag any statements following unconditional terminators (`Return`, `Raise`, `Break`, `Continue`, terminating `If/Try`).
+  - *Validation Guard Preservation*: Added `_check_validation_guards` to compare baseline AST functions against candidate functions, preventing guards (`If` statements raising exceptions or assertions) from being bypassed by preceding terminators or stripped from function bodies.
+  - *Docstring Integrity Protection*: Added `_check_docstring_integrity` to ensure function docstrings are not displaced below executable statements.
+  - *Verification Pipeline Integration*: Added `VerificationCheckType.SEMANTIC = "semantic"` to `app/forge/workflow/models.py` and integrated `semantic:ast_invariants` into `build_default_verification_plan` and `execute_verification` in `app/forge/workflow/verification.py` as check #5, strictly failing candidate verification if static semantic violations are found. Added explicit diagnostics when reproduction passes without broader regression test coverage.
+  - *Generalization Regression Fixture (`GEN06_bypassed_validation_early_return`)*: Added fixture under `tests/fixtures/generalization_fixtures/` replicating the Pilot 03 bypass failure mode and verifying that early returns bypassing validation are rejected while correct minimal replacements pass.
+  - *Fail-Closed Invariants*: Zero target repository mutations, Docker sandbox isolation strictly required for dynamic execution, and `FORGE_ALLOW_CLOUD_FALLBACK=false` preserved.
+- **Verification**: Verified with 15 dedicated unit tests (`tests/unit/test_semantic_verifier.py`), 927 full regression tests, and bytecode compilation.
 
 ### Repair Reliability & Generalization (Completed)
 - **Problem & Root Cause**: Analysis of all eight attempts of Supervised Pilot 01 revealed that while structural schema and edit-anchoring mechanisms functioned, repair generation broke down due to two interrelated issues: (1) model proposals inverted defect logic (e.g., proposing `return 0.0` or stripping guards when reproduction evidence confirmed an unhandled exception), and (2) deterministic AST statement localization contained calculator-specific biases (unconditionally selecting `ast.If` blocks) while suppressing specific anchor-grounding rejection reasons (`anch_reasons`) during planner retries.

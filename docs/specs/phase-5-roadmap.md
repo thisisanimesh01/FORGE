@@ -253,5 +253,6 @@ Phase 5 has been fully delivered, verified, and released across all 6 planned mi
 - **Reliability Hardening 6**: Deterministic Patch Anchoring, Statement-Level Search-and-Replace & Verbatim Context Delivery (`docs/specs/patch-anchoring-minimal-replacements.md`).
 - **Reliability Hardening 7**: Deterministic Edit Anchoring & Source-Grounded Repair (`docs/specs/deterministic-edit-anchoring.md`).
 - **Reliability Hardening 8**: Repair Reliability & Generalization (`docs/specs/repair-reliability-generalization.md`).
+- **Reliability Hardening 9**: Candidate Semantic Verification Hardening & AST Invariants (`docs/specs/candidate-semantic-verification-hardening.md`).
 
 **Phase Status**: **CLOSED & RELEASED FOR SUPERVISED USE**. Zero automated mutations, zero git commits or branch pushes on target repositories. Mandatory human approval gate strictly enforced before dossier export.

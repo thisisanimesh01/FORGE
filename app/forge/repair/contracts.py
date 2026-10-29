@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from forge.config import redact_secrets
+from forge.repair.semantic_verifier import analyze_python_ast_semantics
 from forge.sandbox.contracts import ReproductionOutcome
 
 
@@ -445,6 +446,7 @@ def validate_patch_applicability(
     repo_path: Path,
     unified_diff: str,
     base_commit_sha: Optional[str] = None,
+    check_semantics: bool = False,
 ) -> Tuple[bool, List[str]]:
     """Validate in-memory whether a unified diff applies cleanly to target repository files at pinned base revision.
 
@@ -453,6 +455,7 @@ def validate_patch_applicability(
     - Verifies file existence within repository workspace.
     - Verifies that hunk context lines match actual file content around declared line numbers.
     - Verifies that applying the patch yields syntactically valid Python code (for .py files).
+    - If check_semantics is True, also validates semantic safety invariants via AST analysis.
 
     Returns:
         (is_applicable, reasons)
@@ -574,13 +577,22 @@ def validate_patch_applicability(
         if not file_applicable:
             continue
 
-        # Check Python syntax for .py files
+        # Check Python syntax and semantic safety for .py files
         if target_file.endswith(".py"):
             new_content = "".join(current_lines)
             try:
                 ast.parse(new_content)
             except SyntaxError as e:
                 reasons.append(f"Patch introduces Python syntax error in '{target_file}': {e}")
+            else:
+                if check_semantics and not is_new_file:
+                    sem_res = analyze_python_ast_semantics(
+                        original_source=orig_text,
+                        patched_source=new_content,
+                        file_path=target_file,
+                    )
+                    if not sem_res.is_valid:
+                        reasons.extend(sem_res.violations)
 
         # Check that patch actually modified file content (prevent unchanged replacement)
         if not is_new_file and "".join(current_lines) == orig_text:

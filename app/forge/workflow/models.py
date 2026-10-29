@@ -445,6 +445,7 @@ class VerificationCheckType(str, Enum):
     BASELINE_TESTS = "baseline_tests"
     LINT = "lint"
     SECURITY = "security"
+    SEMANTIC = "semantic"
 
 
 class CheckStatus(str, Enum):

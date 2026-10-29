@@ -1,0 +1,16 @@
+{
+  "fixture_id": "GEN06_bypassed_validation_early_return",
+  "name": "Bypassed Negative-Price Validation via Premature Return",
+  "description": "calculate_discount adds discount to price instead of subtracting it, and guards against negative prices. A faulty candidate inserts return before validation, bypassing negative price checks.",
+  "category": "bypassed_validation_early_return",
+  "target_file": "src/pricing.py",
+  "test_file": "tests/test_pricing.py",
+  "reproduction_command": "python3 -m unittest -v tests/test_pricing.py",
+  "expected_failure_pattern": "AssertionError",
+  "valid_search_block": "    # Defect: adds discount to price instead of subtracting it\n    return price + (price * discount_percent / 100.0)",
+  "valid_replace_block": "    # Fixed: subtract discount from price\n    return price - (price * discount_percent / 100.0)",
+  "faulty_pilot03_search_block": "def calculate_discount(price: float, discount_percent: float) -> float:",
+  "faulty_pilot03_replace_block": "def calculate_discount(price: float, discount_percent: float) -> float:\n    return price - (price * discount_percent / 100.0)",
+  "faulty_pilot03_diff": "--- a/src/pricing.py\n+++ b/src/pricing.py\n@@ -1,4 +1,5 @@\n def calculate_discount(price: float, discount_percent: float) -> float:\n+    return price - (price * discount_percent / 100.0)\n     \"\"\"Calculate discounted price after applying percentage discount.\n \n     Args:\n",
+  "correct_minimal_diff": "--- a/src/pricing.py\n+++ b/src/pricing.py\n@@ -11,4 +11,4 @@\n     if price < 0:\n         raise ValueError(\"Price cannot be negative\")\n-    # Defect: adds discount to price instead of subtracting it\n-    return price + (price * discount_percent / 100.0)\n+    # Fixed: subtract discount from price\n+    return price - (price * discount_percent / 100.0)\n"
+}

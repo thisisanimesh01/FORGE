@@ -33,6 +33,7 @@ from forge.repair.contracts import (
     validate_base_sha,
     verify_workspace_containment,
 )
+from forge.repair.semantic_verifier import analyze_python_ast_semantics
 from forge.repair.models import (
     ProtectedPathPolicy,
     RepairAttemptRecord,
@@ -65,11 +66,12 @@ class PatchApplicationError(Exception):
 # Pure-Python Unified Diff Applier
 # =============================================================================
 
-def apply_unified_diff_to_file(file_path: Path, unified_diff: str) -> Tuple[bool, str]:
+def apply_unified_diff_to_file(file_path: Path, unified_diff: str, check_semantics: bool = False) -> Tuple[bool, str]:
     """Safely apply a bounded unified diff to a single target file.
 
     Parses unified diff hunks, verifies matching context, substitutes lines,
-    and validates syntax (for Python files via AST parsing).
+    and validates syntax (for Python files via AST parsing). If check_semantics is True,
+    also validates semantic invariants (unreachable statements, bypassed guards).
     """
     if not file_path.is_file():
         raise PatchApplicationError(f"Target file '{file_path}' does not exist in workspace")
@@ -147,12 +149,25 @@ def apply_unified_diff_to_file(file_path: Path, unified_diff: str) -> Tuple[bool
 
     new_content = "".join(current_lines)
 
-    # Validate AST syntax for Python files
+    # Validate AST syntax and semantic invariants for Python files
     if file_path.suffix == ".py":
         try:
             ast.parse(new_content)
         except SyntaxError as e:
             raise PatchApplicationError(f"Patch introduces Python syntax error: {e}")
+
+        # Validate semantic invariants (unreachable code, bypassed guards, docstring displacement)
+        if check_semantics:
+            sem_res = analyze_python_ast_semantics(
+                original_source=orig_content,
+                patched_source=new_content,
+                file_path=file_path.name,
+            )
+            if not sem_res.is_valid:
+                violation_summary = "; ".join(sem_res.violations)
+                raise PatchApplicationError(
+                    f"Patch introduces semantic safety violations in '{file_path.name}': {violation_summary}"
+                )
 
     file_path.write_text(new_content, encoding="utf-8")
     return True, "Patch applied cleanly and syntax verified"

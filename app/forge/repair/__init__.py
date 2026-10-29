@@ -44,6 +44,13 @@ from forge.repair.anchoring import (
     construct_patch_from_edit_anchor,
     validate_anchor_replacement_semantics,
 )
+from forge.repair.semantic_verifier import (
+    BypassedGuardInfo,
+    SemanticAnalysisResult,
+    UnreachableStatementInfo,
+    analyze_python_ast_semantics,
+    collect_unreachable_statements,
+)
 from forge.repair.planner import RepairPlanner
 from forge.repair.verifier import (
     PatchApplicationError,
@@ -87,6 +94,7 @@ __all__ = [
     "AnchorResolutionStatus",
     "AutonomousMutationForbiddenError",
     "BudgetExceededError",
+    "BypassedGuardInfo",
     "EditAnchorContract",
     "HumanApprovalRequiredError",
     "InvalidWorkflowTransitionError",
@@ -114,12 +122,16 @@ __all__ = [
     "RepairWorkflowState",
     "ScenarioStatus",
     "ScopeContainmentError",
+    "SemanticAnalysisResult",
     "StaleBaseRevisionError",
     "StructuredPatchProposalSchema",
+    "UnreachableStatementInfo",
     "WorkflowConcurrencyError",
     "WorkspaceImmutabilityError",
+    "analyze_python_ast_semantics",
     "apply_unified_diff_to_file",
     "assert_human_approval_gate",
+    "collect_unreachable_statements",
     "compute_acceptance_metrics",
     "compute_patch_sha256",
     "construct_patch_from_edit_anchor",
