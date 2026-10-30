@@ -96,6 +96,7 @@ RESUMABLE_STATES: Set[EngineeringWorkflowState] = {
     EngineeringWorkflowState.REPAIR_PENDING,
     EngineeringWorkflowState.VERIFICATION_PENDING,
     EngineeringWorkflowState.REGRESSION_CHECKING,
+    EngineeringWorkflowState.AWAITING_HUMAN_REVIEW,
 }
 
 TERMINAL_STATES: Set[EngineeringWorkflowState] = {

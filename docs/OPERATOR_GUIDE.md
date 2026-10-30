@@ -163,20 +163,41 @@ forge workflow verify <WORKFLOW_ID>
 ```
 
 ### Step 6: Inspect Candidate Patch & Audit Ledger
-View the workflow status, candidate unified diff, and event trail:
+List all workflows or inspect a specific workflow dashboard:
 ```bash
+# List all active and historical workflows:
+forge workflow list
+
+# Inspect full workflow dashboard (or use 'forge workflow status'):
 forge workflow show <WORKFLOW_ID>
 ```
 
+The workflow inspection dashboard displays:
+- **Operational Status:** Current lifecycle state with human-readable operational category (`[AWAITING OPERATOR REVIEW]`, `[PENDING]`, `[BLOCKED]`, `[APPROVED]`, `[REJECTED]`, or `[FAILED]`).
+- **Next Permitted Action:** Concrete guidance and exact command syntax required to advance or recover the workflow.
+- **Candidate Repair Patch:** Target file path, lines added/removed, SHA-256 digest, and syntax-highlighted unified diff codeblock.
+- **Multi-Check Verification Results:** Comprehensive table detailing check type, name, status (`PASSED`, `FAILED`, `BLOCKED`, `SKIPPED`), execution duration, and diagnostic message.
+- **Audit Ledger Timeline:** Monotonic sequential events, timestamps, and transition metadata.
+
 ### Step 7: Human Review & Decision Gate
-Submit your review decision (`approve` or `reject`):
+Submit your review decision (`approve` or `reject`). Optionally pass `--repo` to verify that the target repository has not drifted:
 ```bash
-# To approve:
-forge workflow review <WORKFLOW_ID> --decision approve --notes "Verified minimal 1-line backoff delay repair."
+# To approve with target repository revision check:
+forge workflow review <WORKFLOW_ID> \
+    --decision approve \
+    --notes "Verified minimal 1-line backoff delay repair." \
+    --repo /path/to/target_repository
 
 # To reject:
-forge workflow review <WORKFLOW_ID> --decision reject --notes "Inverts condition but omits required sentinel return."
+forge workflow review <WORKFLOW_ID> \
+    --decision reject \
+    --notes "Inverts condition but omits required sentinel return."
 ```
+
+Approval strictly validates:
+1. The candidate patch SHA-256 digest matches the stored unified diff.
+2. The verification aggregate outcome is `PASSED` with zero regressions detected.
+3. The target repository HEAD matches the pinned `base_commit_sha`.
 
 ### Step 8: Export the Certified Engineering Dossier
 Export the final patch diff, verification certificates, and audit record:
@@ -188,6 +209,12 @@ forge workflow export <WORKFLOW_ID> --out-dir ./dossiers
 
 ## 5. Troubleshooting & FAQ
 
+### Interrupted Workflows & Safe Recovery
+- **Interrupted Reproduction:** If reproduction fails or was cancelled, the workflow enters `REPRO_BLOCKED`. Run `forge workflow resume <WORKFLOW_ID>` to transition back to `REPRODUCTION_PENDING` and re-run reproduction.
+- **Interrupted Repair Planning:** If the process was interrupted while generating a plan (`REPAIR_PENDING` without a validated plan), run `forge workflow plan-repair <WORKFLOW_ID>` to cleanly resume planning without state corruption.
+- **Interrupted Human Review:** If an operator disconnects while the workflow is in `AWAITING_HUMAN_REVIEW`, run `forge workflow show <WORKFLOW_ID>` or `forge workflow resume <WORKFLOW_ID>` to inspect the candidate and submit a decision.
+- **Terminal States Are Immutable:** Workflows in `APPROVED` or `REJECTED` cannot be resumed or modified.
+
 ### Docker Sandbox Shows `[WARN] Docker runtime unavailable`
 - Ensure the Docker daemon is running (`docker info`).
 - If running under restricted user permissions, ensure your user has access to `unix:///var/run/docker.sock` or `~/.docker/run/docker.sock`.
@@ -198,9 +225,6 @@ forge workflow export <WORKFLOW_ID> --out-dir ./dossiers
 - If the model exhausts its retry budget, the workflow transitions safely to `repair_failed`.
 - Ensure Ollama is responsive by testing `curl http://localhost:11434/api/tags`.
 
-### Target Repository Modified Between Stages
-- If someone edits the target repository while a workflow is in flight, FORGE intercepts this as `RevisionDriftError` and halts to protect evidence integrity.
-- To recover, reset the target repository to the pinned base commit SHA and resume the workflow:
-```bash
-forge workflow resume <WORKFLOW_ID>
-```
+### Target Repository Modified Between Stages (Revision Drift)
+- If the target repository HEAD diverges from the finding's pinned `base_commit_sha`, FORGE intercepts this as `RevisionDriftError` and halts approval to protect evidence integrity.
+- To recover, ensure the target repository is at the pinned commit SHA before approving, or restart from intake if working against a new base revision.

@@ -1,7 +1,7 @@
 # Phase 6: Supervised Beta Packaging & Operational Readiness — Architecture & Roadmap
 
 - **Phase:** Phase 6 — Supervised Beta Packaging & Operational Readiness
-- **Status:** IN PROGRESS (Milestones 1–2 Complete)
+- **Status:** IN PROGRESS (Milestones 1–3 Complete)
 - **Target Repo Immutability:** STRICTLY ENFORCED (Zero automated mutation, zero commits, zero pushes, zero PRs)
 - **Traceability:** Implements Phase 6 specification and release gate per `AGENTS.md` (Sections 1, 2, 3, 4, 5, 7), synthesizing all findings from Supervised Pilots 01–08.
 
@@ -32,8 +32,8 @@ Phase 6 packages these capabilities into a predictable, auditable, and productio
 ```mermaid
 flowchart TD
     M1["M1: Beta Readiness Audit & Release Foundation"] --> M2["M2: Packaging, CLI Usability & Distribution"]
-    M2 --> M3["M3: Operator Workflow & Review Experience (NEXT)"]
-    M3 --> M4["M4: Operational Diagnostics & Live Environment Validation"]
+    M2 --> M3["M3: Operator Workflow Reliability & Recovery"]
+    M3 --> M4["M4: Operational Diagnostics & Live Environment Validation (NEXT)"]
     M4 --> M5["M5: Security Hardening, Attestation & Release Gate"]
     M5 --> M6["M6: Supervised Beta Release Candidate & Verification"]
 ```
@@ -59,12 +59,19 @@ flowchart TD
   - CLI usability enhancements, Typer shell auto-completion (`--install-completion` for bash/zsh/fish/powershell), and updated operator guide.
   - Dedicated M2 Specification (`docs/specs/phase-6-m2-packaging-distribution.md`).
 
-### Milestone 3: Operator Workflow & Review Experience (Planned)
-- **Objective:** Enhance the operator review gate with rich terminal diff formatting, syntax highlighting, and interactive decision prompts.
-- **Scope:**
-  - Side-by-side terminal unified diff rendering.
-  - Interactive CLI review commands (`forge workflow review --interactive`).
-  - Improved export formats for the Engineering Dossier (HTML, Markdown, SARIF).
+### Milestone 3: Operator Workflow Reliability & Recovery (Completed)
+- **Objective:** Harden the operator workflow lifecycle against interruptions, ensure safe recovery without evidence loss, and enforce decision integrity.
+- **Deliverables:**
+  - Resumable review state (`AWAITING_HUMAN_REVIEW` added to `RESUMABLE_STATES`) and idempotent re-entry across all workflow stages.
+  - Interrupted repair planning recovery (`REPAIR_PENDING` without plan re-invokes planner cleanly).
+  - Terminal state candidate immutability (approved/rejected workflows strictly reject candidate alteration).
+  - Human review decision integrity checks: candidate patch SHA-256 digest verification and mandatory passed verification outcome.
+  - Target repository revision drift detection (`RevisionDriftError`) on approval via `--repo` check.
+  - Permanent rejection recording in the event ledger and database.
+  - Enhanced workflow inspection (`forge workflow show <WF_ID>` and `status`) displaying status banner, next permitted action, candidate unified diff with digest, multi-check verification table, and event ledger timeline.
+  - CLI command aliases `forge workflow show` and `forge workflow reproduce`.
+  - Dedicated M3 Specification (`docs/specs/phase-6-m3-workflow-reliability-recovery.md`).
+  - Full regression verification (970 passed, 3 skipped).
 
 ### Milestone 4: Operational Diagnostics & Live Environment Validation (Planned)
 - **Objective:** Expand `forge doctor` and preflight verification for diverse host configurations.

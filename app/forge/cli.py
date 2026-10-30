@@ -2507,14 +2507,114 @@ def cli_context_show(
 # Phase 5 Engineering Workflow Lifecycle Commands (Milestone 2)
 # =============================================================================
 
-def _render_eng_workflow_markdown(wf: Any, events: List[Any]) -> str:
+def _determine_workflow_guidance(wf: Any) -> Tuple[str, str]:
+    """Return (status_category, next_action_guidance) based on workflow lifecycle state."""
+    state_str = wf.state.value if hasattr(wf.state, "value") else str(wf.state)
+    wid = wf.workflow_id
+    if state_str in ("created", "intake_validated"):
+        return (
+            "PENDING (Intake Initialized)",
+            f"Run 'forge workflow repro {wid}' to analyze repository and run defect reproduction in Docker.",
+        )
+    elif state_str == "repo_analyzed":
+        return (
+            "PENDING (Context Assembled)",
+            f"Run 'forge workflow repro {wid}' to execute isolated defect reproduction.",
+        )
+    elif state_str == "reproduction_pending":
+        return (
+            "IN PROGRESS (Reproduction Pending)",
+            f"Run 'forge workflow repro {wid}' to execute or resume reproduction.",
+        )
+    elif state_str == "repro_blocked":
+        return (
+            "BLOCKED (Docker Unavailable)",
+            f"Ensure Docker daemon is running, then run 'forge workflow resume {wid}'.",
+        )
+    elif state_str == "reproduced":
+        return (
+            "REPRODUCED (Defect Verified by Execution Oracle)",
+            f"Run 'forge workflow plan-repair {wid}' to generate an evidence-grounded repair plan.",
+        )
+    elif state_str == "repair_pending":
+        if wf.repair_plan_id:
+            return (
+                "REPAIR PLANNED (Candidate Ready for Verification)",
+                f"Run 'forge workflow verify {wid}' to execute multi-check verification.",
+            )
+        else:
+            return (
+                "IN PROGRESS (Repair Planning Interrupted)",
+                f"Run 'forge workflow plan-repair {wid}' to resume repair planning.",
+            )
+    elif state_str == "verification_pending":
+        return (
+            "IN PROGRESS (Verification Pending)",
+            f"Run 'forge workflow verify {wid}' to execute or resume multi-check verification.",
+        )
+    elif state_str == "verification_blocked":
+        return (
+            "BLOCKED (Verification Blocked - Sandbox/Tool Missing)",
+            f"Ensure Docker sandbox and required tools are available, then run 'forge workflow resume {wid}'.",
+        )
+    elif state_str in ("verified", "regression_checking"):
+        return (
+            "VERIFIED (All Checks Passed)",
+            f"Run 'forge workflow advance {wid}' to proceed to the operator review gate.",
+        )
+    elif state_str == "awaiting_human_review":
+        return (
+            "AWAITING OPERATOR REVIEW (Review Gate Active)",
+            f"Inspect candidate patch and run 'forge workflow review {wid} --decision [approve|reject] --notes \"...\"'.",
+        )
+    elif state_str == "approved":
+        return (
+            "TERMINAL (Approved by Human Operator)",
+            f"Run 'forge workflow export {wid} --out-dir ./dossiers' to export certified engineering dossier.",
+        )
+    elif state_str == "rejected":
+        return (
+            "TERMINAL (Rejected by Human Operator)",
+            "Workflow concluded and permanently recorded as rejected. No further action permitted.",
+        )
+    elif state_str == "repro_failed":
+        return (
+            "TERMINAL (Reproduction Failed)",
+            "Defect could not be reproduced. Workflow concluded. Inspect test specification and repository.",
+        )
+    elif state_str == "repro_inconclusive":
+        return (
+            "TERMINAL (Reproduction Inconclusive)",
+            "Reproduction was inconclusive. Workflow concluded.",
+        )
+    elif state_str == "repair_failed":
+        return (
+            "TERMINAL (Repair Planning Failed)",
+            "Model repair proposal violated policy, scope, or indentation rules. Workflow concluded.",
+        )
+    elif state_str in ("verification_failed", "regression_failed"):
+        return (
+            "TERMINAL (Verification Failed / Regression Detected)",
+            "Candidate patch failed multi-check verification or caused regression on baseline tests. Workflow concluded.",
+        )
+    return (
+        f"UNKNOWN ({state_str})",
+        f"Inspect workflow state with 'forge workflow status {wid}'.",
+    )
+
+
+def _render_eng_workflow_markdown(wf: Any, events: List[Any], store: Optional[Any] = None) -> str:
+    category, next_action = _determine_workflow_guidance(wf)
+
     lines = [
         f"# Engineering Workflow `{wf.workflow_id}`",
-        f"- **State**: `{wf.state.value}`",
+        f"- **Status**: `{category}`",
+        f"- **Lifecycle State**: `{wf.state.value}`",
+        f"- **Next Permitted Action**: {next_action}",
         f"- **Intake ID**: `{wf.intake_id}`",
         f"- **Target Repo**: `{wf.target_repo}`",
         f"- **Pinned Commit**: `{wf.base_commit_sha}`",
-        f"- **Version**: `{wf.version}`",
+        f"- **Concurrency Version**: `{wf.version}`",
     ]
     if wf.context_id:
         lines.append(f"- **Context ID**: `{wf.context_id}`")
@@ -2531,12 +2631,54 @@ def _render_eng_workflow_markdown(wf: Any, events: List[Any]) -> str:
     if wf.error_message:
         lines.append(f"- **Error / Diagnostic**: {wf.error_message}")
 
+    # Candidate Repair Patch Details
+    if wf.repair_plan_id and store:
+        try:
+            plan = store.get_repair_plan(wf.repair_plan_id)
+            if plan and plan.patch_candidate:
+                lines.append("\n## Candidate Repair Patch")
+                lines.append(f"- **Target File**: `{plan.target_file}`")
+                lines.append(f"- **Lines Changed**: `+{plan.patch_candidate.added_lines} / -{plan.patch_candidate.removed_lines}`")
+                lines.append(f"- **SHA-256 Digest**: `{plan.patch_candidate.sha256_digest}`")
+                lines.append("\n```diff")
+                lines.append(plan.patch_candidate.unified_diff.strip())
+                lines.append("```")
+        except Exception:
+            pass
+
+    # Multi-Check Verification Results
+    if wf.verification_attempt_id and store:
+        try:
+            vresult = store.get_multi_check_verification(wf.verification_attempt_id)
+            if vresult:
+                lines.append("\n## Multi-Check Verification Results")
+                lines.append(f"- **Aggregate Outcome**: `{vresult.aggregate_outcome.value}`")
+                lines.append(f"- **Sandbox Available**: `{vresult.sandbox_available}`")
+                lines.append(f"- **Regression Detected**: `{vresult.regression_detected}`")
+                lines.append(f"- **Duration**: `{vresult.total_duration_ms:.1f} ms`")
+                if vresult.candidate_results:
+                    lines.append("\n| Check | Type | Status | Duration | Diagnostic |")
+                    lines.append("| :--- | :--- | :--- | :--- | :--- |")
+                    for c in vresult.candidate_results:
+                        diag = c.diagnostic.replace("\n", " ").strip() if c.diagnostic else ""
+                        lines.append(f"| `{c.name}` | `{c.check_type.value}` | `{c.status.value}` | `{c.duration_ms:.1f}ms` | {diag[:60]} |")
+        except Exception:
+            pass
+
     if events:
         lines.append("\n## Event Ledger Timeline")
         for ev in events:
             from_st = ev.from_state.value if ev.from_state else "None"
             to_st = ev.to_state.value
-            lines.append(f"- `#{ev.sequence:02d}` [{ev.created_at.isoformat()}] `{ev.stage}`: `{from_st}` → `{to_st}`")
+            payload_summary = ""
+            if ev.payload:
+                if "decision" in ev.payload:
+                    payload_summary = f" (decision: {ev.payload['decision']})"
+                elif "reason" in ev.payload:
+                    payload_summary = f" (reason: {ev.payload['reason']})"
+                elif "aggregate_outcome" in ev.payload:
+                    payload_summary = f" (outcome: {ev.payload['aggregate_outcome']})"
+            lines.append(f"- `#{ev.sequence:02d}` [{ev.created_at.isoformat()}] `{ev.stage}`: `{from_st}` → `{to_st}`{payload_summary}")
     return "\n".join(lines)
 
 
@@ -2568,7 +2710,7 @@ def cli_eng_workflow_start(
     if format.lower() == "json":
         typer.echo(wf.model_dump_json(indent=2))
     else:
-        typer.echo(_render_eng_workflow_markdown(wf, events))
+        typer.echo(_render_eng_workflow_markdown(wf, events, store=orchestrator.store))
 
 
 @eng_workflow_app.command(name="status")
@@ -2576,7 +2718,7 @@ def cli_eng_workflow_status(
     workflow_id: str = typer.Argument(..., help="Workflow ID (e.g. wf_eng_...)"),
     format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
 ) -> None:
-    """Display current state, history, and metadata of an engineering workflow."""
+    """Display current state, history, candidate patch, and metadata of an engineering workflow."""
     from forge.workflow.orchestrator import EngineeringWorkflowOrchestrator
 
     orchestrator = EngineeringWorkflowOrchestrator()
@@ -2590,7 +2732,16 @@ def cli_eng_workflow_status(
     if format.lower() == "json":
         typer.echo(wf.model_dump_json(indent=2))
     else:
-        typer.echo(_render_eng_workflow_markdown(wf, events))
+        typer.echo(_render_eng_workflow_markdown(wf, events, store=orchestrator.store))
+
+
+@eng_workflow_app.command(name="show")
+def cli_eng_workflow_show(
+    workflow_id: str = typer.Argument(..., help="Workflow ID (e.g. wf_eng_...)"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Display complete state, candidate patch, verification results, and history (alias for 'status')."""
+    cli_eng_workflow_status(workflow_id=workflow_id, format=format)
 
 
 @eng_workflow_app.command(name="list")
@@ -2642,7 +2793,7 @@ def cli_eng_workflow_resume(
     if format.lower() == "json":
         typer.echo(wf.model_dump_json(indent=2))
     else:
-        typer.echo(_render_eng_workflow_markdown(wf, events))
+        typer.echo(_render_eng_workflow_markdown(wf, events, store=orchestrator.store))
 
 
 @eng_workflow_app.command(name="review")
@@ -2650,6 +2801,7 @@ def cli_eng_workflow_review(
     workflow_id: str = typer.Argument(..., help="Workflow ID to review"),
     decision: str = typer.Option(..., "--decision", "-d", help="Mandatory review decision: 'approve' or 'reject'"),
     notes: Optional[str] = typer.Option(None, "--notes", "-n", help="Auditor review notes"),
+    repo: Optional[Path] = typer.Option(None, "--repo", "-r", help="Repository path override to verify HEAD revision before approval"),
     format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
 ) -> None:
     """Submit a mandatory human review decision to approve or reject a workflow."""
@@ -2658,7 +2810,7 @@ def cli_eng_workflow_review(
 
     orchestrator = EngineeringWorkflowOrchestrator()
     try:
-        wf = orchestrator.review_workflow(workflow_id=workflow_id, decision=decision, notes=notes)
+        wf = orchestrator.review_workflow(workflow_id=workflow_id, decision=decision, notes=notes, target_repo=repo)
         events = orchestrator.list_events(wf.workflow_id)
     except Exception as exc:
         typer.secho(f"Review rejected: {exc}", fg=typer.colors.RED, err=True)
@@ -2667,7 +2819,7 @@ def cli_eng_workflow_review(
     if format.lower() == "json":
         typer.echo(wf.model_dump_json(indent=2))
     else:
-        typer.echo(_render_eng_workflow_markdown(wf, events))
+        typer.echo(_render_eng_workflow_markdown(wf, events, store=orchestrator.store))
 
     if wf.state == EngineeringWorkflowState.APPROVED:
         typer.secho("\n[Result] Workflow APPROVED by human operator. Target repo remains unmodified.", fg=typer.colors.GREEN)
@@ -2706,7 +2858,25 @@ def cli_eng_workflow_repro(
     if format.lower() == "json":
         typer.echo(wf.model_dump_json(indent=2))
     else:
-        typer.echo(_render_eng_workflow_markdown(wf, events))
+        typer.echo(_render_eng_workflow_markdown(wf, events, store=orchestrator.store))
+
+
+@eng_workflow_app.command(name="reproduce")
+def cli_eng_workflow_reproduce(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to reproduce defect for"),
+    repo: Optional[Path] = typer.Option(None, "--repo", "-r", help="Repository path override (defaults to workflow target_repo)"),
+    test_command: Optional[str] = typer.Option(None, "--test-command", "-c", help="Explicit test command override"),
+    max_retries: int = typer.Option(0, "--max-retries", help="Maximum retry attempts (0-3)"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+) -> None:
+    """Execute or resume defect reproduction and chain validated evidence into the workflow (alias for 'repro')."""
+    cli_eng_workflow_repro(
+        workflow_id=workflow_id,
+        repo=repo,
+        test_command=test_command,
+        max_retries=max_retries,
+        format=format,
+    )
 
 
 @eng_workflow_app.command(name="plan-repair")
@@ -2738,7 +2908,7 @@ def cli_eng_workflow_plan_repair(
     if format.lower() == "json":
         typer.echo(wf.model_dump_json(indent=2))
     else:
-        typer.echo(_render_eng_workflow_markdown(wf, events))
+        typer.echo(_render_eng_workflow_markdown(wf, events, store=orchestrator.store))
 
 
 @eng_workflow_app.command(name="verify")
@@ -2773,7 +2943,7 @@ def cli_eng_workflow_verify(
     if format.lower() == "json":
         typer.echo(wf.model_dump_json(indent=2))
     else:
-        typer.echo(_render_eng_workflow_markdown(wf, events))
+        typer.echo(_render_eng_workflow_markdown(wf, events, store=orchestrator.store))
 
 
 @eng_workflow_app.command(name="advance")
@@ -2807,7 +2977,7 @@ def cli_eng_workflow_advance(
     if format.lower() == "json":
         typer.echo(wf.model_dump_json(indent=2))
     else:
-        typer.echo(_render_eng_workflow_markdown(wf, events))
+        typer.echo(_render_eng_workflow_markdown(wf, events, store=orchestrator.store))
 
 
 @eng_workflow_app.command(name="export")

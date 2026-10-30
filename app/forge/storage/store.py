@@ -1359,8 +1359,10 @@ class ForgeStore:
         from forge.workflow.models import (
             EngineeringWorkflow,
             EngineeringWorkflowState,
+            InvalidWorkflowTransitionError,
             WorkflowConcurrencyError,
         )
+        from forge.workflow.state import is_terminal_state
 
         conn = self._conn()
         try:
@@ -1381,6 +1383,10 @@ class ForgeStore:
                     )
 
                 current_state = EngineeringWorkflowState(row["state"])
+                if is_terminal_state(current_state):
+                    raise InvalidWorkflowTransitionError(
+                        f"Cannot attach repair plan to terminal workflow '{workflow_id}' in state '{current_state.value}'."
+                    )
                 new_version = current_version + 1
                 now_dt = datetime.now(timezone.utc)
                 now_str = now_dt.isoformat()

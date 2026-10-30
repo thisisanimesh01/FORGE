@@ -34,8 +34,19 @@ Deterministic Edit Anchoring & Source-Grounded Repair ── [COMPLETED]
 Repair Reliability & Generalization ── [COMPLETED]
 Candidate Semantic Verification Hardening ── [COMPLETED]
 Deterministic Repair Construction Architecture ── [COMPLETED]
-Phase 6: Supervised Beta Packaging & Operational Readiness ── [IN PROGRESS] (Milestones 1–2 Complete)
+Phase 6: Supervised Beta Packaging & Operational Readiness ── [IN PROGRESS] (Milestones 1–3 Complete)
 ```
+
+### Phase 6, Milestone 3: Operator Workflow Reliability & Recovery (Completed)
+- **Objective & Scope**: Harden FORGE's supervised operator workflow lifecycle against interruptions and failures, ensure idempotent recovery without loss of evidence or state corruption, unify CLI inspection experiences, and enforce human decision integrity.
+- **Architectural Deliverables**:
+  - *Interruption Recovery & Resumable States*: Added `AWAITING_HUMAN_REVIEW` to resumable states in `forge.workflow.state` and enabled idempotent resumption across all workflow stages (`forge workflow resume <WF_ID>`). Interrupted repair planning in `REPAIR_PENDING` without a validated plan can be safely resumed without raising transition errors.
+  - *Human Review Gate & Decision Verification*: Approval in `review_workflow` validates the candidate patch SHA-256 digest against the stored unified diff, requires a passed multi-check verification result with zero regressions, and verifies that the target repository HEAD commit has not drifted away from the pinned `base_commit_sha` (raising `RevisionDriftError`). Permanent rejection records the decision in SQLite and appends an immutable event to the ledger.
+  - *Candidate Immutability in Terminal States*: Workflows in `APPROVED` or `REJECTED` strictly reject candidate patch replacement or modification in `attach_repair_plan_to_workflow`.
+  - *Enhanced Workflow Inspection Dashboard*: Upgraded `_render_eng_workflow_markdown` to display status categories (`[AWAITING OPERATOR REVIEW]`, `[PENDING]`, `[BLOCKED]`, `[APPROVED]`, `[REJECTED]`, `[FAILED]`), actionable next commands, candidate repair patch details (target file, lines changed, SHA-256 digest, syntax-highlighted unified diff), multi-check verification table, and monotonic event ledger timeline.
+  - *CLI Usability Aliases*: Added `forge workflow show <WF_ID>` (aliasing `status`) and `forge workflow reproduce <WF_ID>` (aliasing `repro`). Added `--repo` flag to `forge workflow review` for explicit drift verification.
+  - *Milestone Specification ([`docs/specs/phase-6-m3-workflow-reliability-recovery.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-6-m3-workflow-reliability-recovery.md))*: Comprehensive documentation of interruption recovery matrices, decision verification rules, and test verification records.
+  - *Full Regression Verification*: 12 targeted unit/CLI tests in `tests/unit/test_phase6_milestone3.py` and full 970-test test suite passing with zero regressions.
 
 ### Phase 6, Milestone 2: Packaging, CLI Usability & Distribution (Completed)
 - **Objective & Scope**: Package FORGE into standard Python distribution artifacts (wheel `.whl` and source distribution `.tar.gz`) enabling clean standalone installation and CLI execution outside the source repository without dependency bloat or security regressions.

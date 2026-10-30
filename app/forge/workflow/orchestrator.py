@@ -171,10 +171,13 @@ class EngineeringWorkflowOrchestrator:
         workflow_id: str,
         decision: str,
         notes: Optional[str] = None,
+        target_repo: Optional[Union[str, Path]] = None,
+        require_verified_candidate: bool = False,
     ) -> EngineeringWorkflow:
         """Submit a mandatory human review decision ('approve' or 'reject').
 
         Only workflows awaiting review can be decided upon.
+        On approval, verifies candidate patch digest, verification status, and git revision.
         """
         normalized_decision = decision.strip().lower()
         if normalized_decision not in ("approve", "reject"):
@@ -198,6 +201,64 @@ class EngineeringWorkflowOrchestrator:
             else EngineeringWorkflowState.REJECTED
         )
 
+        if normalized_decision == "approve":
+            # 1. Require candidate presence if enforced
+            if require_verified_candidate and not wf.repair_plan_id:
+                raise ValueError(
+                    f"Workflow '{workflow_id}' has no associated repair plan candidate to approve."
+                )
+
+            # 2. If repair plan is attached, verify patch integrity
+            if wf.repair_plan_id:
+                plan = self.store.get_repair_plan(wf.repair_plan_id)
+                if not plan or not plan.patch_candidate:
+                    raise ValueError(
+                        f"Repair plan '{wf.repair_plan_id}' or patch candidate not found in store."
+                    )
+                from forge.repair.contracts import compute_patch_sha256
+                expected_digest = plan.patch_candidate.sha256_digest
+                computed_digest = compute_patch_sha256(plan.patch_candidate.unified_diff)
+                if expected_digest != computed_digest:
+                    raise ValueError(
+                        f"Candidate patch SHA-256 digest mismatch: expected '{expected_digest}', computed '{computed_digest}'. "
+                        "Patch candidate diff does not match stored integrity digest."
+                    )
+
+            # 3. If verification attempt is attached, verify outcome and regressions
+            if wf.verification_attempt_id:
+                vresult = self.store.get_multi_check_verification(wf.verification_attempt_id)
+                if not vresult:
+                    raise ValueError(
+                        f"Verification attempt '{wf.verification_attempt_id}' not found in store."
+                    )
+                if vresult.aggregate_outcome != VerificationAggregateOutcome.PASSED:
+                    raise ValueError(
+                        f"Cannot approve workflow with unverified aggregate outcome: '{vresult.aggregate_outcome.value}'."
+                    )
+                if vresult.regression_detected:
+                    raise ValueError(
+                        "Cannot approve workflow with detected regressions."
+                    )
+
+            # 4. Check target repository revision drift if repository is accessible
+            repo_path = Path(target_repo) if target_repo else Path(wf.target_repo)
+            if repo_path.exists() and (repo_path / ".git").exists():
+                from forge.repository.acquisition import run_git_command
+                try:
+                    git_res = run_git_command(["rev-parse", "HEAD"], cwd=repo_path, timeout_seconds=5)
+                    if git_res.returncode == 0:
+                        current_sha = git_res.stdout.strip().lower()
+                        expected_sha = wf.base_commit_sha.strip().lower()
+                        if not current_sha.startswith(expected_sha) and not expected_sha.startswith(current_sha):
+                            raise RevisionDriftError(
+                                f"Target repository revision '{current_sha}' does not match workflow base commit '{wf.base_commit_sha}'. "
+                                "Stale revisions invalidate approval. Workspace drift detected."
+                            )
+                except RevisionDriftError:
+                    raise
+                except Exception:
+                    pass
+
         return self.store.transition_engineering_workflow(
             workflow_id=workflow_id,
             expected_version=wf.version,
@@ -208,6 +269,8 @@ class EngineeringWorkflowOrchestrator:
             payload={
                 "decision": normalized_decision,
                 "notes": notes or "",
+                "repair_plan_id": wf.repair_plan_id,
+                "verification_attempt_id": wf.verification_attempt_id,
             },
             transition_context={"human_decision": normalized_decision},
         )
@@ -434,10 +497,20 @@ class EngineeringWorkflowOrchestrator:
         if not wf:
             raise StoreError(f"Engineering workflow '{workflow_id}' not found.")
 
-        if wf.state != EngineeringWorkflowState.REPRODUCED:
+        # Idempotent return if already planned and validated
+        if wf.state == EngineeringWorkflowState.REPAIR_PENDING and wf.repair_plan_id:
+            existing_plan = self.store.get_repair_plan(wf.repair_plan_id)
+            if existing_plan and existing_plan.status == RepairPlanStatus.VALIDATED:
+                return wf
+
+        # Allow REPRODUCED or interrupted REPAIR_PENDING
+        if wf.state not in (
+            EngineeringWorkflowState.REPRODUCED,
+            EngineeringWorkflowState.REPAIR_PENDING,
+        ):
             raise InvalidWorkflowTransitionError(
                 f"Cannot plan repair for workflow in state '{wf.state.value}'. "
-                f"Workflow must be in 'reproduced' state."
+                f"Workflow must be in 'reproduced' state (or 'repair_pending' to resume)."
             )
 
         intake = self.store.get_workflow_intake(wf.intake_id)
@@ -477,14 +550,15 @@ class EngineeringWorkflowOrchestrator:
         latest_repro_ev = repro_evidence[-1]
         validate_reproduction_evidence(latest_repro_ev, wf, intake, case, self.store)
 
-        # Transition to REPAIR_PENDING with verified evidence context
-        wf = self.store.transition_engineering_workflow(
-            workflow_id=wf.workflow_id,
-            expected_version=wf.version,
-            target_state=EngineeringWorkflowState.REPAIR_PENDING,
-            stage="start_repair_planning",
-            transition_context={"has_repro_evidence": True},
-        )
+        # Transition to REPAIR_PENDING with verified evidence context if not already REPAIR_PENDING
+        if wf.state != EngineeringWorkflowState.REPAIR_PENDING:
+            wf = self.store.transition_engineering_workflow(
+                workflow_id=wf.workflow_id,
+                expected_version=wf.version,
+                target_state=EngineeringWorkflowState.REPAIR_PENDING,
+                stage="start_repair_planning",
+                transition_context={"has_repro_evidence": True},
+            )
 
         repair_planner = planner or RepairPlanner(provider_name=provider_name, model_name=model_name)
         plan = repair_planner.plan_repair(
@@ -555,6 +629,10 @@ class EngineeringWorkflowOrchestrator:
         wf = self.store.get_engineering_workflow(workflow_id)
         if not wf:
             raise StoreError(f"Engineering workflow '{workflow_id}' not found.")
+
+        # Idempotent return if already verified or awaiting human review
+        if wf.state in (EngineeringWorkflowState.VERIFIED, EngineeringWorkflowState.AWAITING_HUMAN_REVIEW):
+            return wf
 
         # Check state: can verify from REPAIR_PENDING, VERIFICATION_PENDING, or resume from VERIFICATION_BLOCKED
         if wf.state not in (
@@ -801,8 +879,10 @@ class EngineeringWorkflowOrchestrator:
                 harness=harness,
             )
 
-        # 4. REPRODUCED -> plan_repair
-        if wf.state == EngineeringWorkflowState.REPRODUCED:
+        # 4. REPRODUCED or interrupted REPAIR_PENDING without repair_plan_id -> plan_repair
+        if wf.state == EngineeringWorkflowState.REPRODUCED or (
+            wf.state == EngineeringWorkflowState.REPAIR_PENDING and not wf.repair_plan_id
+        ):
             wf = self.plan_repair(
                 workflow_id=wf.workflow_id,
                 workspace_path=workspace_path,
