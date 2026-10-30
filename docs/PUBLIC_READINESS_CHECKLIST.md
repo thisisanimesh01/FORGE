@@ -5,8 +5,8 @@ This checklist tracks the exact readiness status of FORGE prior to transitioning
 **Repository:** `https://github.com/thisisanimesh01/FORGE`  
 **Current HEAD:** `dcf0cd844817810b35899b80bc6a3b59db07087f`  
 **Candidate Release:** `0.1.0b1`  
-**Milestone:** Phase 7, Milestone 1 (Public Readiness Remediation)  
-**Overall Status:** **GO (PENDING MAINTAINER VISIBILITY TRANSITION & RE-ATTESTATION)**
+**Milestone:** Phase 7, Milestone 2 (Official Beta Release v0.1.0b1)  
+**Overall Status:** **RELEASE PUBLISHED & VERIFIED (v0.1.0b1)**
 
 ---
 
@@ -135,9 +135,9 @@ This checklist tracks the exact readiness status of FORGE prior to transitioning
 
 | Item | Requirement | Verification Method | Status | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **10.1**| Sigstore provenance attestation | `gh attestation verify` | **NOT VERIFIED** | Blocked by GitHub on private user repos (HTTP 404) |
-| **10.2**| Post-public attestation activation | Verification procedure documented | **READY** | Re-run release workflow immediately once public |
-| **10.3**| Checksum integrity fallback | SHA-256 verification via CLI | **PASS** | Validated via `forge release verify` |
+| **10.1**| Sigstore provenance attestation | `gh attestation verify` | **PASS** | Verified on public repository (Workflow Run 41131395242, Attestation ID 61944148) |
+| **10.2**| Post-public attestation activation | Verification procedure executed | **PASS** | `gh attestation verify` succeeds against published release wheel |
+| **10.3**| Checksum integrity fallback | SHA-256 verification via CLI | **PASS** | Validated via `forge release verify` and `shasum -a 256` |
 
 ---
 
