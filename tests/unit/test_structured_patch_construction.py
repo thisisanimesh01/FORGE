@@ -19,6 +19,7 @@ Verifies:
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 import subprocess
 from typing import List, Optional, Tuple
@@ -484,8 +485,8 @@ def test_replacement_resolves_calculator_reproduction_in_scratch(tmp_path: Path)
     # Run tests in scratch workspace
     env = {**os.environ, "PYTHONPATH": str(scratch_dir)}
     res = subprocess.run(
-        [".venv/bin/pytest", str(scratch_dir / "tests")],
-        cwd=Path("/Users/animeshyadav/Desktop/project/forge"),
+        [sys.executable, "-m", "pytest", str(scratch_dir / "tests")],
+        cwd=scratch_dir,
         capture_output=True,
         text=True,
         env=env,

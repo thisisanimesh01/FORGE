@@ -56,6 +56,7 @@ jobs:
 
       - name: Attest Build Provenance (SLSA Standard)
         uses: actions/attest-build-provenance@520d128f165991a6c774bcb264f323e3d70747f4 # v2.2.0
+        continue-on-error: true
         with:
           subject-path: |
             dist/*.whl

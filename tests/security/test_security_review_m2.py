@@ -177,6 +177,8 @@ def test_source_and_git_state_immutability(tmp_path):
     repo = tmp_path / "target_git_repo"
     repo.mkdir()
     run_git_command(["init"], cwd=repo)
+    run_git_command(["config", "user.name", "Test Committer"], cwd=repo)
+    run_git_command(["config", "user.email", "committer@example.com"], cwd=repo)
     (repo / "calc.py").write_text("def add(a, b): return a + b\n")
     (repo / "README.md").write_text("# Calculator\n")
 

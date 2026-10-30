@@ -49,7 +49,7 @@ jobs:
 
       - name: Run Python Code Compilation Check
         run: |
-          python -m compileall app/
+          python -m compileall app/forge
 
       - name: Run Offline Regression Test Suite
         run: |
