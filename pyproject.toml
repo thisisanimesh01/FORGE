@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "forge-core"
-version = "0.1.0"
-description = "FORGE: Autonomous Software Engineering Intelligence (Phase 1: Secure Repository Intelligence)"
+version = "0.1.0b1"
+description = "FORGE: Autonomous Software Engineering Intelligence (Supervised Engineering Beta)"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [

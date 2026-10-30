@@ -11,7 +11,7 @@ from forge.config import get_settings, redact_secrets
 
 app = typer.Typer(
     name="forge",
-    help="FORGE: Autonomous Software Engineering Intelligence (Phase 1: Secure Repository Intelligence)",
+    help="FORGE: Autonomous Software Engineering Intelligence (Supervised Engineering Beta)",
     no_args_is_help=True,
 )
 
@@ -105,7 +105,7 @@ def doctor() -> None:
     typer.echo(f"         API Base: {provider_info['api_base']}")
     typer.echo(f"         Network required: {'yes' if provider_info['requires_network'] else 'no (local)'}")
     typer.echo(f"         Cloud fallback: DISABLED (policy enforced)")
-    typer.echo("System is ready for Phase 1 operations.")
+    typer.echo("System is ready for Supervised Beta operations.")
 
 
 

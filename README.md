@@ -34,8 +34,17 @@ Deterministic Edit Anchoring & Source-Grounded Repair ── [COMPLETED]
 Repair Reliability & Generalization ── [COMPLETED]
 Candidate Semantic Verification Hardening ── [COMPLETED]
 Deterministic Repair Construction Architecture ── [COMPLETED]
-Phase 6: Autonomous Release & Production Hardening  ── [PLANNED]
+Phase 6: Supervised Beta Packaging & Operational Readiness ── [IN PROGRESS] (Milestone 1 Complete)
 ```
+
+### Phase 6, Milestone 1: Beta Readiness Audit & Release Foundation (Completed)
+- **Objective & Scope**: Establish the operational foundation for the limited, human-supervised developer beta of FORGE following the conclusion of Supervised Pilots 01–08.
+- **Architectural Deliverables**:
+  - *Supervised Beta Contract ([`docs/BETA_CONTRACT.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/BETA_CONTRACT.md))*: Codifies non-negotiable invariants: strict target repository immutability, mandatory human review gate (`awaiting_human_review`), fail-closed container sandboxing (`--network none`, read-only, non-root user), local-only model inference by default (`FORGE_ALLOW_CLOUD_FALLBACK=false`), and zero automated target code mutations, commits, PRs, merges, or deployments.
+  - *Empirical Known Issues & Model Limitations ([`docs/BETA_KNOWN_ISSUES.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/BETA_KNOWN_ISSUES.md))*: Discloses observed model capabilities from Pilots 01–08. Single-statement arithmetic and logic replacements operate with high fidelity; multi-statement control-flow synthesis and cross-type statement replacements on compact local models (1.5B) require close operator oversight. Details how FORGE traps these failure modes before disk mutation.
+  - *Operator Quickstart & Administration Guide ([`docs/OPERATOR_GUIDE.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/OPERATOR_GUIDE.md))*: Step-by-step instructions for installation, configuration, system diagnostics (`forge doctor`), task intake, Docker reproduction, local model repair planning, multi-check verification, human approval, and dossier export.
+  - *Package Metadata & Version Alignment*: Aligned package version to PEP 440 beta version `0.1.0b1` across `pyproject.toml` and `app/forge/__init__.py`. Aligned CLI root help and `forge doctor` ready messages.
+  - *Offline Test Baseline & Live Docker Validation*: Full test suite of 958 tests executes completely offline without external network or API keys. Opt-in Docker integration tests verified live container isolation properties.
 
 ### Deterministic Repair Construction Architecture & Coordinate Ownership (Completed)
 - **Problem & Root Cause**: Analysis of Pilot 01–05 forensics revealed that repair candidate generation broke down when local models (`qwen2.5-coder:1.5b`) attempted to override coordinates or redeclare whole function headers (`def ...`) when defects were localized to internal statements. Because earlier proposal constructors allowed model-supplied search blocks to dictate coordinates, models could hijack coordinates to line 1 rather than the anchored defect statement at line 14.
