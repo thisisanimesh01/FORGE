@@ -4,7 +4,7 @@
 **Status**: APPROVED & IMPLEMENTED  
 **Date**: 2026-10-27  
 **Author**: FORGE Engineering Team  
-**Preceding Milestone**: [Phase 5, Milestone 2: Supervised Workflow State Machine & Transactional Ledger](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m2-workflow-ledger.md)  
+**Preceding Milestone**: [Phase 5, Milestone 2: Supervised Workflow State Machine & Transactional Ledger](phase-5-m2-workflow-ledger.md)
 **Succeeding Milestone**: Phase 5, Milestone 4: Multi-Check Regression & Safety Verification  
 
 ---

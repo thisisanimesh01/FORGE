@@ -24,7 +24,7 @@ Phase 4 Milestone 3 establishes an offline, deterministic evaluation harness and
 
 ## 2. Benchmark Corpus & Ground Truth Taxonomy
 
-The benchmark corpus consists of 11 versioned, synthetic defect fixtures located in [`tests/fixtures/repair_benchmarks/`](file:///Users/animeshyadav/Desktop/project/forge/tests/fixtures/repair_benchmarks/). Each fixture contains a target file, test reproduction oracle (`test_repro.py`), baseline unit test suite (`test_baseline.py`), metadata manifest (`fixture.json`), and validated patch candidate (`patch.diff`).
+The benchmark corpus consists of 11 versioned, synthetic defect fixtures located in [`tests/fixtures/repair_benchmarks/`](../../tests/fixtures/repair_benchmarks/). Each fixture contains a target file, test reproduction oracle (`test_repro.py`), baseline unit test suite (`test_baseline.py`), metadata manifest (`fixture.json`), and validated patch candidate (`patch.diff`).
 
 ### 2.1 Representative Fixture Matrix
 
@@ -43,13 +43,13 @@ The benchmark corpus consists of 11 versioned, synthetic defect fixtures located
 | `REP11_regression_inducing_patch`| `regression_inducing`| Patch modifying return signature breaking baseline | `REGRESSION_DETECTED` | False Positive (Regression) |
 
 ### 2.2 Corpus Containment & Integrity
-Fixture discovery is managed by `RepairCorpusLoader` in [`app/forge/benchmarks/repair_corpus.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/benchmarks/repair_corpus.py). It enforces strict path containment (`assert_contained_path`), duplicate ID detection, and schema validation via Pydantic model `RepairBenchmarkFixtureMeta`.
+Fixture discovery is managed by `RepairCorpusLoader` in [`app/forge/benchmarks/repair_corpus.py`](../../app/forge/benchmarks/repair_corpus.py). It enforces strict path containment (`assert_contained_path`), duplicate ID detection, and schema validation via Pydantic model `RepairBenchmarkFixtureMeta`.
 
 ---
 
 ## 3. Metrics & Statistical Definitions
 
-Metric calculation is implemented in [`app/forge/benchmarks/repair_metrics.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/benchmarks/repair_metrics.py).
+Metric calculation is implemented in [`app/forge/benchmarks/repair_metrics.py`](../../app/forge/benchmarks/repair_metrics.py).
 
 ### 3.1 Metric Equations & Denominators
 
@@ -73,7 +73,7 @@ Metric calculation is implemented in [`app/forge/benchmarks/repair_metrics.py`](
 
 ## 4. Benchmark Runner & Isolation Architecture
 
-The evaluation harness in [`app/forge/benchmarks/repair_runner.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/benchmarks/repair_runner.py) supports two execution modes:
+The evaluation harness in [`app/forge/benchmarks/repair_runner.py`](../../app/forge/benchmarks/repair_runner.py) supports two execution modes:
 
 1. **Offline Mode (`mode="offline"`)**:
    - Uses pre-validated synthetic diff fixtures or scripted responses.
@@ -85,7 +85,7 @@ The evaluation harness in [`app/forge/benchmarks/repair_runner.py`](file:///User
    - Strictly enforces provider allowlist (`fake`, `ollama`, `ollama_cloud`, `gemini`, `deepseek`, `groq`).
 
 ### 4.1 Reporting & Secret Sanitization
-Reporting logic in [`app/forge/benchmarks/repair_reporting.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/benchmarks/repair_reporting.py) converts run results into sanitized Markdown tables, JSON documents, or Python dictionaries. Every output channel passes through `redact_secrets()` to ensure zero tokens or sensitive values leak into benchmark artifacts.
+Reporting logic in [`app/forge/benchmarks/repair_reporting.py`](../../app/forge/benchmarks/repair_reporting.py) converts run results into sanitized Markdown tables, JSON documents, or Python dictionaries. Every output channel passes through `redact_secrets()` to ensure zero tokens or sensitive values leak into benchmark artifacts.
 
 ---
 
@@ -131,7 +131,7 @@ forge benchmark repair --mode provider --provider ollama --model qwen2.5-coder:7
 ## 6. Verification & Test Evidence
 
 ### 6.1 Test Suite Coverage
-The test suite in [`tests/unit/test_phase4_m3_repair_benchmarks.py`](file:///Users/animeshyadav/Desktop/project/forge/tests/unit/test_phase4_m3_repair_benchmarks.py) exercises 29 focused unit tests across 6 verification areas:
+The test suite in [`tests/unit/test_phase4_m3_repair_benchmarks.py`](../../tests/unit/test_phase4_m3_repair_benchmarks.py) exercises 29 focused unit tests across 6 verification areas:
 - **Corpus Loading**: Discovery of all 11 fixtures in deterministic alphabetical order, schema validation, single fixture retrieval, and path traversal security.
 - **Suite Execution**: Deterministic offline evaluation achieving 100% ground-truth outcome match.
 - **Fixture Evaluations**: Individual assertions for all 11 representative fixture categories.

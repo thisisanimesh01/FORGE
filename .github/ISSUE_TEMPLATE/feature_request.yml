@@ -1,0 +1,38 @@
+name: Feature Request
+description: Propose a new feature, improvement, or workflow enhancement for FORGE
+title: "[FEATURE]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting an idea! Please note that all proposed features must conform to FORGE's core invariants (target repository immutability, fail-closed Docker sandboxing, and mandatory human review gates).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: Is your feature request related to a specific problem or workflow friction?
+      placeholder: "I find it challenging when ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: Describe the solution you'd like to see implemented.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: A description of any alternative solutions or features you've considered.
+
+  - type: textarea
+    id: security_impact
+    attributes:
+      label: Security & Boundary Considerations
+      description: How does this proposal interact with Docker container isolation, target immutability, or model execution limits?

@@ -4,7 +4,7 @@
 **Status**: APPROVED & IMPLEMENTED  
 **Date**: 2026-10-27  
 **Author**: FORGE Engineering Team  
-**Preceding Milestone**: [Phase 5, Milestone 4: Multi-Check Regression & Safety Verification](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m4-multi-check-verification.md)  
+**Preceding Milestone**: [Phase 5, Milestone 4: Multi-Check Regression & Safety Verification](phase-5-m4-multi-check-verification.md)
 **Succeeding Milestone**: Phase 5, Milestone 6: End-to-End Workflow Acceptance, Reliability & Release  
 
 ---

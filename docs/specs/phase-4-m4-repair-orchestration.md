@@ -24,7 +24,7 @@ Phase 4 Milestone 4 delivers the end-to-end orchestration subsystem connecting F
 
 ## 2. Typed State Machine Architecture
 
-The lifecycle of an orchestration workflow is governed by `RepairWorkflowState` in [`app/forge/repair/orchestrator_models.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/repair/orchestrator_models.py).
+The lifecycle of an orchestration workflow is governed by `RepairWorkflowState` in [`app/forge/repair/orchestrator_models.py`](../../app/forge/repair/orchestrator_models.py).
 
 ### 2.1 State Graph & Allowed Transitions
 
@@ -78,7 +78,7 @@ flowchart TD
 
 ## 3. Component Integration & Data Flow
 
-Orchestration is managed by `RepairOrchestrator` in [`app/forge/repair/orchestrator.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/repair/orchestrator.py), integrating with:
+Orchestration is managed by `RepairOrchestrator` in [`app/forge/repair/orchestrator.py`](../../app/forge/repair/orchestrator.py), integrating with:
 
 1. **ForgeStore (`app/forge/storage/store.py`)**:
    - `repair_workflows` table maintains persistent workflow records with monotonic version numbers and outcome details.
@@ -114,7 +114,7 @@ Orchestration is managed by `RepairOrchestrator` in [`app/forge/repair/orchestra
 
 ## 5. CLI Reference & Verification
 
-The CLI interface is exposed under `forge repair workflow` in [`app/forge/cli.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/cli.py).
+The CLI interface is exposed under `forge repair workflow` in [`app/forge/cli.py`](../../app/forge/cli.py).
 
 ### 5.1 Commands
 
@@ -150,7 +150,7 @@ forge repair workflow review rwf_find_001_a1b2c3d4_abc123 --decision approve --n
 ## 6. Verification & Quality Gates
 
 Milestone 4 verification was confirmed via the automated regression test suite:
-1. **Unit Test Suite**: [`tests/unit/test_phase4_m4_repair_orchestration.py`](file:///Users/animeshyadav/Desktop/project/forge/tests/unit/test_phase4_m4_repair_orchestration.py) containing 22 focused test cases verifying:
+1. **Unit Test Suite**: [`tests/unit/test_phase4_m4_repair_orchestration.py`](../../tests/unit/test_phase4_m4_repair_orchestration.py) containing 22 focused test cases verifying:
    - State machine transition graph and rejection of illegal transitions.
    - Terminal state immutability.
    - End-to-end orchestration happy path to `AWAITING_HUMAN_REVIEW`.

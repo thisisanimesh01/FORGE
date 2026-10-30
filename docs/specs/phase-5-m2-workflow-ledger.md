@@ -4,7 +4,7 @@
 **Status**: APPROVED & IMPLEMENTED  
 **Date**: 2026-10-27  
 **Author**: FORGE Engineering Team  
-**Preceding Milestone**: [Phase 5, Milestone 1: Unified Task Intake & Repository Context Pipeline](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m1-task-intake-context.md)  
+**Preceding Milestone**: [Phase 5, Milestone 1: Unified Task Intake & Repository Context Pipeline](phase-5-m1-task-intake-context.md)
 **Succeeding Milestone**: Phase 5, Milestone 3: Automated Reproduction-to-Repair Chaining  
 
 ---

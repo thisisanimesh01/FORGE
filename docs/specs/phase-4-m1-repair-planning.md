@@ -25,7 +25,7 @@ Phase 4 Milestone 1 establishes the initial planning layer for targeted defect r
 ## 2. Architecture & Data Model
 
 ### 2.1 Repair Plan (`RepairPlan`)
-Defined in [`app/forge/repair/models.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/repair/models.py):
+Defined in [`app/forge/repair/models.py`](../../app/forge/repair/models.py):
 
 | Field | Type | Description |
 |---|---|---|

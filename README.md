@@ -46,31 +46,31 @@ Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (M
   - *Clean Standalone Distribution Acceptance*: Built fresh wheel (`dist/forge_core-0.1.0b1-py3-none-any.whl`, 371 KB) and source distribution (`dist/forge_core-0.1.0b1.tar.gz`, 530 KB) and successfully installed and verified execution in clean external virtual environments outside the repository with zero `PYTHONPATH` bleed, verifying entrypoints, `forge version`, `forge doctor`, and isolated database initialization.
   - *Cryptographic Manifests & Forensic Cleanliness*: Generated canonical `dist/release_manifest.json` and standard `dist/SHA256SUMS.txt`, verified 100% checksum match, and confirmed zero forbidden files (`.env`, `*.db`, `tests/fixtures/`, `forge_pilot_*`) via `forge release verify` and standalone `scripts/verify_release_artifacts.py`.
   - *Empirical Attestation Verification & Platform Boundary Disclosure*: Executed manual release build workflow on GitHub Actions (`.github/workflows/release-build.yml` Run 41124601553). Disclosed and documented GitHub platform restriction on user-owned private repositories regarding Sigstore provenance persistence (`actions/attest-build-provenance`), providing an honest assessment without fabricating verification evidence.
-  - *Dedicated Milestone 6 Specification ([`docs/specs/phase-6-m6-final-verification-release-gate.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-6-m6-final-verification-release-gate.md))*: Formal acceptance matrix, threat-model reassessment, and release readiness audit.
+  - *Dedicated Milestone 6 Specification ([`docs/specs/phase-6-m6-final-verification-release-gate.md`](docs/specs/phase-6-m6-final-verification-release-gate.md))*: Formal acceptance matrix, threat-model reassessment, and release readiness audit.
   - *Absolute Release Authorization Invariant*: Zero Git tags created; zero public releases published. Awaiting explicit human authorization.
   - *Release Decision*: **CONDITIONAL GO** (Approved for supervised internal developer beta; public release gated on repository visibility transition to enable public Sigstore OIDC attestations).
 
 ### Phase 6, Milestone 5: Security Hardening, Attestation & Release Gate (Completed)
 - **Objective & Scope**: Harden the FORGE software supply chain, dependency security posture, distribution artifact integrity, build provenance, and release verification gates for the supervised beta release (`0.1.0b1`).
 - **Architectural Deliverables**:
-  - *Comprehensive Threat Model & Security Audit ([`docs/SECURITY_THREAT_MODEL.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/SECURITY_THREAT_MODEL.md))*: Formalized threat model covering untrusted target repositories, malicious diffs, malicious LLM completions, Docker escapes, supply chain / dependency tampering, and unauthorized release distribution. Detailed concrete mitigations, fail-closed boundaries, and residual risks.
-  - *Dependency & Supply Chain Hardening*: Audited runtime dependencies using `pip-audit`, resolving all vulnerabilities (0 known CVEs across all installed runtime packages). Pinned dependencies in [`requirements/constraints.txt`](file:///Users/animeshyadav/Desktop/project/forge/requirements/constraints.txt) for deterministic builds.
-  - *Release Manifest & Cryptographic Integrity Engine ([`app/forge/release/manifest.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/release/manifest.py))*: Engineered `ReleaseArtifact` and `ReleaseManifest` schemas, computing SHA-256 digests, file sizes, build timestamps, and generating canonical `release_manifest.json` and standard `SHA256SUMS.txt`.
-  - *Forensic Archive Inspection ([`app/forge/release/verification.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/release/verification.py))*: Enforced strict forensic cleanliness rules for wheel (`.whl`) and sdist (`.tar.gz`) archives—forbidding embedded secrets (`.env*` except `.env.example`), test fixtures, pilot runs, and local database files (`*.db`, `*.sqlite*`).
+  - *Comprehensive Threat Model & Security Audit ([`docs/SECURITY_THREAT_MODEL.md`](docs/SECURITY_THREAT_MODEL.md))*: Formalized threat model covering untrusted target repositories, malicious diffs, malicious LLM completions, Docker escapes, supply chain / dependency tampering, and unauthorized release distribution. Detailed concrete mitigations, fail-closed boundaries, and residual risks.
+  - *Dependency & Supply Chain Hardening*: Audited runtime dependencies using `pip-audit`, resolving all vulnerabilities (0 known CVEs across all installed runtime packages). Pinned dependencies in [`requirements/constraints.txt`](requirements/constraints.txt) for deterministic builds.
+  - *Release Manifest & Cryptographic Integrity Engine ([`app/forge/release/manifest.py`](app/forge/release/manifest.py))*: Engineered `ReleaseArtifact` and `ReleaseManifest` schemas, computing SHA-256 digests, file sizes, build timestamps, and generating canonical `release_manifest.json` and standard `SHA256SUMS.txt`.
+  - *Forensic Archive Inspection ([`app/forge/release/verification.py`](app/forge/release/verification.py))*: Enforced strict forensic cleanliness rules for wheel (`.whl`) and sdist (`.tar.gz`) archives—forbidding embedded secrets (`.env*` except `.env.example`), test fixtures, pilot runs, and local database files (`*.db`, `*.sqlite*`).
   - *Release Verification CLI & Tooling*:
     - `forge release verify`: CLI command validating archive checksums against manifests, matching PEP 440 versions, and running forensic archive scans.
     - `forge release manifest`: CLI command to generate canonical manifests for built distribution artifacts.
-    - Standalone verification script ([`scripts/verify_release_artifacts.py`](file:///Users/animeshyadav/Desktop/project/forge/scripts/verify_release_artifacts.py)) requiring zero third-party dependencies.
+    - Standalone verification script ([`scripts/verify_release_artifacts.py`](scripts/verify_release_artifacts.py)) requiring zero third-party dependencies.
   - *Hardened GitHub Actions CI/CD Workflows*:
-    - [`.github/workflows/ci.yml`](file:///Users/animeshyadav/Desktop/project/forge/.github/workflows/ci.yml): Least-privilege `contents: read` permissions, StepSecurity harden-runner, commit-pinned action SHAs, bytecode compilation, dependency auditing via `pip-audit`, offline pytest execution, artifact packaging, and verification.
-    - [`.github/workflows/release-build.yml`](file:///Users/animeshyadav/Desktop/project/forge/.github/workflows/release-build.yml): Minimal permissions (`contents: read`, `id-token: write`, `attestations: write`), building wheel/sdist, generating SHA-256 manifests, and establishing SLSA build provenance attestations via `actions/attest-build-provenance@v2`.
-  - *Security & Provenance Documentation*: Updated [`docs/OPERATOR_GUIDE.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/OPERATOR_GUIDE.md) (release integrity & checksums), [`docs/BETA_CONTRACT.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/BETA_CONTRACT.md) (supply chain guarantees), [`docs/BETA_KNOWN_ISSUES.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/BETA_KNOWN_ISSUES.md) (reproducible build constraints), [`docs/specs/phase-6-roadmap.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-6-roadmap.md), and created dedicated milestone spec [`docs/specs/phase-6-m5-security-attestation-release-gate.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-6-m5-security-attestation-release-gate.md).
+    - [`.github/workflows/ci.yml`](.github/workflows/ci.yml): Least-privilege `contents: read` permissions, StepSecurity harden-runner, commit-pinned action SHAs, bytecode compilation, dependency auditing via `pip-audit`, offline pytest execution, artifact packaging, and verification.
+    - [`.github/workflows/release-build.yml`](.github/workflows/release-build.yml): Minimal permissions (`contents: read`, `id-token: write`, `attestations: write`), building wheel/sdist, generating SHA-256 manifests, and establishing SLSA build provenance attestations via `actions/attest-build-provenance@v2`.
+  - *Security & Provenance Documentation*: Updated [`docs/OPERATOR_GUIDE.md`](docs/OPERATOR_GUIDE.md) (release integrity & checksums), [`docs/BETA_CONTRACT.md`](docs/BETA_CONTRACT.md) (supply chain guarantees), [`docs/BETA_KNOWN_ISSUES.md`](docs/BETA_KNOWN_ISSUES.md) (reproducible build constraints), [`docs/specs/phase-6-roadmap.md`](docs/specs/phase-6-roadmap.md), and created dedicated milestone spec [`docs/specs/phase-6-m5-security-attestation-release-gate.md`](docs/specs/phase-6-m5-security-attestation-release-gate.md).
   - *Verification Suite*: 19 unit tests in `tests/unit/test_phase6_milestone5.py` and 1,017 tests across full test suite passing with zero regressions.
 
 ### Phase 6, Milestone 4: Operational Diagnostics & Live Environment Validation (Completed)
 - **Objective & Scope**: Validate FORGE as an installed application, hardening diagnostics, verifying live dependencies and execution boundaries, and demonstrating that an operator can identify and resolve environment problems safely without false readiness claims or security regressions.
 - **Architectural Deliverables**:
-  - *Comprehensive Operational Diagnostics Engine ([`app/forge/diagnostics.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/diagnostics.py))*: Engineered structured audit probes for Python runtime version (>=3.11), Git executable availability, SQLite schema and file lock status, Docker daemon connectivity and container image caching, and LLM provider endpoint/credential configuration.
+  - *Comprehensive Operational Diagnostics Engine ([`app/forge/diagnostics.py`](app/forge/diagnostics.py))*: Engineered structured audit probes for Python runtime version (>=3.11), Git executable availability, SQLite schema and file lock status, Docker daemon connectivity and container image caching, and LLM provider endpoint/credential configuration.
   - *Standardized Failure Classification & Badges*: Implemented deterministic `DiagnosticCategory` badges: `[OK]`, `[OPTIONAL]`, `[MISCONFIGURED]`, `[UNAVAILABLE]`, `[PERMISSION DENIED]`, `[CONNECTION FAILED]`, `[UNSUPPORTED]`, and `[UNSAFE]`, accompanied by copy-pasteable remediation guidance.
   - *Honest Tiered Readiness Evaluation*: Implemented `evaluate_system_readiness()`, categorizing operational capacity across Static Inspection, Docker Sandboxing, and Local Inference. When Docker is unavailable or permission-denied, system strictly downgrades to `[READY_FOR_STATIC_INSPECTION_ONLY]` rather than claiming full operational readiness.
   - *Dedicated CLI Diagnostic Subcommands*:
@@ -79,7 +79,7 @@ Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (M
     - `forge provider doctor`: LLM provider diagnostic querying local Ollama `/api/tags`, verifying local model weights (`qwen2.5-coder:1.5b`), and enforcing forbidden cloud fallback.
   - *Live Docker Daemon & Local Ollama Validation*: Verified live Docker Desktop (29.9.2) container isolation properties (`tests/integration/test_docker_sandbox_integration.py`) and live local Ollama model completion (`tests/integration/test_ollama_live_validation.py`).
   - *Clean Installed-Beta Distribution Verification*: Rebuilt wheel distribution (`dist/forge_core-0.1.0b1-py3-none-any.whl`) and verified execution in clean external virtual environment (`/tmp/forge_m4_installed_test`).
-  - *Milestone Specification ([`docs/specs/phase-6-m4-operational-diagnostics-validation.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-6-m4-operational-diagnostics-validation.md))*: Dedicated architecture specification, diagnostic taxonomy, and verification records.
+  - *Milestone Specification ([`docs/specs/phase-6-m4-operational-diagnostics-validation.md`](docs/specs/phase-6-m4-operational-diagnostics-validation.md))*: Dedicated architecture specification, diagnostic taxonomy, and verification records.
   - *Full Regression Verification*: 28 unit tests in `tests/unit/test_phase6_milestone4.py` and 998 tests across full pytest suite passing with zero regressions.
 
 ### Phase 6, Milestone 3: Operator Workflow Reliability & Recovery (Completed)
@@ -90,24 +90,24 @@ Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (M
   - *Candidate Immutability in Terminal States*: Workflows in `APPROVED` or `REJECTED` strictly reject candidate patch replacement or modification in `attach_repair_plan_to_workflow`.
   - *Enhanced Workflow Inspection Dashboard*: Upgraded `_render_eng_workflow_markdown` to display status categories (`[AWAITING OPERATOR REVIEW]`, `[PENDING]`, `[BLOCKED]`, `[APPROVED]`, `[REJECTED]`, `[FAILED]`), actionable next commands, candidate repair patch details (target file, lines changed, SHA-256 digest, syntax-highlighted unified diff), multi-check verification table, and monotonic event ledger timeline.
   - *CLI Usability Aliases*: Added `forge workflow show <WF_ID>` (aliasing `status`) and `forge workflow reproduce <WF_ID>` (aliasing `repro`). Added `--repo` flag to `forge workflow review` for explicit drift verification.
-  - *Milestone Specification ([`docs/specs/phase-6-m3-workflow-reliability-recovery.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-6-m3-workflow-reliability-recovery.md))*: Comprehensive documentation of interruption recovery matrices, decision verification rules, and test verification records.
+  - *Milestone Specification ([`docs/specs/phase-6-m3-workflow-reliability-recovery.md`](docs/specs/phase-6-m3-workflow-reliability-recovery.md))*: Comprehensive documentation of interruption recovery matrices, decision verification rules, and test verification records.
   - *Full Regression Verification*: 12 targeted unit/CLI tests in `tests/unit/test_phase6_milestone3.py` and full 970-test test suite passing with zero regressions.
 
 ### Phase 6, Milestone 2: Packaging, CLI Usability & Distribution (Completed)
 - **Objective & Scope**: Package FORGE into standard Python distribution artifacts (wheel `.whl` and source distribution `.tar.gz`) enabling clean standalone installation and CLI execution outside the source repository without dependency bloat or security regressions.
 - **Architectural Deliverables**:
   - *Distribution Artifact Generation & Verification*: Built pure-Python wheel (`dist/forge_core-0.1.0b1-py3-none-any.whl`, 351 KB) and source distribution (`dist/forge_core-0.1.0b1.tar.gz`, 488 KB).
-  - *Strict Distribution Exclusion Policy ([`MANIFEST.in`](file:///Users/animeshyadav/Desktop/project/forge/MANIFEST.in))*: Explicitly includes core code and documentation while barring local `.env` files, SQLite databases (`*.sqlite`, `*.db`), test fixtures, pilot directories, caches, and bytecode from distribution archives.
+  - *Strict Distribution Exclusion Policy ([`MANIFEST.in`](MANIFEST.in))*: Explicitly includes core code and documentation while barring local `.env` files, SQLite databases (`*.sqlite`, `*.db`), test fixtures, pilot directories, caches, and bytecode from distribution archives.
   - *Clean-Install Verification in Isolated Environments*: Verified installation of both wheel and sdist in temporary virtual environments (`/tmp/forge_clean_*`) outside the repository with zero `PYTHONPATH` bleed. Confirmed `forge version`, `forge doctor`, `forge db init`, and Python module imports execute cleanly without source checkout dependencies.
   - *CLI Usability & Shell Auto-Completion*: Integrated and verified Typer native shell completion for `bash`, `zsh`, `fish`, and `powershell` via `forge --install-completion` and `forge --show-completion`.
-  - *Milestone Specification ([`docs/specs/phase-6-m2-packaging-distribution.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-6-m2-packaging-distribution.md))*: Codified distribution architecture, artifact forensics, clean-install verification records, and security invariants.
+  - *Milestone Specification ([`docs/specs/phase-6-m2-packaging-distribution.md`](docs/specs/phase-6-m2-packaging-distribution.md))*: Codified distribution architecture, artifact forensics, clean-install verification records, and security invariants.
 
 ### Phase 6, Milestone 1: Beta Readiness Audit & Release Foundation (Completed)
 - **Objective & Scope**: Establish the operational foundation for the limited, human-supervised developer beta of FORGE following the conclusion of Supervised Pilots 01–08.
 - **Architectural Deliverables**:
-  - *Supervised Beta Contract ([`docs/BETA_CONTRACT.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/BETA_CONTRACT.md))*: Codifies non-negotiable invariants: strict target repository immutability, mandatory human review gate (`awaiting_human_review`), fail-closed container sandboxing (`--network none`, read-only, non-root user), local-only model inference by default (`FORGE_ALLOW_CLOUD_FALLBACK=false`), and zero automated target code mutations, commits, PRs, merges, or deployments.
-  - *Empirical Known Issues & Model Limitations ([`docs/BETA_KNOWN_ISSUES.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/BETA_KNOWN_ISSUES.md))*: Discloses observed model capabilities from Pilots 01–08. Single-statement arithmetic and logic replacements operate with high fidelity; multi-statement control-flow synthesis and cross-type statement replacements on compact local models (1.5B) require close operator oversight. Details how FORGE traps these failure modes before disk mutation.
-  - *Operator Quickstart & Administration Guide ([`docs/OPERATOR_GUIDE.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/OPERATOR_GUIDE.md))*: Step-by-step instructions for installation, configuration, system diagnostics (`forge doctor`), task intake, Docker reproduction, local model repair planning, multi-check verification, human approval, and dossier export.
+  - *Supervised Beta Contract ([`docs/BETA_CONTRACT.md`](docs/BETA_CONTRACT.md))*: Codifies non-negotiable invariants: strict target repository immutability, mandatory human review gate (`awaiting_human_review`), fail-closed container sandboxing (`--network none`, read-only, non-root user), local-only model inference by default (`FORGE_ALLOW_CLOUD_FALLBACK=false`), and zero automated target code mutations, commits, PRs, merges, or deployments.
+  - *Empirical Known Issues & Model Limitations ([`docs/BETA_KNOWN_ISSUES.md`](docs/BETA_KNOWN_ISSUES.md))*: Discloses observed model capabilities from Pilots 01–08. Single-statement arithmetic and logic replacements operate with high fidelity; multi-statement control-flow synthesis and cross-type statement replacements on compact local models (1.5B) require close operator oversight. Details how FORGE traps these failure modes before disk mutation.
+  - *Operator Quickstart & Administration Guide ([`docs/OPERATOR_GUIDE.md`](docs/OPERATOR_GUIDE.md))*: Step-by-step instructions for installation, configuration, system diagnostics (`forge doctor`), task intake, Docker reproduction, local model repair planning, multi-check verification, human approval, and dossier export.
   - *Package Metadata & Version Alignment*: Aligned package version to PEP 440 beta version `0.1.0b1` across `pyproject.toml` and `app/forge/__init__.py`. Aligned CLI root help and `forge doctor` ready messages.
   - *Offline Test Baseline & Live Docker Validation*: Full test suite of 958 tests executes completely offline without external network or API keys. Opt-in Docker integration tests verified live container isolation properties.
 
@@ -769,51 +769,51 @@ FORGE standardizes on local Ollama execution (`http://localhost:11434/v1`). Host
 
 ## Documentation & Architecture References
 
-- Engineering Rules & Mandatory Release Gates: [`AGENTS.md`](file:///Users/animeshyadav/Desktop/project/forge/AGENTS.md)
-- Phase 1 Specification: [`docs/specs/phase-1.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-1.md)
+- Engineering Rules & Mandatory Release Gates: [`AGENTS.md`](AGENTS.md)
+- Phase 1 Specification: [`docs/specs/phase-1.md`](docs/specs/phase-1.md)
 - Phase 2 Specifications:
-  - Diff Review: [`docs/specs/phase-2-milestone-1.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-2-milestone-1.md)
-  - Evidence Calibration: [`docs/specs/phase-2-milestone-2.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-2-milestone-2.md)
-  - Review Benchmarks: [`docs/specs/phase-2-milestone-3.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-2-milestone-3.md)
-  - Adversarial Generalization: [`docs/specs/phase-2-milestone-4.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-2-milestone-4.md)
-  - Security Dataflow Analysis: [`docs/specs/phase-2-milestone-5.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-2-milestone-5.md)
-  - CI Review Policy & SARIF: [`docs/specs/phase-2-milestone-6.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-2-milestone-6.md)
+  - Diff Review: [`docs/specs/phase-2-milestone-1.md`](docs/specs/phase-2-milestone-1.md)
+  - Evidence Calibration: [`docs/specs/phase-2-milestone-2.md`](docs/specs/phase-2-milestone-2.md)
+  - Review Benchmarks: [`docs/specs/phase-2-milestone-3.md`](docs/specs/phase-2-milestone-3.md)
+  - Adversarial Generalization: [`docs/specs/phase-2-milestone-4.md`](docs/specs/phase-2-milestone-4.md)
+  - Security Dataflow Analysis: [`docs/specs/phase-2-milestone-5.md`](docs/specs/phase-2-milestone-5.md)
+  - CI Review Policy & SARIF: [`docs/specs/phase-2-milestone-6.md`](docs/specs/phase-2-milestone-6.md)
 - Phase 3 Specifications:
-  - Sandbox Execution Contracts: [`docs/specs/phase-3-milestone-1.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-1.md)
-  - Case Management & Evidence Capture: [`docs/specs/phase-3-milestone-2.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-2.md)
-  - Deterministic Reproduction Planning: [`docs/specs/phase-3-milestone-3.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-3.md)
-  - Outcome Classification & Evidence Validation: [`docs/specs/phase-3-milestone-4.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-4.md)
-  - Reproduction Reliability & Regression Hardening: [`docs/specs/phase-3-milestone-5.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-5.md)
-  - End-to-End Reproduction Acceptance: [`docs/specs/phase-3-milestone-6.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-milestone-6.md)
+  - Sandbox Execution Contracts: [`docs/specs/phase-3-milestone-1.md`](docs/specs/phase-3-milestone-1.md)
+  - Case Management & Evidence Capture: [`docs/specs/phase-3-milestone-2.md`](docs/specs/phase-3-milestone-2.md)
+  - Deterministic Reproduction Planning: [`docs/specs/phase-3-milestone-3.md`](docs/specs/phase-3-milestone-3.md)
+  - Outcome Classification & Evidence Validation: [`docs/specs/phase-3-milestone-4.md`](docs/specs/phase-3-milestone-4.md)
+  - Reproduction Reliability & Regression Hardening: [`docs/specs/phase-3-milestone-5.md`](docs/specs/phase-3-milestone-5.md)
+  - End-to-End Reproduction Acceptance: [`docs/specs/phase-3-milestone-6.md`](docs/specs/phase-3-milestone-6.md)
 - Phase 3→4 Transition & Pre-Phase 4:
-  - Multi-Provider Configuration & Credential Reuse: [`docs/specs/phase-3-provider-transition.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-3-provider-transition.md)
-  - Local Ollama & Multi-Provider LLM Integration: [`docs/specs/pre-phase-4-llm-providers.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/pre-phase-4-llm-providers.md)
-  - Local Ollama Standardization & Cloud Removal: [`docs/specs/local-ollama-standardization.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/local-ollama-standardization.md)
-  - Ollama Cloud Provider Integration (Superseded): [`docs/specs/ollama-cloud-provider.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/ollama-cloud-provider.md)
-  - Removal of OpenAI API Provider: [`docs/specs/remove-openai-provider.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/remove-openai-provider.md)
-  - Phase 4 Readiness & Sandbox Gate: [`docs/specs/phase-4-readiness.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-readiness.md)
+  - Multi-Provider Configuration & Credential Reuse: [`docs/specs/phase-3-provider-transition.md`](docs/specs/phase-3-provider-transition.md)
+  - Local Ollama & Multi-Provider LLM Integration: [`docs/specs/pre-phase-4-llm-providers.md`](docs/specs/pre-phase-4-llm-providers.md)
+  - Local Ollama Standardization & Cloud Removal: [`docs/specs/local-ollama-standardization.md`](docs/specs/local-ollama-standardization.md)
+  - Ollama Cloud Provider Integration (Superseded): [`docs/specs/ollama-cloud-provider.md`](docs/specs/ollama-cloud-provider.md)
+  - Removal of OpenAI API Provider: [`docs/specs/remove-openai-provider.md`](docs/specs/remove-openai-provider.md)
+  - Phase 4 Readiness & Sandbox Gate: [`docs/specs/phase-4-readiness.md`](docs/specs/phase-4-readiness.md)
 - Phase 4 Specifications:
-  - Evidence-Grounded Repair Planning & Patch Generation: [`docs/specs/phase-4-m1-repair-planning.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m1-repair-planning.md)
-  - Isolated Patch Application & Verification: [`docs/specs/phase-4-m2-patch-verification.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m2-patch-verification.md)
-  - Repair Quality & Regression Benchmarking: [`docs/specs/phase-4-m3-repair-benchmarks.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m3-repair-benchmarks.md)
-  - Controlled Repair Orchestration & Lifecycle: [`docs/specs/phase-4-m4-repair-orchestration.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m4-repair-orchestration.md)
-  - End-to-End Repair Reliability & Adversarial Testing: [`docs/specs/phase-4-m5-reliability.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m5-reliability.md)
-  - Final Acceptance & Release Readiness: [`docs/specs/phase-4-m6-acceptance.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-4-m6-acceptance.md)
-  - Docker Integration Validation & Deterministic Test Repair: [`docs/specs/docker-integration-validation.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/docker-integration-validation.md)
+  - Evidence-Grounded Repair Planning & Patch Generation: [`docs/specs/phase-4-m1-repair-planning.md`](docs/specs/phase-4-m1-repair-planning.md)
+  - Isolated Patch Application & Verification: [`docs/specs/phase-4-m2-patch-verification.md`](docs/specs/phase-4-m2-patch-verification.md)
+  - Repair Quality & Regression Benchmarking: [`docs/specs/phase-4-m3-repair-benchmarks.md`](docs/specs/phase-4-m3-repair-benchmarks.md)
+  - Controlled Repair Orchestration & Lifecycle: [`docs/specs/phase-4-m4-repair-orchestration.md`](docs/specs/phase-4-m4-repair-orchestration.md)
+  - End-to-End Repair Reliability & Adversarial Testing: [`docs/specs/phase-4-m5-reliability.md`](docs/specs/phase-4-m5-reliability.md)
+  - Final Acceptance & Release Readiness: [`docs/specs/phase-4-m6-acceptance.md`](docs/specs/phase-4-m6-acceptance.md)
+  - Docker Integration Validation & Deterministic Test Repair: [`docs/specs/docker-integration-validation.md`](docs/specs/docker-integration-validation.md)
 - Phase 5 Specifications:
-  - Supervised End-to-End Engineering Workflow Architecture & Roadmap: [`docs/specs/phase-5-roadmap.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-roadmap.md)
-  - Unified Task Intake & Repository Context Pipeline: [`docs/specs/phase-5-m1-intake-context.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m1-intake-context.md)
-  - Supervised Workflow State Machine & Transactional Ledger: [`docs/specs/phase-5-m2-workflow-ledger.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m2-workflow-ledger.md)
-  - Automated Evidence Chaining from Reproduction to Repair: [`docs/specs/phase-5-m3-evidence-chaining.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m3-evidence-chaining.md)
-  - Multi-Check Regression & Safety Verification: [`docs/specs/phase-5-m4-multi-check-verification.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m4-multi-check-verification.md)
-  - Certified Engineering Dossier & Operator Export: [`docs/specs/phase-5-m5-dossier-export.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m5-dossier-export.md)
-  - End-to-End Workflow Acceptance, Reliability & Release: [`docs/specs/phase-5-m6-acceptance.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m6-acceptance.md)
-  - Repair Planner Grounding, Applicability & Scope Safety: [`docs/specs/repair-planner-reliability.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/repair-planner-reliability.md)
-  - Local Ollama Structured Output & Syntax Error Recovery: [`docs/specs/local-ollama-structured-output.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/local-ollama-structured-output.md)
-  - Patch Generation Reliability & Diff Syntax Enforcement: [`docs/specs/patch-generation-reliability.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/patch-generation-reliability.md)
-  - Structured Patch Construction: [`docs/specs/structured-patch-construction.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/structured-patch-construction.md)
-  - Structured Proposal Wire-Schema Reliability: [`docs/specs/structured-proposal-wire-schema.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/structured-proposal-wire-schema.md)
-  - Deterministic Patch Anchoring & Minimal Replacements: [`docs/specs/patch-anchoring-minimal-replacements.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/patch-anchoring-minimal-replacements.md)
-  - Deterministic Edit Anchoring & Source-Grounded Repair: [`docs/specs/deterministic-edit-anchoring.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/deterministic-edit-anchoring.md)
-  - Repair Reliability & Generalization: [`docs/specs/repair-reliability-generalization.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/repair-reliability-generalization.md)
-- Example CI Policy: [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json)
+  - Supervised End-to-End Engineering Workflow Architecture & Roadmap: [`docs/specs/phase-5-roadmap.md`](docs/specs/phase-5-roadmap.md)
+  - Unified Task Intake & Repository Context Pipeline: [`docs/specs/phase-5-m1-intake-context.md`](docs/specs/phase-5-m1-intake-context.md)
+  - Supervised Workflow State Machine & Transactional Ledger: [`docs/specs/phase-5-m2-workflow-ledger.md`](docs/specs/phase-5-m2-workflow-ledger.md)
+  - Automated Evidence Chaining from Reproduction to Repair: [`docs/specs/phase-5-m3-evidence-chaining.md`](docs/specs/phase-5-m3-evidence-chaining.md)
+  - Multi-Check Regression & Safety Verification: [`docs/specs/phase-5-m4-multi-check-verification.md`](docs/specs/phase-5-m4-multi-check-verification.md)
+  - Certified Engineering Dossier & Operator Export: [`docs/specs/phase-5-m5-dossier-export.md`](docs/specs/phase-5-m5-dossier-export.md)
+  - End-to-End Workflow Acceptance, Reliability & Release: [`docs/specs/phase-5-m6-acceptance.md`](docs/specs/phase-5-m6-acceptance.md)
+  - Repair Planner Grounding, Applicability & Scope Safety: [`docs/specs/repair-planner-reliability.md`](docs/specs/repair-planner-reliability.md)
+  - Local Ollama Structured Output & Syntax Error Recovery: [`docs/specs/local-ollama-structured-output.md`](docs/specs/local-ollama-structured-output.md)
+  - Patch Generation Reliability & Diff Syntax Enforcement: [`docs/specs/patch-generation-reliability.md`](docs/specs/patch-generation-reliability.md)
+  - Structured Patch Construction: [`docs/specs/structured-patch-construction.md`](docs/specs/structured-patch-construction.md)
+  - Structured Proposal Wire-Schema Reliability: [`docs/specs/structured-proposal-wire-schema.md`](docs/specs/structured-proposal-wire-schema.md)
+  - Deterministic Patch Anchoring & Minimal Replacements: [`docs/specs/patch-anchoring-minimal-replacements.md`](docs/specs/patch-anchoring-minimal-replacements.md)
+  - Deterministic Edit Anchoring & Source-Grounded Repair: [`docs/specs/deterministic-edit-anchoring.md`](docs/specs/deterministic-edit-anchoring.md)
+  - Repair Reliability & Generalization: [`docs/specs/repair-reliability-generalization.md`](docs/specs/repair-reliability-generalization.md)
+- Example CI Policy: [`docs/examples/ci_review_policy.json`](docs/examples/ci_review_policy.json)

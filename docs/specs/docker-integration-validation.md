@@ -36,28 +36,28 @@ When Docker was installed and started on the host environment (`Docker version 2
 ## 2. Hardening & Deterministic Test Repair
 
 1. **Sentinel Default for `docker_binary`**:
-   Introduced `_DEFAULT_BINARY = object()` in [`app/forge/sandbox/docker.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/sandbox/docker.py).
+   Introduced `_DEFAULT_BINARY = object()` in [`app/forge/sandbox/docker.py`](../../app/forge/sandbox/docker.py).
    - If `docker_binary is _DEFAULT_BINARY`: resolves `shutil.which("docker")`.
    - If `docker_binary` is explicitly passed as `None`: sets `self.docker_binary = None`.
    - If a path is provided: uses that exact path.
    This guarantees that callers explicitly passing `docker_binary=None` reliably simulate an unavailable Docker binary regardless of host environment state.
 
 2. **Unconditional Security Notice**:
-   Updated `sandbox_doctor()` in [`app/forge/cli.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/cli.py) so that:
+   Updated `sandbox_doctor()` in [`app/forge/cli.py`](../../app/forge/cli.py) so that:
    `Security notice: FORGE strictly refuses to run repository code directly on host.`
    is always printed, whether Docker daemon is active or inactive.
 
 3. **Deterministic Unit Test Boundaries**:
-   - Updated `test_sandbox_check_docker_unavailable_is_not_exception` in [`tests/unit/test_milestone5.py`](file:///Users/animeshyadav/Desktop/project/forge/tests/unit/test_milestone5.py) to inject `sandbox=DockerSandbox(docker_binary=None)`.
-   - Updated `test_cli_sandbox_reproduce_fails_closed_when_docker_unavailable` in [`tests/unit/test_phase3_milestone1.py`](file:///Users/animeshyadav/Desktop/project/forge/tests/unit/test_phase3_milestone1.py) to monkeypatch `shutil.which` to `None`.
-   - Added `test_cli_sandbox_doctor_unavailable` in [`tests/unit/test_milestone4.py`](file:///Users/animeshyadav/Desktop/project/forge/tests/unit/test_milestone4.py) to verify the unavailable branch explicitly.
+   - Updated `test_sandbox_check_docker_unavailable_is_not_exception` in [`tests/unit/test_milestone5.py`](../../tests/unit/test_milestone5.py) to inject `sandbox=DockerSandbox(docker_binary=None)`.
+   - Updated `test_cli_sandbox_reproduce_fails_closed_when_docker_unavailable` in [`tests/unit/test_phase3_milestone1.py`](../../tests/unit/test_phase3_milestone1.py) to monkeypatch `shutil.which` to `None`.
+   - Added `test_cli_sandbox_doctor_unavailable` in [`tests/unit/test_milestone4.py`](../../tests/unit/test_milestone4.py) to verify the unavailable branch explicitly.
    - All standard unit tests run completely offline without Docker, cloud credentials, or network access.
 
 ---
 
 ## 3. Opt-in Real Docker Integration Test Suite
 
-A dedicated integration test suite was created in [`tests/integration/test_docker_sandbox_integration.py`](file:///Users/animeshyadav/Desktop/project/forge/tests/integration/test_docker_sandbox_integration.py).
+A dedicated integration test suite was created in [`tests/integration/test_docker_sandbox_integration.py`](../../tests/integration/test_docker_sandbox_integration.py).
 
 ### Opt-in Configuration
 The suite is marked with `@pytest.mark.docker` and is skipped by default during normal offline `pytest` runs:

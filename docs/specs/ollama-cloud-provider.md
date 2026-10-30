@@ -1,7 +1,7 @@
 # Ollama Cloud Provider Integration Specification
 
 > [!WARNING]
-> **SUPERSEDED / REMOVED**: Ollama Cloud has been formally removed from FORGE. Ollama inference is standardized strictly on the local Ollama runtime (`http://localhost:11434/v1`) with zero cloud credentials. See [`docs/specs/local-ollama-standardization.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/local-ollama-standardization.md).
+> **SUPERSEDED / REMOVED**: Ollama Cloud has been formally removed from FORGE. Ollama inference is standardized strictly on the local Ollama runtime (`http://localhost:11434/v1`) with zero cloud credentials. See [`docs/specs/local-ollama-standardization.md`](local-ollama-standardization.md).
 
 **Status:** Superseded & Removed
 **Milestone:** Pre-Phase 4 Provider Extension (Ollama Cloud)  

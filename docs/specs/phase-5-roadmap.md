@@ -140,7 +140,7 @@ Phase 5 is partitioned into 6 small, independently verifiable milestones:
 
 ### Milestone 1: Unified Task Intake & Repository Context Pipeline (Implemented & Verified)
 - **Status**: COMPLETED & VERIFIED
-- **Specification**: [`docs/specs/phase-5-m1-intake-context.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m1-intake-context.md)
+- **Specification**: [`docs/specs/phase-5-m1-intake-context.md`](phase-5-m1-intake-context.md)
 - **Implementation**:
   - Typed intake models and contracts in `app/forge/workflow/models.py` (`WorkflowIntakeSpec`, `IntakeSourceType`, `FindingIntakePayload`, `DiffIntakePayload`, `IssueIntakePayload`, `TestSpecIntakePayload`).
   - Revision resolution and pinning in `app/forge/workflow/intake.py` (`resolve_and_pin_revision` with `DirtyRepositoryError` and `RevisionDriftError`).
@@ -150,7 +150,7 @@ Phase 5 is partitioned into 6 small, independently verifiable milestones:
 
 ### Milestone 2: Supervised Workflow State Machine & Transactional Ledger (Implemented & Verified)
 - **Status**: COMPLETED & VERIFIED
-- **Specification**: [`docs/specs/phase-5-m2-workflow-ledger.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m2-workflow-ledger.md)
+- **Specification**: [`docs/specs/phase-5-m2-workflow-ledger.md`](phase-5-m2-workflow-ledger.md)
 - **Implementation**:
   - Typed state machine with 19 states and code-level transition guards in `app/forge/workflow/models.py` and `app/forge/workflow/state.py` (`EngineeringWorkflowState`, `validate_workflow_transition`, `ALLOWED_TRANSITIONS`, `RESUMABLE_STATES`, `TERMINAL_STATES`).
   - Transactional storage schema and optimistic concurrency control in `app/forge/storage/database.py` and `app/forge/storage/store.py` (`workflow_intakes`, `engineering_workflows`, `engineering_workflow_events` with monotonic `version` checking and sequential event integrity).
@@ -160,7 +160,7 @@ Phase 5 is partitioned into 6 small, independently verifiable milestones:
 
 ### Milestone 3: Automated Evidence Chaining from Reproduction to Repair (Implemented & Verified)
 - **Status**: COMPLETED & VERIFIED
-- **Specification**: [`docs/specs/phase-5-m3-evidence-chaining.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m3-evidence-chaining.md)
+- **Specification**: [`docs/specs/phase-5-m3-evidence-chaining.md`](phase-5-m3-evidence-chaining.md)
 - **Implementation**:
   - Safe reproduction command derivation in `app/forge/workflow/evidence_chain.py` (`extract_reproduction_command_from_intake`).
   - Strict evidence verification & provenance validation in `app/forge/workflow/evidence_chain.py` (`validate_reproduction_evidence`, rejecting missing, corrupted, stale, untrusted, or exit-code-0 contradictory evidence).
@@ -171,7 +171,7 @@ Phase 5 is partitioned into 6 small, independently verifiable milestones:
 
 ### Milestone 4: Multi-Check Regression & Safety Verification (Implemented & Verified)
 - **Status**: COMPLETED & VERIFIED
-- **Specification**: [`docs/specs/phase-5-m4-multi-check-verification.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m4-multi-check-verification.md)
+- **Specification**: [`docs/specs/phase-5-m4-multi-check-verification.md`](phase-5-m4-multi-check-verification.md)
 - **Implementation**:
   - Typed multi-check models, exceptions, and contracts in `app/forge/workflow/models.py` (`MultiCheckVerificationPlan`, `MultiCheckVerificationResult`, `VerificationCheckSpec`, `VerificationCheckResult`, `VerificationCheckType`, `CheckStatus`, `VerificationAggregateOutcome`).
   - Command allowlisting and shell injection defense in `app/forge/workflow/verification.py` (`validate_verification_check_command`).
@@ -183,7 +183,7 @@ Phase 5 is partitioned into 6 small, independently verifiable milestones:
 
 ### Milestone 5: Certified Engineering Dossier & Operator Export
 - **Status**: COMPLETED & VERIFIED
-- **Specification**: [docs/specs/phase-5-m5-dossier-export.md](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m5-dossier-export.md)
+- **Specification**: [docs/specs/phase-5-m5-dossier-export.md](phase-5-m5-dossier-export.md)
 - **Objective**: Generate a certified, structured engineering package upon operator approval, containing the validated patch diff, SHA256 integrity digest, SARIF 2.1.0 review findings, verification certificate, and manual application instructions.
 - **Inputs**: Approved workflow record (`state == APPROVED`, `human_decision == "approve"`).
 - **Outputs**: Exported directory containing `patch.diff`, `verification_certificate.json`, `findings.sarif`, `audit_ledger.json`, `APPLY.md`, and `manifest.json` (with optional HMAC-SHA256 signature).

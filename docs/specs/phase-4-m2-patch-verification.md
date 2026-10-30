@@ -27,7 +27,7 @@ Phase 4 Milestone 2 establishes the isolated execution and verification layer fo
 ## 2. Architecture & Data Model
 
 ### 2.1 Repair Attempt Record (`RepairAttemptRecord`)
-Defined in [`app/forge/repair/models.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/repair/models.py) and stored in SQLite table `repair_attempts`:
+Defined in [`app/forge/repair/models.py`](../../app/forge/repair/models.py) and stored in SQLite table `repair_attempts`:
 
 | Field | Type | Description |
 |---|---|---|
@@ -51,7 +51,7 @@ Defined in [`app/forge/repair/models.py`](file:///Users/animeshyadav/Desktop/pro
 | `created_at` | `datetime` | Creation timestamp in UTC |
 
 ### 2.2 Outcome Classification Taxonomy (`RepairOutcome`)
-Defined in [`app/forge/repair/contracts.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/repair/contracts.py):
+Defined in [`app/forge/repair/contracts.py`](../../app/forge/repair/contracts.py):
 
 | Outcome | Exit Code | Description |
 |---|---|---|
@@ -107,7 +107,7 @@ forge repair attempts rpl_find_01_a1b2c3d4_7e3b9a1d --format json
 
 ## 4. Verification & Testing
 
-The Milestone 2 verification test suite ([`tests/unit/test_phase4_m2_patch_verification.py`](file:///Users/animeshyadav/Desktop/project/forge/tests/unit/test_phase4_m2_patch_verification.py)) confirms all invariants:
+The Milestone 2 verification test suite ([`tests/unit/test_phase4_m2_patch_verification.py`](../../tests/unit/test_phase4_m2_patch_verification.py)) confirms all invariants:
 - **Patch Application**: Clean diff application, Python AST syntax verification, context mismatch rejection, missing target file rejection.
 - **Workspace Isolation**: Bit-for-bit target repository immutability, safe cleanup callback, scratch directory nesting validation.
 - **Command Security**: Allowlisting approved binaries, rejecting shell metacharacters and injections.

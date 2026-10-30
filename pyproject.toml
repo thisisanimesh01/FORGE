@@ -8,8 +8,19 @@ version = "0.1.0b1"
 description = "FORGE: Autonomous Software Engineering Intelligence (Supervised Engineering Beta)"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 authors = [
     { name = "FORGE Team" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Bug Tracking",
 ]
 dependencies = [
     "pydantic>=2.7.0",

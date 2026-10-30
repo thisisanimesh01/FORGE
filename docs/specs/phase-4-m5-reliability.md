@@ -24,7 +24,7 @@ Phase 4 Milestone 5 delivers the end-to-end acceptance testing, adversarial resi
 
 ## 2. Comprehensive Acceptance Matrix (26 Scenarios)
 
-The acceptance suite in [`app/forge/repair/acceptance.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/repair/acceptance.py) executes 26 deterministic, offline acceptance scenarios categorized into 10 distinct failure domains:
+The acceptance suite in [`app/forge/repair/acceptance.py`](../../app/forge/repair/acceptance.py) executes 26 deterministic, offline acceptance scenarios categorized into 10 distinct failure domains:
 
 | ID | Scenario Name | Category | Execution Mode | Expected State | Expected Outcome | Immutability |
 |---|---|---|---|---|---|---|
@@ -63,10 +63,10 @@ During the implementation and adversarial testing audit in Milestone 5, several 
 
 1. **Planner & Verifier Crash Resilience**:
    - *Issue*: An unhandled exception or GPU OOM in `RepairPlanner.plan_repair()` or `RepairVerifier.verify_plan()` would terminate the process, leaving the workflow stuck in an indeterminate or active state without an audit event.
-   - *Fix*: Wrapped both execution points in defensive `try...except Exception as exc:` blocks in [`app/forge/repair/orchestrator.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/repair/orchestrator.py), transitioning cleanly to `FAILED` with sanitized diagnostics and emitting corresponding ledger events.
+   - *Fix*: Wrapped both execution points in defensive `try...except Exception as exc:` blocks in [`app/forge/repair/orchestrator.py`](../../app/forge/repair/orchestrator.py), transitioning cleanly to `FAILED` with sanitized diagnostics and emitting corresponding ledger events.
 2. **State Machine Transitions for Failure & Resumption**:
    - *Issue*: `ALLOWED_WORKFLOW_TRANSITIONS` lacked `EVIDENCE_VALIDATED -> FAILED` (causing transition rejections on planning failure), `FAILED -> EVIDENCE_VALIDATED` (blocking retry of failed planning), and `BLOCKED -> CREATED` (blocking retry of drifted base repos).
-   - *Fix*: Added valid recovery transitions to `ALLOWED_WORKFLOW_TRANSITIONS` in [`app/forge/repair/orchestrator_models.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/repair/orchestrator_models.py).
+   - *Fix*: Added valid recovery transitions to `ALLOWED_WORKFLOW_TRANSITIONS` in [`app/forge/repair/orchestrator_models.py`](../../app/forge/repair/orchestrator_models.py).
 3. **Defense-in-Depth Patch Revalidation**:
    - *Issue*: If a patch candidate was modified or loaded from an external record, `_step_validate_patch` only checked the cryptographic digest and line bounds.
    - *Fix*: Added revalidation for hunk counts (`max_hunks`), total patch byte size (`max_patch_bytes`), modified file counts (`max_files_modified`), and directory traversal patterns (`..`, `/`, `\`) across all candidate `target_files`.
@@ -90,7 +90,7 @@ The acceptance framework computes quantitative verification metrics via `compute
 
 ## 5. CLI Verification Commands
 
-Milestone 5 exposes the acceptance suite via standard CLI commands in [`app/forge/cli.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/cli.py):
+Milestone 5 exposes the acceptance suite via standard CLI commands in [`app/forge/cli.py`](../../app/forge/cli.py):
 
 ```bash
 # Execute the full 26-scenario end-to-end acceptance suite (Markdown report)

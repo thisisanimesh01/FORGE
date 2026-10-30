@@ -24,7 +24,7 @@ In FORGE, detection is an objective measurement of code changes against verified
 - **`suppressions`**: Narrowly scoped rule suppressions requiring an explicit auditable `reason`, optional `file_path` constraint, author metadata, and expiration date (`expires_at`). Expired suppressions automatically fail closed.
 
 ### 2.3 Checked-In Safe Example Policy
-A production-ready example policy is maintained at [`docs/examples/ci_review_policy.json`](file:///Users/animeshyadav/Desktop/project/forge/docs/examples/ci_review_policy.json):
+A production-ready example policy is maintained at [`docs/examples/ci_review_policy.json`](../examples/ci_review_policy.json):
 ```json
 {
   "policy_id": "ci_security_gate_strict",

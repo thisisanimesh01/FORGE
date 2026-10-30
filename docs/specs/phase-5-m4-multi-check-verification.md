@@ -4,7 +4,7 @@
 **Status**: APPROVED & IMPLEMENTED  
 **Date**: 2026-10-27  
 **Author**: FORGE Engineering Team  
-**Preceding Milestone**: [Phase 5, Milestone 3: Automated Evidence Chaining from Reproduction to Repair](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-5-m3-evidence-chaining.md)  
+**Preceding Milestone**: [Phase 5, Milestone 3: Automated Evidence Chaining from Reproduction to Repair](phase-5-m3-evidence-chaining.md)
 **Succeeding Milestone**: Phase 5, Milestone 5: Certified Engineering Dossier & Operator Export  
 
 ---
