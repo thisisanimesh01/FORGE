@@ -60,6 +60,11 @@ This document provides transparent, evidence-backed disclosure of observed capab
 - **Engine Protection:** FORGE enforces strict structural and forensic determinism (identical member list, identical file sizes, zero leaked files), publishes authoritative cryptographic manifests (`release_manifest.json`), and provides SLSA build provenance attestations through GitHub Actions rather than falsely claiming byte-for-byte binary bitstream reproducibility.
 - **Operator Mitigation:** Verify downloaded release artifacts against the official `release_manifest.json` or `SHA256SUMS.txt` published with the release, or verify via GitHub CLI (`gh attestation verify`).
 
+### Issue 7: GitHub Sigstore Artifact Attestation Restriction on Private Repositories
+- **Description:** GitHub Actions `actions/attest-build-provenance` is restricted by GitHub platform policy on user-owned private repositories (`Feature not available for user-owned private repositories. To enable this feature, please make this repository public`).
+- **Engine Protection:** The release workflow (`release-build.yml`) builds verified wheels and sdists, computes cryptographic digests in `release_manifest.json`, validates forensic cleanliness, and uploads release bundles while honestly logging the platform restriction. FORGE release tooling never fabricates attestation records.
+- **Operator Mitigation:** In private repositories, verify integrity using `forge release verify <artifact> --manifest release_manifest.json` or standard `sha256sum -c SHA256SUMS.txt`. To activate public Sigstore OIDC attestations verified via `gh attestation verify`, transition the repository visibility to public or transfer to a GitHub Enterprise organization.
+
 ---
 
 ## 4. Operator Best Practices

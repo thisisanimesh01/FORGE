@@ -334,6 +334,9 @@ When downloading release artifacts built in GitHub Actions:
 gh attestation verify dist/forge_core-0.1.0b1-py3-none-any.whl --owner thisisanimesh01
 ```
 
+> **Note on Private Repositories:** GitHub platform policy restricts Sigstore attestation persistence on private user repositories (`gh attestation verify` returns HTTP 404). For private beta evaluations, use Section 6.1 or 6.2 cryptographic checksum verification against `SHA256SUMS.txt` and `release_manifest.json`. Sigstore attestation verification activates upon public repository publication.
+
+
 ### 6.4 Auditing Dependencies for Known Vulnerabilities
 Audit pinned dependencies against the PyPA vulnerability database:
 ```bash

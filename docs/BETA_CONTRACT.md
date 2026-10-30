@@ -114,3 +114,7 @@ Based on empirical evidence across Supervised Pilots 01 through 08 using local O
 - **Zero Sensitive Data Leakage:** Distribution packages are forensically scanned to guarantee 100% exclusion of environment files (`.env`), SQLite databases (`*.db`, `*.sqlite3`), test fixtures, pilot directories, and internal caches.
 - **Distinction Between Integrity & Authenticity:** Checksums prove that an artifact has not been modified or corrupted since manifest creation (integrity). Cryptographic attestation (`gh attestation verify`) proves that the artifact was built from the official GitHub Actions workflow and repository source commit (authenticity).
 - **Pinned Dependencies & Zero Known Vulnerabilities:** Production installations must adhere to `requirements/constraints.txt`. All dependencies are audited against the PyPA vulnerability database (`pip-audit`) with zero tolerated CVEs.
+
+### Invariant 7: Release Gate & Provenance Attestation Policy
+- **Absolute Release Authorization Boundary:** Creation of release tags (`v0.1.0b1`), publishing to PyPI, or creating public GitHub Releases is forbidden without explicit human authorization.
+- **Sigstore Provenance in Private Environments:** While official build workflows generate SLSA build provenance attestations, GitHub restricts attestation persistence on private user repositories (returning HTTP 404). For supervised beta operation in private repositories, cryptographic SHA-256 manifest matching is enforced; public distribution remains gated on repository public visibility transition.

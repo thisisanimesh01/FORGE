@@ -99,9 +99,17 @@ flowchart TD
   - Dedicated M5 Specification (`docs/specs/phase-6-m5-security-attestation-release-gate.md`).
   - 19 targeted security tests in `tests/unit/test_phase6_milestone5.py` and full regression test suite passing.
 
-### Milestone 6: Supervised Beta Release Candidate & Operational Verification (NEXT)
-- **Objective:** End-to-end acceptance testing of the packaged beta across real-world Python repositories under operator supervision.
-- **Scope:**
-  - Full acceptance test suite across clean virtual environments.
-  - Release candidate tagging (`v0.1.0-beta.1`).
-  - Final operational sign-off and publication verification.
+### Milestone 6: Final Verification & Supervised Beta Release Gate (Completed — Release Gate Reached)
+- **Objective:** Complete the final end-to-end acceptance audit of FORGE, verify live security boundaries, distribution packages, operator workflows, and determine whether version 0.1.0b1 qualifies for a limited supervised beta release.
+- **Deliverables & Empirical Findings:**
+  - Full multi-environment regression verification: 100% pass across Python 3.11, 3.12, 3.13 in GitHub Actions CI (`.github/workflows/ci.yml`).
+  - Real Docker container sandbox integration verification: Live tests against Docker Desktop daemon (29.9.2) validating UID:GID 1000:1000, `--network none`, read-only workspace mount with EROFS, dropped capabilities (`NoNewPrivs=1`, `CapEff=0`), timeout killing, and host directory immutability.
+  - Live local Ollama inference verification: Responsive endpoint, model inventory auditing (`qwen2.5-coder:1.5b`), structured completion generation, and disabled cloud fallback.
+  - Clean distribution acceptance: Fresh wheel and sdist packaged and installed in clean external virtual environments outside the repository with zero `PYTHONPATH` bleed, verifying entrypoint, `forge version`, `forge doctor`, and isolated database initialization.
+  - Candidate artifacts generated via authorized GitHub Actions release-build workflow (`release-build.yml` Run 41124601553):
+    - Wheel: `forge_core-0.1.0b1-py3-none-any.whl` (371,693 bytes, SHA-256: `1f7141f0e459042cfa804aa58e418c5b62ce08211779f21b741b43e59f1eac8a`)
+    - Sdist: `forge_core-0.1.0b1.tar.gz` (530,092 bytes, SHA-256: `8cc09245b8be604b5482ba5dce5ca966f5e3afbabe56f064cd4fcfa3d17640cf`)
+  - Empirical Sigstore attestation assessment: Documented GitHub platform restriction (`Feature not available for user-owned private repositories. To enable this feature, please make this repository public`).
+  - Dedicated M6 Specification (`docs/specs/phase-6-m6-final-verification-release-gate.md`).
+  - Strict release authorization invariant preserved: Zero Git tags created, zero public releases published.
+  - Final release recommendation: **CONDITIONAL GO** (Fully ready for private supervised operator use; public distribution gated on repository visibility transition to enable public Sigstore OIDC attestations).
