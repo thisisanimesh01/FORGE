@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import subprocess
 import pytest
 from typer.testing import CliRunner
 
@@ -343,8 +344,20 @@ class TestSARIFExporter:
 class TestPolicyCLIIntegration:
     """CLI integration tests for review --format sarif and policy check."""
 
-    def test_cli_review_format_sarif(self):
-        result = runner.invoke(app, ["review", ".", "--base", "HEAD~1", "--head", "HEAD", "--format", "sarif", "--no-llm"])
+    def test_cli_review_format_sarif(self, tmp_path: Path):
+        repo_dir = tmp_path / "sarif_repo"
+        repo_dir.mkdir()
+        subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Tester"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=repo_dir, check=True, capture_output=True)
+        (repo_dir / "file.py").write_text("x = 1\n")
+        subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "c1"], cwd=repo_dir, check=True, capture_output=True)
+        (repo_dir / "file.py").write_text("x = 2\n")
+        subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "c2"], cwd=repo_dir, check=True, capture_output=True)
+
+        result = runner.invoke(app, ["review", str(repo_dir), "--base", "HEAD~1", "--head", "HEAD", "--format", "sarif", "--no-llm"])
         assert result.exit_code == 0
         parsed = json.loads(result.output)
         assert parsed["version"] == "2.1.0"

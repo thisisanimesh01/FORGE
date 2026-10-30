@@ -1,6 +1,7 @@
 """Comprehensive tests for Milestone 5: LLM Provider Abstraction, Typed Investigation Tools, and Bounded Loop."""
 
 import json
+import re
 import pytest
 from pathlib import Path
 from typing import List, Optional
@@ -927,7 +928,8 @@ class TestMilestone5CLI:
         """forge investigate --help produces usage information."""
         result = runner.invoke(app, ["investigate", "--help"])
         assert result.exit_code == 0
-        assert "--no-llm" in result.output
+        clean = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        assert "--no-llm" in clean
 
     def test_cli_doctor_still_works(self):
         """forge doctor continues to work after Milestone 5 additions."""

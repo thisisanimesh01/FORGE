@@ -22,6 +22,7 @@ Verifies:
 
 from datetime import datetime, timezone
 import json
+import re
 from pathlib import Path
 from typer.testing import CliRunner
 import pytest
@@ -472,11 +473,12 @@ def test_cli_benchmark_repair_help():
     """Verify forge benchmark repair --help displays options."""
     res = runner.invoke(app, ["benchmark", "repair", "--help"])
     assert res.exit_code == 0
-    assert "Execute repair quality benchmarks" in res.output
-    assert "--mode" in res.output
-    assert "--format" in res.output
-    assert "--fixture" in res.output
-    assert "--output" in res.output
+    clean = re.sub(r"\x1b\[[0-9;]*m", "", res.output)
+    assert "Execute repair quality benchmarks" in clean
+    assert "--mode" in clean
+    assert "--format" in clean
+    assert "--fixture" in clean
+    assert "--output" in clean
 
 
 def test_cli_repair_benchmark_alias_help():
