@@ -65,6 +65,11 @@ This document provides transparent, evidence-backed disclosure of observed capab
 - **Engine Protection:** The release workflow (`release-build.yml`) builds verified wheels and sdists, computes cryptographic digests in `release_manifest.json`, validates forensic cleanliness, and uploads release bundles while honestly logging the platform restriction. FORGE release tooling never fabricates attestation records.
 - **Operator Mitigation:** In private repositories, verify integrity using `forge release verify <artifact> --manifest release_manifest.json` or standard `sha256sum -c SHA256SUMS.txt`. To activate public Sigstore OIDC attestations verified via `gh attestation verify`, transition the repository visibility to public or transfer to a GitHub Enterprise organization.
 
+### Issue 8: Text-Based Tool Calling in Compact Local Models (Qwen 1.5B)
+- **Description:** Compact local inference models (such as `qwen2.5-coder:1.5b`) running through Ollama frequently output function call requests into message text content (e.g., `<tool_call>`, markdown code fences, or direct JSON) rather than producing Ollama's native `tool_calls` wire array.
+- **Engine Protection:** `OpenAICompatibleProvider` implements safe multi-tier content-based tool extraction (validating tool names against authorized request tools, validating arguments against parameter schemas, and rejecting malformed JSON or unknown tools). Furthermore, `InvestigationLoop` provides bounded diagnostic correction turns and strictly prevents marking runs as `COMPLETED` when zero tools and zero evidence records exist.
+- **Operator Mitigation:** Operators running investigations with 1.5B models can rely on automatic content-based extraction. For complex multi-turn investigations involving deeply nested arguments, 7B or 14B parameter models provide higher tool-calling reliability.
+
 ---
 
 ## 4. Operator Best Practices

@@ -74,3 +74,7 @@ class LLMResponse(BaseModel):
     completion_tokens: int = Field(default=0, ge=0)
     total_tokens: int = Field(default=0, ge=0)
     model: str = Field(default="", description="Actual model that responded")
+    extraction_error: Optional[str] = Field(
+        default=None,
+        description="Diagnostic explanation if tool call extraction from message content failed",
+    )

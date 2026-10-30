@@ -205,8 +205,38 @@ class InvestigationLoop:
             )
             messages.append(assistant_msg)
 
-            # If no tool calls, model provided a final answer
+            # If no tool calls, check whether this is a genuine final answer or an unexecuted/malformed turn
             if not response.tool_calls:
+                # 1. Did extraction detect a malformed/invalid tool call?
+                if response.extraction_error and steps_executed < self.max_steps:
+                    feedback_msg = (
+                        f"Tool invocation error: {response.extraction_error}. "
+                        f"Authorized tools: {[t.name for t in tools]}. "
+                        'Please re-issue your tool call as valid JSON: {"name": "<tool_name>", "arguments": {...}} '
+                        "or provide your final audit assessment."
+                    )
+                    messages.append(ChatMessage(role=MessageRole.USER, content=feedback_msg))
+                    continue
+
+                # 2. Check if this is Turn 1 with zero tools executed and zero findings
+                current_findings = self.store.list_findings(run_id=self.run_id)
+                if steps_executed == 1 and total_tool_calls == 0 and not current_findings and steps_executed < self.max_steps:
+                    prompt_msg = (
+                        "No audit tools have been executed yet. To perform the audit, use one of the available tools: "
+                        f"{[t.name for t in tools]}. "
+                        "If you have already concluded your inspection, provide your final structured assessment with clear limitations."
+                    )
+                    messages.append(ChatMessage(role=MessageRole.USER, content=prompt_msg))
+                    continue
+
+                # 3. If zero tools were executed and zero findings exist, do not falsely claim completion
+                if total_tool_calls == 0 and not current_findings:
+                    loop_status = "failed"
+                    error_msg = "Investigation terminated without audit activity: Zero tools executed and zero findings recorded."
+                    final_response_text = response.content or error_msg
+                    break
+
+                # 4. Legitimate final assessment after tools or findings
                 final_response_text = response.content
                 loop_status = "completed"
                 break
@@ -267,6 +297,13 @@ class InvestigationLoop:
 
         duration = time.monotonic() - start_time
         findings = self.store.list_findings(run_id=self.run_id)
+
+        # Invariant: A run with zero tool calls and zero findings must not be marked completed
+        if loop_status == "completed" and total_tool_calls == 0 and not findings:
+            loop_status = "failed"
+            error_msg = error_msg or "Investigation terminated without audit activity: Zero tools executed and zero findings recorded."
+            if not final_response_text:
+                final_response_text = error_msg
 
         # Finish run in store
         self.store.finish_run(

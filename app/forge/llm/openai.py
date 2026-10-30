@@ -1,7 +1,8 @@
 """OpenAI-compatible LLM provider implementation using standard httpx."""
 
 import json
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from forge.config import redact_secrets, get_settings
@@ -11,6 +12,7 @@ from forge.llm.models import (
     LLMResponse,
     MessageRole,
     ToolCallRequest,
+    ToolDefinition,
 )
 from forge.llm.provider import (
     LLMAuthenticationError,
@@ -19,6 +21,197 @@ from forge.llm.provider import (
     LLMRateLimitError,
     LLMUnavailableError,
 )
+
+
+def validate_tool_arguments(tool_def: ToolDefinition, args: Any) -> Tuple[bool, Optional[str]]:
+    """Validate parsed tool arguments against the tool's JSON schema parameters.
+
+    Returns:
+        (is_valid, error_message_if_invalid)
+    """
+    if not isinstance(args, dict):
+        return False, f"Tool arguments for '{tool_def.name}' must be a JSON object, got {type(args).__name__}"
+
+    params = tool_def.parameters or {}
+    required = params.get("required", [])
+    for req in required:
+        if req not in args or args[req] is None:
+            return False, f"Missing required parameter '{req}' for tool '{tool_def.name}'"
+
+    props = params.get("properties", {})
+    for key, val in list(args.items()):
+        if key in props and isinstance(props[key], dict):
+            prop_spec = props[key]
+            expected_type = prop_spec.get("type")
+            if expected_type == "string":
+                if not isinstance(val, str):
+                    return False, f"Parameter '{key}' for tool '{tool_def.name}' must be a string, got {type(val).__name__}"
+            elif expected_type == "integer":
+                if isinstance(val, bool):
+                    return False, f"Parameter '{key}' for tool '{tool_def.name}' must be an integer, got bool"
+                if isinstance(val, str) and val.strip().lstrip("-").isdigit():
+                    args[key] = int(val.strip())
+                elif not isinstance(val, int):
+                    return False, f"Parameter '{key}' for tool '{tool_def.name}' must be an integer, got {type(val).__name__}"
+            elif expected_type == "boolean":
+                if not isinstance(val, bool):
+                    return False, f"Parameter '{key}' for tool '{tool_def.name}' must be a boolean, got {type(val).__name__}"
+            elif expected_type == "array":
+                if not isinstance(val, list):
+                    return False, f"Parameter '{key}' for tool '{tool_def.name}' must be an array, got {type(val).__name__}"
+            elif expected_type == "object":
+                if not isinstance(val, dict):
+                    return False, f"Parameter '{key}' for tool '{tool_def.name}' must be an object, got {type(val).__name__}"
+
+            if "enum" in prop_spec and args[key] not in prop_spec["enum"]:
+                return False, f"Parameter '{key}' value {args[key]!r} is not an allowed enum value for '{tool_def.name}' (allowed: {prop_spec['enum']})"
+
+    return True, None
+
+
+def extract_content_tool_calls(
+    content: Optional[str],
+    authorized_tools: List[ToolDefinition],
+) -> Tuple[List[ToolCallRequest], Optional[str]]:
+    """Attempt safe extraction of tool calls from message text content when structured tool calls are absent.
+
+    Supports:
+    - JSON inside <tool_call>...</tool_call> tags
+    - JSON inside Markdown code fences (```json ... ```)
+    - Direct JSON objects or outer matching { ... }
+
+    Only accepts tool names present in authorized_tools.
+    Validates arguments against the tool's parameter schema.
+    Rejects malformed JSON, unknown tool names, and malformed arguments.
+    Does not interpret arbitrary JSON or ordinary explanatory prose as tool calls.
+
+    Returns:
+        (tool_calls, extraction_error)
+    """
+    if not content or not content.strip() or not authorized_tools:
+        return [], None
+
+    tool_map = {t.name: t for t in authorized_tools}
+    cleaned = content.strip()
+    extracted_calls: List[ToolCallRequest] = []
+    extraction_errors: List[str] = []
+
+    def _try_parse_candidate(raw_candidate: str, source_label: str) -> bool:
+        """Attempt to parse and validate a raw JSON string as a tool call candidate."""
+        nonlocal extracted_calls, extraction_errors
+        try:
+            parsed = json.loads(raw_candidate)
+        except json.JSONDecodeError as exc:
+            if source_label == "tag":
+                extraction_errors.append(f"Malformed JSON in <tool_call> tag: {exc}")
+            return False
+
+        candidates = parsed if isinstance(parsed, list) else [parsed]
+        found_any = False
+
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+
+            tool_name = None
+            tool_args = None
+
+            if "name" in item and isinstance(item["name"], str):
+                tool_name = item["name"]
+                tool_args = item.get("arguments", item.get("parameters", {}))
+            elif "tool" in item and isinstance(item["tool"], str):
+                tool_name = item["tool"]
+                tool_args = item.get("arguments", item.get("parameters", {}))
+            elif "function" in item and isinstance(item["function"], dict):
+                fn = item["function"]
+                if "name" in fn and isinstance(fn["name"], str):
+                    tool_name = fn["name"]
+                    tool_args = fn.get("arguments", fn.get("parameters", {}))
+            elif "type" in item and item.get("type") == "function" and isinstance(item.get("function"), dict):
+                fn = item["function"]
+                if "name" in fn and isinstance(fn["name"], str):
+                    tool_name = fn["name"]
+                    tool_args = fn.get("arguments", fn.get("parameters", {}))
+
+            if not tool_name:
+                continue
+
+            if isinstance(tool_args, str):
+                try:
+                    tool_args = json.loads(tool_args)
+                except json.JSONDecodeError as exc:
+                    extraction_errors.append(f"Malformed arguments JSON for tool '{tool_name}': {exc}")
+                    continue
+            elif tool_args is None:
+                tool_args = {}
+
+            if tool_name not in tool_map:
+                extraction_errors.append(
+                    f"Tool '{tool_name}' is not in authorized tools: {sorted(list(tool_map.keys()))}"
+                )
+                continue
+
+            tool_def = tool_map[tool_name]
+            is_valid, arg_err = validate_tool_arguments(tool_def, tool_args)
+            if not is_valid:
+                extraction_errors.append(arg_err or f"Invalid arguments for tool '{tool_name}'")
+                continue
+
+            extracted_calls.append(
+                ToolCallRequest(
+                    call_id=f"call_text_{len(extracted_calls) + 1}",
+                    name=tool_name,
+                    arguments=tool_args,
+                )
+            )
+            found_any = True
+
+        return found_any
+
+    # 1. Check for <tool_call> tags
+    tag_pattern = re.compile(r"<tool_call>([\s\S]*?)</tool_call>", re.IGNORECASE)
+    tag_matches = tag_pattern.findall(cleaned)
+    if tag_matches:
+        for block in tag_matches:
+            _try_parse_candidate(block.strip(), source_label="tag")
+        if extracted_calls:
+            return extracted_calls, None
+        if extraction_errors:
+            return [], extraction_errors[0]
+
+    # 2. Check for markdown code fences
+    fence_pattern = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
+    fence_matches = fence_pattern.findall(cleaned)
+    if fence_matches:
+        for block in fence_matches:
+            _try_parse_candidate(block.strip(), source_label="fence")
+        if extracted_calls:
+            return extracted_calls, None
+
+    # 3. Check for direct JSON or outermost { ... } / [ ... ]
+    if cleaned.startswith("{") or cleaned.startswith("["):
+        _try_parse_candidate(cleaned, source_label="direct")
+        if extracted_calls:
+            return extracted_calls, None
+
+    first_brace = cleaned.find("{")
+    last_brace = cleaned.rfind("}")
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        candidate_slice = cleaned[first_brace : last_brace + 1]
+        _try_parse_candidate(candidate_slice, source_label="braces")
+        if extracted_calls:
+            return extracted_calls, None
+
+    first_bracket = cleaned.find("[")
+    last_bracket = cleaned.rfind("]")
+    if first_bracket != -1 and last_bracket != -1 and last_bracket > first_bracket:
+        candidate_slice = cleaned[first_bracket : last_bracket + 1]
+        _try_parse_candidate(candidate_slice, source_label="brackets")
+        if extracted_calls:
+            return extracted_calls, None
+
+    err = extraction_errors[0] if extraction_errors else None
+    return [], err
 
 
 class OpenAICompatibleProvider:
@@ -229,6 +422,8 @@ class OpenAICompatibleProvider:
         # Parse tool calls
         tool_calls: List[ToolCallRequest] = []
         raw_tool_calls = msg_data.get("tool_calls", [])
+        extraction_error: Optional[str] = None
+
         if raw_tool_calls:
             for idx, tc in enumerate(raw_tool_calls):
                 fn = tc.get("function", {})
@@ -253,6 +448,12 @@ class OpenAICompatibleProvider:
                         arguments=args,
                     )
                 )
+        elif content and request.tools:
+            # Fallback: attempt safe content-based tool extraction
+            extracted, extraction_error = extract_content_tool_calls(content, request.tools)
+            if extracted:
+                tool_calls = extracted
+                finish_reason = "tool_calls"
 
         usage = data.get("usage", {})
         p_tokens = usage.get("prompt_tokens", 0)
@@ -268,4 +469,5 @@ class OpenAICompatibleProvider:
             completion_tokens=c_tokens,
             total_tokens=t_tokens,
             model=resp_model,
+            extraction_error=extraction_error,
         )

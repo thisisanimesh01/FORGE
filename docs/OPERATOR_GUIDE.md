@@ -272,6 +272,32 @@ Export the final patch diff, verification certificates, and audit record:
 forge workflow export <WORKFLOW_ID> --out-dir ./dossiers
 ```
 
+### Step 9: Autonomous Repository Investigation (Read-Only)
+Run an evidence-backed security and defect audit of an untrusted repository:
+```bash
+# Offline static inspection (no LLM required):
+forge inspect https://github.com/example/repo.git --no-llm
+
+# Autonomous multi-turn investigation with local Ollama:
+forge investigate https://github.com/example/repo.git \
+    --provider ollama \
+    --model qwen2.5-coder:1.5b \
+    --max-steps 10
+```
+
+#### Supported Tool-Calling Protocols
+FORGE supports multi-tier tool invocation formats across local and cloud LLM providers:
+1. **Native Structured Tool Calls**: Standard OpenAI wire schema (`message.tool_calls`).
+2. **Direct JSON Invocations**: JSON tool requests in message content (`{"name": "...", "arguments": {...}}`).
+3. **Markdown Fenced JSON**: Code fence blocks (````json {"name": "...", "arguments": {...}} ````).
+4. **`<tool_call>` Tags**: XML-style tags (`<tool_call>{"name": "...", "arguments": {...}}</tool_call>`).
+
+#### Investigation Safety & Invariant Guarantees
+- **Authorized Tool Allowlist**: Only tools declared in the request (`get_repository_map`, `search_symbols`, `read_source_excerpt`, `list_directory`, `run_sandbox_check`, `record_finding`) are permitted. Unknown tool names are strictly rejected.
+- **Strict Parameter Validation**: Tool arguments are validated against JSON schema definitions (required fields, types, and enum values) before execution.
+- **Diagnostic Correction**: If a model generates malformed arguments or invalid JSON, FORGE supplies non-secret diagnostic feedback allowing the model a bounded opportunity to re-issue a corrected call.
+- **Anti-Premature Completion**: An investigation is strictly prohibited from finishing as `COMPLETED` on Step 1 if zero tools were executed and zero findings were recorded. Unexecuted or abandoned investigations are truthfully recorded as `FAILED`.
+
 ---
 
 ## 5. Troubleshooting & FAQ

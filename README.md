@@ -673,8 +673,8 @@ forge benchmark review --format json -o reports/review_benchmark.json
 # Safely acquire and inspect repository structure (read-only)
 forge inspect <repo-url-or-path> --no-llm
 
-# Multi-turn LLM investigation
-forge investigate <repo-url-or-path>
+# Multi-turn LLM investigation (supports local Ollama or cloud providers)
+forge investigate <repo-url-or-path> --provider ollama --model qwen2.5-coder:1.5b --max-steps 10
 
 # Export audit report
 forge report <run-id> --format markdown -o reports/run.md
@@ -688,6 +688,8 @@ forge findings show <finding-id>
 forge benchmark run --mode static
 forge benchmark run --mode llm
 ```
+
+The investigation engine supports multi-tier tool-calling protocols: native OpenAI function-calling wire frames, direct JSON objects, markdown code fences, and `<tool_call>` tags. Parameter schemas are strictly validated against tool specifications, and investigations without executed tools or findings cannot falsely complete.
 
 ---
 
