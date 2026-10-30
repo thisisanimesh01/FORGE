@@ -23,7 +23,9 @@ Tests verify:
 
 from datetime import datetime, timezone
 import hashlib
+import os
 from pathlib import Path
+import re
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
@@ -826,4 +828,5 @@ def test_cli_workflow_verify_not_found(tmp_path: Path, monkeypatch: pytest.Monke
 def test_cli_workflow_advance_help():
     res = runner.invoke(app, ["workflow", "advance", "--help"])
     assert res.exit_code == 0
-    assert "--verify" in res.output
+    clean_output = re.sub(r"\x1b\[[0-9;]*m", "", res.output)
+    assert "--verify" in clean_output

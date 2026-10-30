@@ -609,7 +609,7 @@ def resolve_source_anchor(
     ctx_start = max(1, start_line - 3)
     ctx_end = min(len(raw_lines), end_line + 3)
     ctx_lines = [
-        f"{idx:4d}: {raw_lines[idx - 1].rstrip('\r\n')}"
+        f"{idx:4d}: " + raw_lines[idx - 1].rstrip("\r\n")
         for idx in range(ctx_start, ctx_end + 1)
     ]
     surrounding_context = "\n".join(ctx_lines)
