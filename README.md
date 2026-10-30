@@ -34,8 +34,17 @@ Deterministic Edit Anchoring & Source-Grounded Repair ── [COMPLETED]
 Repair Reliability & Generalization ── [COMPLETED]
 Candidate Semantic Verification Hardening ── [COMPLETED]
 Deterministic Repair Construction Architecture ── [COMPLETED]
-Phase 6: Supervised Beta Packaging & Operational Readiness ── [IN PROGRESS] (Milestone 1 Complete)
+Phase 6: Supervised Beta Packaging & Operational Readiness ── [IN PROGRESS] (Milestones 1–2 Complete)
 ```
+
+### Phase 6, Milestone 2: Packaging, CLI Usability & Distribution (Completed)
+- **Objective & Scope**: Package FORGE into standard Python distribution artifacts (wheel `.whl` and source distribution `.tar.gz`) enabling clean standalone installation and CLI execution outside the source repository without dependency bloat or security regressions.
+- **Architectural Deliverables**:
+  - *Distribution Artifact Generation & Verification*: Built pure-Python wheel (`dist/forge_core-0.1.0b1-py3-none-any.whl`, 351 KB) and source distribution (`dist/forge_core-0.1.0b1.tar.gz`, 488 KB).
+  - *Strict Distribution Exclusion Policy ([`MANIFEST.in`](file:///Users/animeshyadav/Desktop/project/forge/MANIFEST.in))*: Explicitly includes core code and documentation while barring local `.env` files, SQLite databases (`*.sqlite`, `*.db`), test fixtures, pilot directories, caches, and bytecode from distribution archives.
+  - *Clean-Install Verification in Isolated Environments*: Verified installation of both wheel and sdist in temporary virtual environments (`/tmp/forge_clean_*`) outside the repository with zero `PYTHONPATH` bleed. Confirmed `forge version`, `forge doctor`, `forge db init`, and Python module imports execute cleanly without source checkout dependencies.
+  - *CLI Usability & Shell Auto-Completion*: Integrated and verified Typer native shell completion for `bash`, `zsh`, `fish`, and `powershell` via `forge --install-completion` and `forge --show-completion`.
+  - *Milestone Specification ([`docs/specs/phase-6-m2-packaging-distribution.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-6-m2-packaging-distribution.md))*: Codified distribution architecture, artifact forensics, clean-install verification records, and security invariants.
 
 ### Phase 6, Milestone 1: Beta Readiness Audit & Release Foundation (Completed)
 - **Objective & Scope**: Establish the operational foundation for the limited, human-supervised developer beta of FORGE following the conclusion of Supervised Pilots 01–08.
@@ -227,7 +236,20 @@ Phase 6: Supervised Beta Packaging & Operational Readiness ── [IN PROGRESS] 
 ## Installation
 
 Ensure Python 3.11+ is installed.
+
+### Option A: Install via Standalone Distribution Wheel (.whl)
+For standard operator workstations without requiring a git checkout:
 ```bash
+python3 -m venv ~/forge-venv
+source ~/forge-venv/bin/activate
+pip install forge_core-0.1.0b1-py3-none-any.whl
+```
+
+### Option B: Developer / Editable Installation
+For development, inspection, and benchmark execution:
+```bash
+git clone https://github.com/thisisanimesh01/FORGE.git
+cd FORGE
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
@@ -237,13 +259,16 @@ pip install -e ".[dev]"
 
 ## Verified CLI Usage
 
-### System & Sandbox Diagnostics
+### System Diagnostics & Shell Completion
 ```bash
 # Verify environment, Python, Git, SQLite, and Docker status
 forge doctor
 
 # Inspect sandbox runtime health, container configuration, and isolation limits
 forge sandbox doctor
+
+# Install shell auto-completion (bash, zsh, fish, or powershell)
+forge --install-completion zsh
 ```
 
 ### Supervised End-to-End Engineering Workflow: Intake & Context (Phase 5 Milestone 1)

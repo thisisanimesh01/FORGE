@@ -13,8 +13,23 @@
 - Docker Engine 20.10+ (required for sandboxed reproduction and verification)
 - Local Ollama server (running `http://localhost:11434` with `qwen2.5-coder:1.5b` or stronger)
 
-### Installing FORGE
-Clone the repository and install in an isolated Python virtual environment:
+### Installing via Standalone Distribution Wheel (.whl)
+For standard operator workstations without requiring a git source checkout:
+```bash
+python3 -m venv ~/forge-venv
+source ~/forge-venv/bin/activate
+pip install forge_core-0.1.0b1-py3-none-any.whl
+```
+
+### Installing from Source Distribution (.tar.gz)
+```bash
+python3 -m venv ~/forge-venv
+source ~/forge-venv/bin/activate
+pip install forge_core-0.1.0b1.tar.gz
+```
+
+### Developer / Editable Installation
+For development and debugging:
 ```bash
 git clone https://github.com/thisisanimesh01/FORGE.git
 cd FORGE
@@ -23,10 +38,31 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
+### Verification & Shell Completion
 Verify that the CLI is accessible:
 ```bash
 forge version
 # FORGE version: 0.1.0b1
+```
+
+Set up shell tab completion for your preferred shell (`bash`, `zsh`, `fish`, or `powershell`):
+```bash
+# Automatically install completion into your shell profile:
+forge --install-completion zsh
+
+# Or inspect the completion script directly:
+forge --show-completion zsh
+```
+
+### Upgrading & Uninstallation
+To upgrade to a newer beta distribution:
+```bash
+pip install --upgrade forge_core-<version>-py3-none-any.whl
+```
+
+To cleanly uninstall FORGE:
+```bash
+pip uninstall forge-core
 ```
 
 ---

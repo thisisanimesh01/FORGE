@@ -1,7 +1,7 @@
 # Phase 6: Supervised Beta Packaging & Operational Readiness — Architecture & Roadmap
 
 - **Phase:** Phase 6 — Supervised Beta Packaging & Operational Readiness
-- **Status:** IN PROGRESS (Milestone 1 Complete)
+- **Status:** IN PROGRESS (Milestones 1–2 Complete)
 - **Target Repo Immutability:** STRICTLY ENFORCED (Zero automated mutation, zero commits, zero pushes, zero PRs)
 - **Traceability:** Implements Phase 6 specification and release gate per `AGENTS.md` (Sections 1, 2, 3, 4, 5, 7), synthesizing all findings from Supervised Pilots 01–08.
 
@@ -31,8 +31,8 @@ Phase 6 packages these capabilities into a predictable, auditable, and productio
 
 ```mermaid
 flowchart TD
-    M1["M1: Beta Readiness Audit & Release Foundation (CURRENT)"] --> M2["M2: Packaging, CLI Usability & Distribution"]
-    M2 --> M3["M3: Operator Workflow & Review Experience"]
+    M1["M1: Beta Readiness Audit & Release Foundation"] --> M2["M2: Packaging, CLI Usability & Distribution"]
+    M2 --> M3["M3: Operator Workflow & Review Experience (NEXT)"]
     M3 --> M4["M4: Operational Diagnostics & Live Environment Validation"]
     M4 --> M5["M5: Security Hardening, Attestation & Release Gate"]
     M5 --> M6["M6: Supervised Beta Release Candidate & Verification"]
@@ -49,12 +49,15 @@ flowchart TD
   - Version bump to `0.1.0b1` and CLI description alignment.
   - 100% pass on offline test suite (958 unit/integration tests) and live Docker validation.
 
-### Milestone 2: Packaging, CLI Usability & Distribution (Planned)
+### Milestone 2: Packaging, CLI Usability & Distribution (Completed)
 - **Objective:** Package FORGE for simplified operator installation via wheel/sdist and standalone entrypoints.
-- **Scope:**
-  - Build and validate standard distribution wheels.
-  - Streamline CLI command ergonomics, tab completions, and interactive prompts.
-  - Ensure zero runtime dependency bloat.
+- **Deliverables:**
+  - Strict distribution packaging metadata in `pyproject.toml` and exclusion rules in `MANIFEST.in`.
+  - Distribution artifacts built and audited: `dist/forge_core-0.1.0b1-py3-none-any.whl` and `dist/forge_core-0.1.0b1.tar.gz`.
+  - Zero leakage of SQLite databases, pilot repositories, test fixtures, or local secrets in distribution archives.
+  - Clean-install verification in fresh virtual environments outside source tree (`/tmp/forge_clean_*`).
+  - CLI usability enhancements, Typer shell auto-completion (`--install-completion` for bash/zsh/fish/powershell), and updated operator guide.
+  - Dedicated M2 Specification (`docs/specs/phase-6-m2-packaging-distribution.md`).
 
 ### Milestone 3: Operator Workflow & Review Experience (Planned)
 - **Objective:** Enhance the operator review gate with rich terminal diff formatting, syntax highlighting, and interactive decision prompts.

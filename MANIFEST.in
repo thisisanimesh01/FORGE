@@ -1,0 +1,44 @@
+# MANIFEST.in for forge-core
+
+include README.md
+include pyproject.toml
+include .env.example
+
+# Source modules
+recursive-include app/forge *.py
+
+# Documentation
+recursive-include docs *.md
+
+# Exclude all caches, bytecode, and temporary files
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude *$py.class
+global-exclude *.so
+global-exclude .DS_Store
+
+# Strictly exclude local environments, databases, and credentials
+exclude .env
+exclude .env.*
+include .env.example
+global-exclude *.sqlite
+global-exclude *.sqlite3
+global-exclude *.sqlite-wal
+global-exclude *.sqlite-shm
+global-exclude *.sqlite3-wal
+global-exclude *.sqlite3-shm
+global-exclude *.db
+global-exclude *.db-journal
+global-exclude *.db-wal
+global-exclude *.db-shm
+
+# Exclude local scratch, test outputs, and reports
+recursive-exclude data *
+recursive-exclude reports *
+include reports/.gitkeep
+recursive-exclude workspace_tmp *
+recursive-exclude .forge *
+recursive-exclude secrets *
+
+# Exclude test fixtures and pilot repos from sdist
+recursive-exclude tests/fixtures *
