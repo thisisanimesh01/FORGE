@@ -15,6 +15,8 @@ jobs:
   test-and-audit:
     name: Regression Suite & Security Gate (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    env:
+      NO_COLOR: "1"
     strategy:
       fail-fast: false
       matrix:
