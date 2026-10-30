@@ -30,7 +30,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@0b93645e9dc2c792dd34f771f58a253731a66e77 # v5.3.0
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.11"
           cache: "pip"
@@ -38,7 +38,7 @@ jobs:
       - name: Install Build Tooling
         run: |
           python -m pip install --upgrade pip
-          python -m pip install build -c requirements/constraints.txt
+          python -m pip install build setuptools wheel -c requirements/constraints.txt
 
       - name: Build Distribution Wheel and Source Archive
         run: |
@@ -55,7 +55,7 @@ jobs:
           python -m forge.cli release verify dist/*.tar.gz
 
       - name: Attest Build Provenance (SLSA Standard)
-        uses: actions/attest-build-provenance@520d128f165991a6c774bcb7d6ae6dd9879a7db5 # v2.2.0
+        uses: actions/attest-build-provenance@520d128f165991a6c774bcb264f323e3d70747f4 # v2.2.0
         with:
           subject-path: |
             dist/*.whl
