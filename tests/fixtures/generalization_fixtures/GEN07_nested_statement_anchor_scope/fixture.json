@@ -1,0 +1,14 @@
+{
+  "fixture_id": "GEN07_nested_statement_anchor_scope",
+  "name": "Linear Instead of Exponential Backoff",
+  "description": "compute_delay calculates delay linearly (base_delay * attempt) instead of exponentially (base_delay * (2 ** attempt)).",
+  "category": "nested_statement_anchor_scope",
+  "target_file": "src/backoff.py",
+  "test_file": "tests/test_backoff.py",
+  "reproduction_command": "python3 -m unittest tests/test_backoff.py",
+  "expected_failure_pattern": "AssertionError",
+  "valid_search_block": "        # Defect: linear multiplier used instead of exponential progression\n        calculated_delay = self.base_delay * attempt",
+  "valid_replace_block": "        # Fixed: exponential progression\n        calculated_delay = self.base_delay * (2 ** attempt)",
+  "out_of_scope_replace_block": "    def compute_delay(self, attempt: int) -> float:\n        return self.base_delay * (2 ** attempt)",
+  "plausible_incorrect_replace_block": "        calculated_delay = self.base_delay * (attempt ** 2)"
+}

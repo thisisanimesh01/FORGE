@@ -44,6 +44,12 @@ from forge.repair.anchoring import (
     construct_patch_from_edit_anchor,
     validate_anchor_replacement_semantics,
 )
+from forge.repair.deterministic_repair import (
+    DeterministicRepairResult,
+    GroundedRepairRepresentation,
+    build_grounded_repair_representation,
+    construct_deterministic_repair,
+)
 from forge.repair.semantic_verifier import (
     BypassedGuardInfo,
     SemanticAnalysisResult,
@@ -95,7 +101,9 @@ __all__ = [
     "AutonomousMutationForbiddenError",
     "BudgetExceededError",
     "BypassedGuardInfo",
+    "DeterministicRepairResult",
     "EditAnchorContract",
+    "GroundedRepairRepresentation",
     "HumanApprovalRequiredError",
     "InvalidWorkflowTransitionError",
     "PatchApplicationError",
@@ -131,9 +139,11 @@ __all__ = [
     "analyze_python_ast_semantics",
     "apply_unified_diff_to_file",
     "assert_human_approval_gate",
+    "build_grounded_repair_representation",
     "collect_unreachable_statements",
     "compute_acceptance_metrics",
     "compute_patch_sha256",
+    "construct_deterministic_repair",
     "construct_patch_from_edit_anchor",
     "construct_unified_diff_from_search_replace",
     "evaluate_repair_outcome",

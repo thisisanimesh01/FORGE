@@ -566,10 +566,25 @@ class RepairPlanner:
             resolve_source_anchor,
             construct_patch_from_edit_anchor,
         )
+        from forge.repair.deterministic_repair import (
+            DeterministicRepairResult,
+            GroundedRepairRepresentation,
+            build_grounded_repair_representation,
+            construct_deterministic_repair,
+        )
 
         anchor: Optional[EditAnchorContract] = None
+        grounded_rep: Optional[GroundedRepairRepresentation] = None
         try:
             anchor = resolve_source_anchor(
+                repo_path=repo_resolved,
+                target_file=target_file,
+                base_commit_sha=resolved_sha,
+                finding=finding,
+                evidence_records=evidence_records,
+                allowed_files=[target_file],
+            )
+            grounded_rep = build_grounded_repair_representation(
                 repo_path=repo_resolved,
                 target_file=target_file,
                 base_commit_sha=resolved_sha,
@@ -595,6 +610,7 @@ class RepairPlanner:
                 )
         except Exception:
             anchor = None
+            grounded_rep = None
 
         # 6. Assemble Prompt with Untrusted Data Boundary Framing
         prompt = self._build_prompt(
@@ -794,7 +810,13 @@ class RepairPlanner:
                 attempt_violations.append(f"Model-suggested target file '{declared_target}' is protected: {prot_reason}")
 
             if diagnosis.search_block is not None and diagnosis.replace_block is not None:
-                constr_valid, constructed_diff, constr_reasons, metrics = construct_unified_diff_from_search_replace(
+                constr_valid = False
+                constructed_diff = ""
+                constr_reasons: List[str] = []
+                metrics: Dict[str, Any] = {}
+
+                # 1. First evaluate standard search/replace proposal
+                sr_valid, sr_diff, sr_reasons, sr_metrics = construct_unified_diff_from_search_replace(
                     repo_path=repo_resolved,
                     target_file=declared_target,
                     search_block=diagnosis.search_block,
@@ -803,24 +825,105 @@ class RepairPlanner:
                     budget=self.budget,
                     base_commit_sha=resolved_sha,
                 )
-                if not constr_valid and anchor is not None and getattr(anchor, "status", None) and getattr(anchor.status, "value", str(anchor.status)) == "resolved":
-                    if any("intervening lines" in r.lower() or "search block not found" in r.lower() for r in constr_reasons):
-                        # Attempt grounding via verified source anchor
-                        anch_valid, anch_diff, anch_reasons, anch_metrics = construct_patch_from_edit_anchor(
-                            anchor=anchor,
+
+                # 2. Check scope boundary invariants when grounded representation exists
+                if grounded_rep is not None and grounded_rep.is_resolved:
+                    anchor_stripped = grounded_rep.original_statement.lstrip()
+                    repl_stripped = diagnosis.replace_block.lstrip()
+                    is_anchor_def = anchor_stripped.startswith(("def ", "class ", "async def "))
+                    is_repl_def = repl_stripped.startswith(("def ", "class ", "async def "))
+
+                    if not is_anchor_def and is_repl_def:
+                        # Check if search_block matched the file and contains the anchored defect
+                        sr_contains_anchor = False
+                        if sr_valid and file_path_disk.is_file() and raw_text and diagnosis.search_block in raw_text:
+                            m_idx = raw_text.find(diagnosis.search_block)
+                            sr_start = raw_text[:m_idx].count("\n") + 1
+                            sr_end = raw_text[: m_idx + len(diagnosis.search_block)].count("\n")
+                            if not diagnosis.search_block.endswith("\n"):
+                                sr_end += 1
+                            if sr_start <= grounded_rep.start_line and sr_end >= grounded_rep.end_line:
+                                sr_contains_anchor = True
+
+                        if sr_contains_anchor:
+                            constr_valid = True
+                            constructed_diff = sr_diff
+                            constr_reasons = []
+                            metrics = sr_metrics
+                        else:
+                            first_line = diagnosis.replace_block.splitlines()[0].strip() if diagnosis.replace_block.splitlines() else ""
+                            scope_violation = (
+                                f"Scope violation: Replacement content defines a function/class ('{first_line[:40]}'), "
+                                f"but anchor is an internal statement block ({grounded_rep.ast_node_type}). "
+                                f"Source coordinates are deterministically locked to line {grounded_rep.start_line}. "
+                                f"Replacement must target only the anchored statement level."
+                            )
+                            constr_valid = False
+                            constructed_diff = ""
+                            constr_reasons = [scope_violation]
+                            if sr_reasons:
+                                constr_reasons.extend(sr_reasons)
+                    elif sr_valid:
+                        constr_valid = True
+                        constructed_diff = sr_diff
+                        constr_reasons = []
+                        metrics = sr_metrics
+                    else:
+                        # Attempt deterministic repair construction directly on the grounded representation
+                        det_res = construct_deterministic_repair(
+                            grounded_rep=grounded_rep,
                             replacement_content=diagnosis.replace_block,
                             repo_path=repo_resolved,
                             budget=self.budget,
-                            evidence_records=evidence_records,
                             finding=finding,
+                            evidence_records=evidence_records,
                         )
-                        if anch_valid:
+                        if det_res.is_valid and det_res.unified_diff:
                             constr_valid = True
-                            constructed_diff = anch_diff
+                            constructed_diff = det_res.unified_diff
                             constr_reasons = []
-                            metrics = anch_metrics
+                            metrics = {
+                                "added_lines": det_res.lines_added,
+                                "removed_lines": det_res.lines_removed,
+                                "hunk_count": 1,
+                                "files_changed": 1,
+                                "touched_files": [declared_target],
+                            }
                         else:
-                            constr_reasons.extend(anch_reasons)
+                            constr_valid = False
+                            constructed_diff = ""
+                            constr_reasons = list(sr_reasons)
+                            for r in det_res.rejection_reasons:
+                                if r not in constr_reasons:
+                                    constr_reasons.append(r)
+                else:
+                    if sr_valid:
+                        constr_valid = True
+                        constructed_diff = sr_diff
+                        constr_reasons = []
+                        metrics = sr_metrics
+                    elif anchor is not None and getattr(anchor, "status", None) and getattr(anchor.status, "value", str(anchor.status)) == "resolved":
+                        if any("intervening lines" in r.lower() or "search block not found" in r.lower() for r in sr_reasons):
+                            # Attempt grounding via verified source anchor
+                            anch_valid, anch_diff, anch_reasons, anch_metrics = construct_patch_from_edit_anchor(
+                                anchor=anchor,
+                                replacement_content=diagnosis.replace_block,
+                                repo_path=repo_resolved,
+                                budget=self.budget,
+                                evidence_records=evidence_records,
+                                finding=finding,
+                            )
+                            if anch_valid:
+                                constr_valid = True
+                                constructed_diff = anch_diff
+                                constr_reasons = []
+                                metrics = anch_metrics
+                            else:
+                                constr_reasons.extend(anch_reasons)
+                        else:
+                            constr_reasons.extend(sr_reasons)
+                    else:
+                        constr_reasons.extend(sr_reasons)
 
                 diff_text = sanitize_patch_content(constructed_diff)
                 last_diff_text = diff_text
@@ -917,11 +1020,23 @@ class RepairPlanner:
                             f"CRITICAL: Your diff produced no net changes to `{target_file}` (unchanged replacement/no-op patch). "
                             f"You must make an effective code modification that resolves the defect."
                         )
-                    if any("does not match anchor indentation" in v.lower() for v in attempt_violations):
+                    if any("does not match anchor indentation" in v.lower() or "indentation mismatch" in v.lower() for v in attempt_violations):
                         diff_guidance.append(
                             f"CRITICAL: The replacement content has incorrect leading indentation. "
                             f"Ensure every line of your replacement has the exact leading spaces matching the anchor block in `{target_file}`. "
                             f"Do NOT strip leading spaces."
+                        )
+                    if any("scope violation" in v.lower() for v in attempt_violations):
+                        diff_guidance.append(
+                            f"CRITICAL: Scope violation. Source coordinates are deterministically locked to the anchored statement level. "
+                            f"Do NOT redeclare function or class headers (e.g. 'def ...', 'class ...'). "
+                            f"Target strictly the statement or conditional block to be replaced inside the function."
+                        )
+                    if any("semantic invariant violation" in v.lower() for v in attempt_violations):
+                        diff_guidance.append(
+                            f"CRITICAL: Semantic invariant violation. "
+                            f"Your replacement introduced unreachable code or bypassed required validation guards. "
+                            f"Ensure all branches remain reachable and all preconditions are preserved."
                         )
                     if any("semantic safety violation" in v.lower() for v in attempt_violations):
                         diff_guidance.append(

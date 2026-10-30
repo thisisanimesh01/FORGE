@@ -33,8 +33,22 @@ Deterministic Patch Anchoring & Minimal Replacements ── [COMPLETED]
 Deterministic Edit Anchoring & Source-Grounded Repair ── [COMPLETED]
 Repair Reliability & Generalization ── [COMPLETED]
 Candidate Semantic Verification Hardening ── [COMPLETED]
+Deterministic Repair Construction Architecture ── [COMPLETED]
 Phase 6: Autonomous Release & Production Hardening  ── [PLANNED]
 ```
+
+### Deterministic Repair Construction Architecture & Coordinate Ownership (Completed)
+- **Problem & Root Cause**: Analysis of Pilot 01–05 forensics revealed that repair candidate generation broke down when local models (`qwen2.5-coder:1.5b`) attempted to override coordinates or redeclare whole function headers (`def ...`) when defects were localized to internal statements. Because earlier proposal constructors allowed model-supplied search blocks to dictate coordinates, models could hijack coordinates to line 1 rather than the anchored defect statement at line 14.
+- **Architectural Enhancements**:
+  - *Typed Grounded Repair Representation (`GroundedRepairRepresentation`)*: Implemented in `app/forge/repair/deterministic_repair.py`, capturing `target_file`, `base_commit_sha`, SHA-256 `source_digest`, AST node type/identity, symbol scope, exact 1-indexed `[start_line, end_line]`, and verbatim statement text.
+  - *Deterministic Coordinate Ownership & Scope Boundary Defense*: Locks coordinates to the grounded statement. If a model proposal re-declares a function/class header (`def ...`) for an internal statement anchor, it is strictly rejected as a `Scope violation` unless the search block is an exact matching function definition encompassing the anchor.
+  - *Indentation & Formatting Verification*: Enforces leading whitespace matching the original statement's indentation, rejecting unindented or misaligned lines without silent normalization.
+  - *AST Syntax & Static Semantic Verification*: Verifies that candidate code parses cleanly with `ast.parse` and satisfies semantic invariants (no unreachable code, no bypassed guards) before generating a diff.
+  - *difflib Standard Diff Synthesis*: Synthesizes standard unified diffs via Python `difflib.unified_diff`, enforcing line and hunk budgets.
+  - *Two-Tiered Proposal Validation in Planner*: `RepairPlanner.plan_repair` evaluates structured search/replace proposals through coordinate containment checks and deterministic repair grounding, propagating actionable diagnostics in retry feedback.
+  - *Generalization Regression Fixture (`GEN07_nested_statement_anchor_scope`)*: Added fixture under `tests/fixtures/generalization_fixtures/` covering nested statement anchoring inside a class method with docstrings and guards (`BackoffPolicy.compute_delay`), verifying statement grounding, out-of-scope rejection, and verified execution.
+  - *Fail-Secure Invariants*: Retained zero target repository mutation, Docker container sandboxing, and strict enforcement of `FORGE_ALLOW_CLOUD_FALLBACK=false`.
+- **Verification**: Verified with 12 dedicated unit tests (`tests/unit/test_deterministic_repair_construction.py`), 939 full regression tests, and live local Ollama evaluation.
 
 ### Candidate Semantic Verification Hardening & AST Invariants (Completed)
 - **Problem & Root Cause**: In Supervised Pilot 03, the local model proposed replacing a function definition header with an immediate `return` statement calculating the discount. While this satisfied the target positive-price test in the reproduction check, it introduced dead unreachable code, displaced the function docstring, and completely bypassed pre-existing negative-price validation guards (`if price < 0: raise ValueError(...)`). Because `ast.parse` only checks syntactic grammar and the reproduction check lacked negative-price assertions, the regression was missed and the candidate erroneously passed verification to reach `awaiting_human_review`.
