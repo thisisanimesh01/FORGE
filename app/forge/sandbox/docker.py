@@ -79,7 +79,7 @@ class DockerSandbox:
         return healthy
 
     def check_health(self) -> Tuple[bool, str]:
-        """Verify Docker executable and daemon status."""
+        """Verify Docker executable, daemon status, socket permissions, and local sandbox image availability."""
         if not self.docker_binary:
             return False, "Docker binary not found in PATH"
 
@@ -92,8 +92,27 @@ class DockerSandbox:
             )
             if res.returncode != 0:
                 err_msg = res.stderr.strip() or "Docker daemon not responding"
+                low_err = err_msg.lower()
+                if "permission denied" in low_err:
+                    return False, f"Docker socket permission denied: {err_msg}"
+                elif "cannot connect" in low_err or "is the docker daemon running" in low_err:
+                    return False, f"Docker daemon not running: {err_msg}"
                 return False, f"Docker daemon unavailable: {err_msg}"
             version = res.stdout.strip()
+
+            # Check if sandbox image is cached locally in Docker daemon
+            try:
+                img_res = subprocess.run(
+                    [self.docker_binary, "image", "inspect", self.docker_image],
+                    capture_output=True,
+                    text=True,
+                    timeout=5.0,
+                )
+                if img_res.returncode != 0:
+                    return False, f"Docker daemon reachable (Version: {version}), but sandbox image '{self.docker_image}' is not in local cache (run 'docker pull {self.docker_image}')"
+            except Exception:
+                pass
+
             return True, f"Docker daemon reachable (Version: {version}, Image: {self.docker_image})"
         except subprocess.TimeoutExpired:
             return False, "Docker info check timed out"

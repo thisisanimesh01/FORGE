@@ -1,7 +1,7 @@
 # Phase 6: Supervised Beta Packaging & Operational Readiness — Architecture & Roadmap
 
 - **Phase:** Phase 6 — Supervised Beta Packaging & Operational Readiness
-- **Status:** IN PROGRESS (Milestones 1–3 Complete)
+- **Status:** IN PROGRESS (Milestones 1–4 Complete)
 - **Target Repo Immutability:** STRICTLY ENFORCED (Zero automated mutation, zero commits, zero pushes, zero PRs)
 - **Traceability:** Implements Phase 6 specification and release gate per `AGENTS.md` (Sections 1, 2, 3, 4, 5, 7), synthesizing all findings from Supervised Pilots 01–08.
 
@@ -33,8 +33,8 @@ Phase 6 packages these capabilities into a predictable, auditable, and productio
 flowchart TD
     M1["M1: Beta Readiness Audit & Release Foundation"] --> M2["M2: Packaging, CLI Usability & Distribution"]
     M2 --> M3["M3: Operator Workflow Reliability & Recovery"]
-    M3 --> M4["M4: Operational Diagnostics & Live Environment Validation (NEXT)"]
-    M4 --> M5["M5: Security Hardening, Attestation & Release Gate"]
+    M3 --> M4["M4: Operational Diagnostics & Live Environment Validation"]
+    M4 --> M5["M5: Security Hardening, Attestation & Release Gate (NEXT)"]
     M5 --> M6["M6: Supervised Beta Release Candidate & Verification"]
 ```
 
@@ -73,14 +73,20 @@ flowchart TD
   - Dedicated M3 Specification (`docs/specs/phase-6-m3-workflow-reliability-recovery.md`).
   - Full regression verification (970 passed, 3 skipped).
 
-### Milestone 4: Operational Diagnostics & Live Environment Validation (Planned)
-- **Objective:** Expand `forge doctor` and preflight verification for diverse host configurations.
-- **Scope:**
-  - Automatic detection of Docker socket variations (macOS, Linux systemd, rootless Docker).
-  - Ollama model inventory and GPU/CPU capability checks.
-  - Automatic recommendation of model quantization based on available host RAM.
+### Milestone 4: Operational Diagnostics & Live Environment Validation (Completed)
+- **Objective:** Validate FORGE as an installed application, hardening diagnostics, verifying live dependencies, and proving robust environment failure handling.
+- **Deliverables:**
+  - Comprehensive operational diagnostics engine (`app/forge/diagnostics.py`) auditing Python runtime, Git, SQLite schema, Docker container runtime, and LLM inference providers.
+  - Deterministic failure classification badges (`[OK]`, `[OPTIONAL]`, `[MISCONFIGURED]`, `[UNAVAILABLE]`, `[PERMISSION DENIED]`, `[CONNECTION FAILED]`, `[UNSUPPORTED]`, `[UNSAFE]`) with actionable remediation guidance.
+  - Tiered operational readiness evaluation (`FULLY_READY`, `READY_FOR_STATIC_INSPECTION_ONLY`, `NOT_READY`), preventing false readiness claims when runtime dependencies fail.
+  - Dedicated CLI diagnostics commands: `forge doctor` (system composite), `forge sandbox doctor` (container/socket/caching), and `forge provider doctor` (LLM connectivity/model inventory).
+  - Real Docker Desktop daemon integration validation (`tests/integration/test_docker_sandbox_integration.py`).
+  - Live local Ollama inference validation (`tests/integration/test_ollama_live_validation.py`) with `qwen2.5-coder:1.5b`.
+  - Installed-beta verification using standalone wheel distribution in clean external environment (`/tmp/forge_m4_installed_test`).
+  - Dedicated M4 Specification (`docs/specs/phase-6-m4-operational-diagnostics-validation.md`).
+  - Full regression verification (998 passed, 6 skipped).
 
-### Milestone 5: Security Hardening, Attestation & Release Gate (Planned)
+### Milestone 5: Security Hardening, Attestation & Release Gate (NEXT)
 - **Objective:** Finalize supply chain security, dependency auditing, and release provenance.
 - **Scope:**
   - Automated dependency vulnerability scanning (`pip-audit` / safety).

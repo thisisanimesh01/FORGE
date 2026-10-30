@@ -75,30 +75,97 @@ cp .env.example .env
 forge db init
 ```
 
-Run the system diagnostics tool to verify environment readiness:
+### System Health Diagnostic (`forge doctor`)
+Run the unified system health diagnostic to verify dependencies across all execution tiers:
 ```bash
 forge doctor
 ```
 
-Sample expected output:
+Sample output when dependencies are healthy:
 ```
 FORGE System Health Diagnostic
 ------------------------------
-Python Version: 3.13.x (/path/to/venv/bin/python)
+Python Version: 3.13.6 (/path/to/venv/bin/python)
   [OK] Static repository inspection: available
-  [OK] Git executable found: /usr/bin/git
+  [OK] Git executable found: /usr/bin/git (git version 2.50.1)
   [OK] Sandbox interface: available (fail-secure policy active)
-  [OK] Docker runtime: Docker daemon reachable (Version: 29.9.2, Image: python:3.11-slim)
+  [OK] Docker runtime: Docker daemon reachable (Version: 29.9.2, Image: python:3.11-slim cached locally)
   [OK] SQLite target path: /path/to/FORGE/forge.sqlite3
-  [OK] Database file exists (630784 bytes)
+  [OK] Database file exists (249856 bytes, Schema Version: 2)
   [OK] Secret redaction active (Provider: ollama)
   [OK] LLM Provider 'ollama' credentials: configured
+         Status: Ollama server reachable at http://localhost:11434 (Model 'qwen2.5-coder:1.5b' verified in local inventory).
          Model: qwen2.5-coder:1.5b
          API Base: http://localhost:11434
          Network required: no (local)
          Cloud fallback: DISABLED (policy enforced)
-System is ready for Supervised Beta operations.
+
+Supervised Beta Operational Readiness
+-------------------------------------
+  Static Inspection: [READY]
+  Docker Sandboxing: [READY]
+  Local Inference:   [READY]
+  Overall Status:    [FULLY_READY]
+  System is fully ready for live Supervised Beta operations.
 ```
+
+If Docker is not running or socket permissions are restricted, FORGE reports:
+```
+Supervised Beta Operational Readiness
+-------------------------------------
+  Static Inspection: [READY]
+  Docker Sandboxing: [NOT READY - SKIPPED]
+  Local Inference:   [READY]
+  Overall Status:    [READY_FOR_STATIC_INSPECTION_ONLY]
+  System is ready for static repository inspection ONLY. Live execution capabilities disabled (Docker container execution unavailable). FORGE fail-secure policy is active (host execution strictly refused).
+```
+
+### Sandbox Diagnostics & Troubleshooting (`forge sandbox doctor`)
+Inspect container isolation policies, daemon connectivity, and local image caching:
+```bash
+forge sandbox doctor
+```
+
+Output:
+```
+FORGE Sandbox Diagnostics
+-------------------------
+Configured image: python:3.11-slim
+Network policy:   disabled (enforced --network none)
+Filesystem:       read-only workspace mount with isolated 64MB tmpfs
+Process user:     1000:1000 (non-root)
+Privileges:       no-new-privileges, cap-drop ALL
+Runtime Status:   [AVAILABLE] Docker daemon reachable (Version: 29.9.2, Image: python:3.11-slim cached locally)
+Security notice:  FORGE strictly refuses to run repository code directly on host.
+```
+
+**Common Sandbox Troubleshooting:**
+- **Docker socket permission denied on macOS (`~/.docker/run/docker.sock`):** Ensure Docker Desktop is active and "Allow the default Docker socket to be used" is enabled in Docker Desktop Settings > Advanced.
+- **Docker socket permission denied on Linux (`/var/run/docker.sock`):** Add your user to the docker group: `sudo usermod -aG docker $USER`.
+- **Image not cached locally:** Pull the required image before running sandboxed workflows: `docker pull python:3.11-slim`.
+
+### LLM Provider Diagnostics (`forge provider doctor`)
+Validate provider endpoint availability, local model presence, and safety invariants:
+```bash
+forge provider doctor
+```
+
+Output:
+```
+FORGE LLM Provider Diagnostics
+------------------------------
+Configured Provider: ollama
+Configured Model:    qwen2.5-coder:1.5b
+API Endpoint Base:   http://localhost:11434
+Network Required:    no (local)
+Cloud Fallback:      DISABLED (enforced)
+Status:              [OK] Ollama server reachable at http://localhost:11434 (Model 'qwen2.5-coder:1.5b' verified in local inventory).
+```
+
+**Common Provider Troubleshooting:**
+- **Connection refused:** Start the local Ollama server: `ollama serve`.
+- **Model not in inventory (`[MISCONFIGURED]`):** Pull the configured coding model: `ollama pull qwen2.5-coder:1.5b`.
+- **Unsafe cloud fallback (`[UNSAFE]`):** Cloud fallback is forbidden. Ensure `FORGE_ALLOW_CLOUD_FALLBACK=false` in your `.env`.
 
 ---
 

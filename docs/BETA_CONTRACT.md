@@ -99,3 +99,8 @@ Based on empirical evidence across Supervised Pilots 01 through 08 using local O
 - **Evidence Immutability:** Evidence records are cryptographically hashed (SHA-256) and cannot be altered post-creation.
 - **Revision Drift Interception:** Workflows are pinned to base commit SHAs. Any unexpected shift in target repository HEAD aborts the workflow with `RevisionDriftError`.
 - **Fail-Closed Diagnostics:** Every rejection produces structured, secret-scrubbed diagnostics explaining the exact policy, AST, or runtime check violation.
+
+### 6.1 Operational Diagnostics & Tiered Readiness Invariant
+- **Categorized Health Auditing:** System dependencies are audited through deterministic categories (`AVAILABLE_HEALTHY`, `MISSING_OPTIONAL`, `MISCONFIGURED_ENV`, `UNAVAILABLE_REQUIRED`, `PERMISSION_DENIED`, `NETWORK_FAILURE`, `UNSUPPORTED_RUNTIME`, `UNSAFE_CONFIGURATION`).
+- **Zero False Readiness:** FORGE strictly refuses to report the system as ready when mandatory runtime dependencies fail. If the Docker daemon is unreachable or socket permissions are restricted, FORGE downgrades readiness to `READY_FOR_STATIC_INSPECTION_ONLY` and halts live reproduction attempts.
+- **Dedicated Diagnostic CLI:** Operators verify dependency health using `forge doctor` (composite), `forge sandbox doctor` (Docker/isolation), and `forge provider doctor` (Ollama/model inventory).

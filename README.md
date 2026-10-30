@@ -34,8 +34,23 @@ Deterministic Edit Anchoring & Source-Grounded Repair ── [COMPLETED]
 Repair Reliability & Generalization ── [COMPLETED]
 Candidate Semantic Verification Hardening ── [COMPLETED]
 Deterministic Repair Construction Architecture ── [COMPLETED]
-Phase 6: Supervised Beta Packaging & Operational Readiness ── [IN PROGRESS] (Milestones 1–3 Complete)
+Phase 6: Supervised Beta Packaging & Operational Readiness ── [IN PROGRESS] (Milestones 1–4 Complete)
 ```
+
+### Phase 6, Milestone 4: Operational Diagnostics & Live Environment Validation (Completed)
+- **Objective & Scope**: Validate FORGE as an installed application, hardening diagnostics, verifying live dependencies and execution boundaries, and demonstrating that an operator can identify and resolve environment problems safely without false readiness claims or security regressions.
+- **Architectural Deliverables**:
+  - *Comprehensive Operational Diagnostics Engine ([`app/forge/diagnostics.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/diagnostics.py))*: Engineered structured audit probes for Python runtime version (>=3.11), Git executable availability, SQLite schema and file lock status, Docker daemon connectivity and container image caching, and LLM provider endpoint/credential configuration.
+  - *Standardized Failure Classification & Badges*: Implemented deterministic `DiagnosticCategory` badges: `[OK]`, `[OPTIONAL]`, `[MISCONFIGURED]`, `[UNAVAILABLE]`, `[PERMISSION DENIED]`, `[CONNECTION FAILED]`, `[UNSUPPORTED]`, and `[UNSAFE]`, accompanied by copy-pasteable remediation guidance.
+  - *Honest Tiered Readiness Evaluation*: Implemented `evaluate_system_readiness()`, categorizing operational capacity across Static Inspection, Docker Sandboxing, and Local Inference. When Docker is unavailable or permission-denied, system strictly downgrades to `[READY_FOR_STATIC_INSPECTION_ONLY]` rather than claiming full operational readiness.
+  - *Dedicated CLI Diagnostic Subcommands*:
+    - `forge doctor`: Composite system diagnostic auditing all runtime dependencies and displaying operational readiness tiers.
+    - `forge sandbox doctor`: Container runtime diagnostic detailing isolation policies, macOS/Linux socket connectivity, and local image availability.
+    - `forge provider doctor`: LLM provider diagnostic querying local Ollama `/api/tags`, verifying local model weights (`qwen2.5-coder:1.5b`), and enforcing forbidden cloud fallback.
+  - *Live Docker Daemon & Local Ollama Validation*: Verified live Docker Desktop (29.9.2) container isolation properties (`tests/integration/test_docker_sandbox_integration.py`) and live local Ollama model completion (`tests/integration/test_ollama_live_validation.py`).
+  - *Clean Installed-Beta Distribution Verification*: Rebuilt wheel distribution (`dist/forge_core-0.1.0b1-py3-none-any.whl`) and verified execution in clean external virtual environment (`/tmp/forge_m4_installed_test`).
+  - *Milestone Specification ([`docs/specs/phase-6-m4-operational-diagnostics-validation.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-6-m4-operational-diagnostics-validation.md))*: Dedicated architecture specification, diagnostic taxonomy, and verification records.
+  - *Full Regression Verification*: 28 unit tests in `tests/unit/test_phase6_milestone4.py` and 998 tests across full pytest suite passing with zero regressions.
 
 ### Phase 6, Milestone 3: Operator Workflow Reliability & Recovery (Completed)
 - **Objective & Scope**: Harden FORGE's supervised operator workflow lifecycle against interruptions and failures, ensure idempotent recovery without loss of evidence or state corruption, unify CLI inspection experiences, and enforce human decision integrity.

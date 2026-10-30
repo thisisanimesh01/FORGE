@@ -45,6 +45,16 @@ This document provides transparent, evidence-backed disclosure of observed capab
 - **Engine Protection:** FORGE detects missing tools and records `tool_available: False` without mislabeling environment limitations as code regressions.
 - **Operator Mitigation:** Ensure the configured container image (`FORGE_DOCKER_IMAGE`) includes the required testing framework for the target repository.
 
+### Issue 4: Docker Desktop macOS Socket Access & Permissions
+- **Description:** On macOS with Docker Desktop, sandboxed applications or subshells may lack permission to access `/Users/<user>/.docker/run/docker.sock`, causing Docker connectivity checks to fail with `permission denied`.
+- **Engine Protection:** `forge doctor` and `forge sandbox doctor` catch permission errors deterministically, flagging `[PERMISSION DENIED]` and providing specific guidance rather than generic failure traces. FORGE safely falls back to `READY_FOR_STATIC_INSPECTION_ONLY` without executing target code on the host.
+- **Operator Mitigation:** Ensure Docker Desktop is active and verify that "Allow the default Docker socket to be used" is enabled in Docker Desktop > Settings > Advanced.
+
+### Issue 5: Local Ollama Endpoint Disconnect or Unpulled Model Weights
+- **Description:** If the Ollama server is stopped (`Connection refused`) or the requested model is not downloaded locally, workflows requesting repair planning fail during inference.
+- **Engine Protection:** `forge provider doctor` queries `http://localhost:11434/api/tags` directly, audits the local model inventory, and returns `[MISCONFIGURED]` with the exact `ollama pull <model>` command required. Automatic cloud fallback is strictly blocked.
+- **Operator Mitigation:** Run `forge provider doctor` before starting repair workflows to verify local model availability.
+
 ---
 
 ## 4. Operator Best Practices

@@ -17,8 +17,11 @@ app = typer.Typer(
 
 # Sub-command groups
 db_app = typer.Typer(help="Database management commands.")
+# Sub-command groups
+db_app = typer.Typer(help="Database management commands.")
 findings_app = typer.Typer(help="Finding inspection commands.")
 sandbox_app = typer.Typer(help="Sandbox diagnostics and execution commands.")
+provider_app = typer.Typer(help="LLM provider diagnostics and configuration checks.")
 benchmark_app = typer.Typer(help="Benchmark evaluation commands.")
 policy_app = typer.Typer(help="CI review policy check and enforcement commands.")
 repro_app = typer.Typer(help="Reproduction case management and execution commands.")
@@ -34,6 +37,7 @@ eng_workflow_app.add_typer(workflow_context_app, name="context")
 app.add_typer(db_app, name="db")
 app.add_typer(findings_app, name="findings")
 app.add_typer(sandbox_app, name="sandbox")
+app.add_typer(provider_app, name="provider")
 app.add_typer(benchmark_app, name="benchmark")
 app.add_typer(policy_app, name="policy")
 app.add_typer(repro_app, name="repro")
@@ -52,7 +56,11 @@ def version() -> None:
 @app.command()
 def doctor() -> None:
     """Diagnose local environment, dependencies, and sandbox availability."""
-    from forge.sandbox.docker import DockerSandbox
+    from forge.diagnostics import run_system_diagnostics
+    from forge.llm.factory import describe_provider
+
+    settings = get_settings()
+    summary = run_system_diagnostics(settings)
 
     typer.echo("FORGE System Health Diagnostic")
     typer.echo("------------------------------")
@@ -62,51 +70,73 @@ def doctor() -> None:
     typer.echo("  [OK] Static repository inspection: available")
 
     # Git check
-    git_path = shutil.which("git")
-    if git_path:
-        typer.echo(f"  [OK] Git executable found: {git_path}")
+    git_check = next((c for c in summary.checks if c.name == "Git Executable"), None)
+    if git_check and git_check.is_healthy:
+        typer.echo(f"  [OK] {git_check.message}")
     else:
-        typer.echo("  [FAIL] Git executable not found in PATH")
+        msg = git_check.message if git_check else "Git executable not found in PATH"
+        typer.echo(f"  [FAIL] {msg}")
 
     # Sandbox interface check
     typer.echo("  [OK] Sandbox interface: available (fail-secure policy active)")
 
     # Docker sandbox runtime check
-    sandbox = DockerSandbox()
-    is_healthy, health_msg = sandbox.check_health()
-    if is_healthy:
-        typer.echo(f"  [OK] Docker runtime: {health_msg}")
+    docker_check = next((c for c in summary.checks if c.name == "Docker Sandbox Runtime"), None)
+    if docker_check and docker_check.is_healthy:
+        typer.echo(f"  [OK] Docker runtime: {docker_check.message}")
     else:
-        typer.echo(f"  [WARN] Docker runtime unavailable: {health_msg}")
+        msg = docker_check.message if docker_check else "Docker runtime unavailable"
+        typer.echo(f"  [WARN] Docker runtime unavailable: {msg}")
+        if docker_check and docker_check.actionable_remediation:
+            typer.echo(f"         Remediation: {docker_check.actionable_remediation}")
         typer.echo("         Runtime check sandboxing will fall back to safe skip mode (host execution is refused).")
 
     # SQLite check
-    settings = get_settings()
     typer.echo(f"  [OK] SQLite target path: {settings.db_path.resolve()}")
-
-    # Database status
-    db_file = settings.db_path.resolve()
-    if db_file.exists():
-        typer.echo(f"  [OK] Database file exists ({db_file.stat().st_size} bytes)")
-    else:
-        typer.echo("  [INFO] Database not yet initialized (run 'forge db init')")
+    db_check = next((c for c in summary.checks if c.name == "SQLite Database"), None)
+    if db_check and db_check.is_healthy:
+        if db_check.details.get("initialized") is False:
+            typer.echo("  [INFO] Database not yet initialized (run 'forge db init')")
+        else:
+            typer.echo(f"  [OK] {db_check.message}")
+    elif db_check:
+        typer.echo(f"  {db_check.category.label} {db_check.message}")
+        if db_check.actionable_remediation:
+            typer.echo(f"         Remediation: {db_check.actionable_remediation}")
 
     # Provider diagnostics
-    from forge.llm.factory import describe_provider
     provider_info = describe_provider()
     provider_name = provider_info["provider"]
     creds_ok = provider_info["credentials_configured"]
     typer.echo(f"  [OK] Secret redaction active (Provider: {provider_name})")
-    if creds_ok:
+
+    provider_check = next((c for c in summary.checks if c.name.startswith("LLM Provider")), None)
+    if provider_check and provider_check.is_healthy:
+        typer.echo(f"  [OK] LLM Provider '{provider_name}' credentials: configured")
+        typer.echo(f"         Status: {provider_check.message}")
+    elif provider_check:
+        typer.echo(f"  {provider_check.category.label} LLM Provider '{provider_name}': {provider_check.message}")
+        if provider_check.actionable_remediation:
+            typer.echo(f"         Remediation: {provider_check.actionable_remediation}")
+    elif creds_ok:
         typer.echo(f"  [OK] LLM Provider '{provider_name}' credentials: configured")
     else:
         typer.echo(f"  [WARN] LLM Provider '{provider_name}' credentials: NOT configured (set the required API key)")
+
     typer.echo(f"         Model: {provider_info['model'] or '(using provider default)'}")
     typer.echo(f"         API Base: {provider_info['api_base']}")
     typer.echo(f"         Network required: {'yes' if provider_info['requires_network'] else 'no (local)'}")
     typer.echo(f"         Cloud fallback: DISABLED (policy enforced)")
-    typer.echo("System is ready for Supervised Beta operations.")
 
+    # Overall Supervised Beta Readiness
+    typer.echo("")
+    typer.echo("Supervised Beta Operational Readiness")
+    typer.echo("-------------------------------------")
+    typer.echo(f"  Static Inspection: {'[READY]' if summary.static_inspection_ready else '[NOT READY]'}")
+    typer.echo(f"  Docker Sandboxing: {'[READY]' if summary.live_execution_ready else '[NOT READY - SKIPPED]'}")
+    typer.echo(f"  Local Inference:   {'[READY]' if summary.local_inference_ready else '[NOT READY]'}")
+    typer.echo(f"  Overall Status:    [{summary.overall_status}]")
+    typer.echo(f"  {summary.summary_message}")
 
 
 # --- Sandbox commands ---
@@ -114,7 +144,7 @@ def doctor() -> None:
 @sandbox_app.command(name="doctor")
 def sandbox_doctor() -> None:
     """Diagnose sandbox runtime health, image availability, and isolation boundaries."""
-    from forge.sandbox.docker import DockerSandbox
+    from forge.diagnostics import check_docker_environment
     settings = get_settings()
 
     typer.echo("FORGE Sandbox Diagnostics")
@@ -125,14 +155,42 @@ def sandbox_doctor() -> None:
     typer.echo(f"Process user:     1000:1000 (non-root)")
     typer.echo(f"Privileges:       no-new-privileges, cap-drop ALL")
 
-    sandbox = DockerSandbox()
-    healthy, msg = sandbox.check_health()
-    if healthy:
-        typer.secho(f"Runtime Status:   [AVAILABLE] {msg}", fg=typer.colors.GREEN)
+    check = check_docker_environment(settings.docker_image)
+    if check.is_healthy:
+        typer.secho(f"Runtime Status:   [AVAILABLE] {check.message}", fg=typer.colors.GREEN)
     else:
-        typer.secho(f"Runtime Status:   [UNAVAILABLE] {msg}", fg=typer.colors.YELLOW)
-        typer.echo("Actionable guidance: To enable isolated test/benchmark execution, start Docker.")
+        typer.secho(f"Runtime Status:   [UNAVAILABLE] {check.message}", fg=typer.colors.YELLOW)
+        guidance = check.actionable_remediation or "To enable isolated test/benchmark execution, start Docker."
+        typer.echo(f"Actionable guidance: {guidance}")
     typer.echo("Security notice:     FORGE strictly refuses to run repository code directly on host.")
+
+
+# --- Provider commands ---
+
+@provider_app.command(name="doctor")
+def provider_doctor() -> None:
+    """Diagnose LLM provider connectivity, credentials, and local model availability."""
+    from forge.diagnostics import check_llm_provider
+    from forge.llm.factory import describe_provider
+
+    settings = get_settings()
+    info = describe_provider()
+    check = check_llm_provider(settings)
+
+    typer.echo("FORGE LLM Provider Diagnostics")
+    typer.echo("------------------------------")
+    typer.echo(f"Configured Provider: {info['provider']}")
+    typer.echo(f"Configured Model:    {info['model'] or '(provider default)'}")
+    typer.echo(f"API Endpoint Base:   {info['api_base']}")
+    typer.echo(f"Network Required:    {'yes' if info['requires_network'] else 'no (local)'}")
+    typer.echo(f"Cloud Fallback:      {'ENABLED (UNSAFE)' if settings.allow_cloud_fallback else 'DISABLED (enforced)'}")
+
+    if check.is_healthy:
+        typer.secho(f"Status:              {check.category.label} {check.message}", fg=typer.colors.GREEN)
+    else:
+        typer.secho(f"Status:              {check.category.label} {check.message}", fg=typer.colors.YELLOW)
+        if check.actionable_remediation:
+            typer.echo(f"Actionable Guidance: {check.actionable_remediation}")
 
 
 @sandbox_app.command(name="check")
