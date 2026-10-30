@@ -34,8 +34,25 @@ Deterministic Edit Anchoring & Source-Grounded Repair ── [COMPLETED]
 Repair Reliability & Generalization ── [COMPLETED]
 Candidate Semantic Verification Hardening ── [COMPLETED]
 Deterministic Repair Construction Architecture ── [COMPLETED]
-Phase 6: Supervised Beta Packaging & Operational Readiness ── [IN PROGRESS] (Milestones 1–4 Complete)
+Phase 6: Supervised Beta Packaging & Operational Readiness ── [IN PROGRESS] (Milestones 1–5 Complete)
 ```
+
+### Phase 6, Milestone 5: Security Hardening, Attestation & Release Gate (Completed)
+- **Objective & Scope**: Harden the FORGE software supply chain, dependency security posture, distribution artifact integrity, build provenance, and release verification gates for the supervised beta release (`0.1.0b1`).
+- **Architectural Deliverables**:
+  - *Comprehensive Threat Model & Security Audit ([`docs/SECURITY_THREAT_MODEL.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/SECURITY_THREAT_MODEL.md))*: Formalized threat model covering untrusted target repositories, malicious diffs, malicious LLM completions, Docker escapes, supply chain / dependency tampering, and unauthorized release distribution. Detailed concrete mitigations, fail-closed boundaries, and residual risks.
+  - *Dependency & Supply Chain Hardening*: Audited runtime dependencies using `pip-audit`, resolving all vulnerabilities (0 known CVEs across all installed runtime packages). Pinned dependencies in [`requirements/constraints.txt`](file:///Users/animeshyadav/Desktop/project/forge/requirements/constraints.txt) for deterministic builds.
+  - *Release Manifest & Cryptographic Integrity Engine ([`app/forge/release/manifest.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/release/manifest.py))*: Engineered `ReleaseArtifact` and `ReleaseManifest` schemas, computing SHA-256 digests, file sizes, build timestamps, and generating canonical `release_manifest.json` and standard `SHA256SUMS.txt`.
+  - *Forensic Archive Inspection ([`app/forge/release/verification.py`](file:///Users/animeshyadav/Desktop/project/forge/app/forge/release/verification.py))*: Enforced strict forensic cleanliness rules for wheel (`.whl`) and sdist (`.tar.gz`) archives—forbidding embedded secrets (`.env*` except `.env.example`), test fixtures, pilot runs, and local database files (`*.db`, `*.sqlite*`).
+  - *Release Verification CLI & Tooling*:
+    - `forge release verify`: CLI command validating archive checksums against manifests, matching PEP 440 versions, and running forensic archive scans.
+    - `forge release manifest`: CLI command to generate canonical manifests for built distribution artifacts.
+    - Standalone verification script ([`scripts/verify_release_artifacts.py`](file:///Users/animeshyadav/Desktop/project/forge/scripts/verify_release_artifacts.py)) requiring zero third-party dependencies.
+  - *Hardened GitHub Actions CI/CD Workflows*:
+    - [`.github/workflows/ci.yml`](file:///Users/animeshyadav/Desktop/project/forge/.github/workflows/ci.yml): Least-privilege `contents: read` permissions, StepSecurity harden-runner, commit-pinned action SHAs, bytecode compilation, dependency auditing via `pip-audit`, offline pytest execution, artifact packaging, and verification.
+    - [`.github/workflows/release-build.yml`](file:///Users/animeshyadav/Desktop/project/forge/.github/workflows/release-build.yml): Minimal permissions (`contents: read`, `id-token: write`, `attestations: write`), building wheel/sdist, generating SHA-256 manifests, and establishing SLSA build provenance attestations via `actions/attest-build-provenance@v2`.
+  - *Security & Provenance Documentation*: Updated [`docs/OPERATOR_GUIDE.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/OPERATOR_GUIDE.md) (release integrity & checksums), [`docs/BETA_CONTRACT.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/BETA_CONTRACT.md) (supply chain guarantees), [`docs/BETA_KNOWN_ISSUES.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/BETA_KNOWN_ISSUES.md) (reproducible build constraints), [`docs/specs/phase-6-roadmap.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-6-roadmap.md), and created dedicated milestone spec [`docs/specs/phase-6-m5-security-attestation-release-gate.md`](file:///Users/animeshyadav/Desktop/project/forge/docs/specs/phase-6-m5-security-attestation-release-gate.md).
+  - *Verification Suite*: 19 unit tests in `tests/unit/test_phase6_milestone5.py` and 1,017 tests across full test suite passing with zero regressions.
 
 ### Phase 6, Milestone 4: Operational Diagnostics & Live Environment Validation (Completed)
 - **Objective & Scope**: Validate FORGE as an installed application, hardening diagnostics, verifying live dependencies and execution boundaries, and demonstrating that an operator can identify and resolve environment problems safely without false readiness claims or security regressions.

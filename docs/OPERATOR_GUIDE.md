@@ -295,3 +295,47 @@ forge workflow export <WORKFLOW_ID> --out-dir ./dossiers
 ### Target Repository Modified Between Stages (Revision Drift)
 - If the target repository HEAD diverges from the finding's pinned `base_commit_sha`, FORGE intercepts this as `RevisionDriftError` and halts approval to protect evidence integrity.
 - To recover, ensure the target repository is at the pinned commit SHA before approving, or restart from intake if working against a new base revision.
+
+---
+
+## 6. Release Integrity, Checksums & Provenance Verification
+
+Operators downloading or distributing FORGE beta packages should verify their cryptographic integrity and provenance before installation.
+
+### 6.1 Verifying Artifacts via FORGE CLI
+When FORGE is already installed or available in a management environment:
+```bash
+# Verify wheel or sdist against adjacent SHA256SUMS.txt or release_manifest.json:
+forge release verify dist/forge_core-0.1.0b1-py3-none-any.whl
+
+# Or verify with explicit expected SHA-256 digest:
+forge release verify dist/forge_core-0.1.0b1-py3-none-any.whl \
+    --checksum cc06e5a3249e85a5a69007cb46ac59ca3b8a5f304cf2e84916eb10e4c952a23d
+
+# Export machine-readable verification report:
+forge release verify dist/forge_core-0.1.0b1-py3-none-any.whl --json
+```
+
+The verification command validates:
+1. **Cryptographic Checksum:** SHA-256 digest matches manifest records.
+2. **Package Version:** Version matches the runtime release baseline.
+3. **Forensic Cleanliness:** Archive contains zero forbidden files (`.env`, `.sqlite3`, `tests/fixtures/`, `forge_pilot_*`).
+
+### 6.2 Verifying Artifacts with Standalone Python Script
+On machines without FORGE installed, use the standalone verifier (standard library only):
+```bash
+python3 scripts/verify_release_artifacts.py dist/forge_core-0.1.0b1-py3-none-any.whl dist/forge_core-0.1.0b1.tar.gz
+```
+
+### 6.3 Verifying GitHub Actions Build Provenance (SLSA Standard)
+When downloading release artifacts built in GitHub Actions:
+```bash
+# Verify official build attestation via GitHub CLI:
+gh attestation verify dist/forge_core-0.1.0b1-py3-none-any.whl --owner thisisanimesh01
+```
+
+### 6.4 Auditing Dependencies for Known Vulnerabilities
+Audit pinned dependencies against the PyPA vulnerability database:
+```bash
+pip-audit -r requirements/constraints.txt
+```

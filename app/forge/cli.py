@@ -34,6 +34,7 @@ workflow_intake_app = typer.Typer(help="Workflow task intake and normalization c
 workflow_context_app = typer.Typer(help="Repository context assembly commands.")
 eng_workflow_app.add_typer(workflow_intake_app, name="intake")
 eng_workflow_app.add_typer(workflow_context_app, name="context")
+release_app = typer.Typer(help="Release artifact verification, manifest, and provenance commands.")
 app.add_typer(db_app, name="db")
 app.add_typer(findings_app, name="findings")
 app.add_typer(sandbox_app, name="sandbox")
@@ -44,6 +45,7 @@ app.add_typer(repro_app, name="repro")
 app.add_typer(plan_app, name="plan")
 app.add_typer(repair_app, name="repair")
 app.add_typer(eng_workflow_app, name="workflow")
+app.add_typer(release_app, name="release")
 
 
 
@@ -191,6 +193,121 @@ def provider_doctor() -> None:
         typer.secho(f"Status:              {check.category.label} {check.message}", fg=typer.colors.YELLOW)
         if check.actionable_remediation:
             typer.echo(f"Actionable Guidance: {check.actionable_remediation}")
+
+
+# --- Release & Artifact Integrity commands ---
+
+@release_app.command(name="verify")
+def release_verify(
+    artifact: str = typer.Argument(..., help="Path to .whl or .tar.gz distribution artifact to verify"),
+    checksum: Optional[str] = typer.Option(None, "--checksum", "-c", help="Expected SHA-256 digest hex string"),
+    checksums_file: Optional[str] = typer.Option(None, "--checksums-file", "-f", help="Path to SHA256SUMS.txt file"),
+    manifest: Optional[str] = typer.Option(None, "--manifest", "-m", help="Path to release_manifest.json file"),
+    json_output: bool = typer.Option(False, "--json", help="Output verification report as JSON"),
+) -> None:
+    """Cryptographically and forensically verify a release artifact."""
+    from forge.release.verification import verify_artifact
+
+    art_path = Path(artifact).resolve()
+    c_path = Path(checksums_file).resolve() if checksums_file else None
+    m_path = Path(manifest).resolve() if manifest else None
+
+    # Auto-detect manifest or checksums in same directory if not specified
+    if not checksum and not c_path and not m_path:
+        default_sums = art_path.parent / "SHA256SUMS.txt"
+        default_manifest = art_path.parent / "release_manifest.json"
+        if default_manifest.exists():
+            m_path = default_manifest
+        elif default_sums.exists():
+            c_path = default_sums
+
+    try:
+        report = verify_artifact(
+            artifact_path=art_path,
+            expected_sha256=checksum,
+            checksums_path=c_path,
+            manifest_path=m_path,
+        )
+    except Exception as e:
+        if json_output:
+            typer.echo(json.dumps({"error": str(e), "is_valid": False}))
+        else:
+            typer.secho(f"Verification error: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if json_output:
+        typer.echo(json.dumps(report.to_dict(), indent=2))
+        if not report.is_valid:
+            raise typer.Exit(code=1)
+        return
+
+    typer.echo("FORGE Release Artifact Verification")
+    typer.echo("-----------------------------------")
+    typer.echo(f"Artifact:          {report.artifact_name}")
+    typer.echo(f"Size:              {report.artifact_size:,} bytes")
+    typer.echo(f"Calculated SHA256: {report.calculated_sha256}")
+    typer.echo(f"Expected SHA256:   {report.expected_sha256 or 'N/A'}")
+    if report.manifest_commit_sha:
+        typer.echo(f"Source Commit:     {report.manifest_commit_sha}")
+
+    if report.checksum_verified:
+        typer.secho("  [OK] Cryptographic Checksum: MATCHED", fg=typer.colors.GREEN)
+    else:
+        typer.secho("  [FAIL] Cryptographic Checksum: MISMATCH or UNVERIFIED", fg=typer.colors.RED)
+
+    if report.version_matched:
+        typer.secho("  [OK] Package Version: ALIGNED", fg=typer.colors.GREEN)
+    else:
+        typer.secho("  [FAIL] Package Version: MISMATCH", fg=typer.colors.RED)
+
+    if report.forensic_clean:
+        typer.secho("  [OK] Forensic Cleanliness: CLEAN (0 forbidden files)", fg=typer.colors.GREEN)
+    else:
+        typer.secho(f"  [FAIL] Forensic Cleanliness: VIOLATIONS DETECTED ({len(report.forbidden_matches)} forbidden files)", fg=typer.colors.RED)
+        for viol in report.forbidden_matches[:5]:
+            typer.secho(f"         - {viol}", fg=typer.colors.RED)
+
+    typer.echo("")
+    if report.is_valid:
+        typer.secho(f"Result: [PASS] {report.message}", fg=typer.colors.GREEN)
+    else:
+        typer.secho(f"Result: [FAIL] {report.message}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@release_app.command(name="manifest")
+def release_manifest_cmd(
+    dist_dir: str = typer.Argument("dist", help="Directory containing release artifacts (.whl, .tar.gz)"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output path for release_manifest.json"),
+    write_sums: bool = typer.Option(True, "--write-sums/--no-write-sums", help="Write SHA256SUMS.txt alongside manifest"),
+) -> None:
+    """Generate cryptographic manifest and checksums for built release artifacts."""
+    from forge.release.manifest import generate_release_manifest, write_checksums_file
+
+    dir_path = Path(dist_dir).resolve()
+    if not dir_path.exists():
+        typer.secho(f"Directory not found: {dir_path}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        manifest_obj = generate_release_manifest(dir_path)
+    except Exception as e:
+        typer.secho(f"Failed generating manifest: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    out_file = Path(output).resolve() if output else dir_path / "release_manifest.json"
+    out_file.write_text(manifest_obj.to_json(), encoding="utf-8")
+    typer.secho(f"Wrote release manifest to {out_file}", fg=typer.colors.GREEN)
+
+    if write_sums:
+        sums_file = dir_path / "SHA256SUMS.txt"
+        write_checksums_file(manifest_obj, sums_file)
+        typer.secho(f"Wrote checksums to {sums_file}", fg=typer.colors.GREEN)
+
+    typer.echo(f"\nManifest Summary (Version: {manifest_obj.version}, Commit: {manifest_obj.source_commit_sha[:8]}):")
+    for art in manifest_obj.artifacts:
+        typer.echo(f"  - {art.filename} ({art.size_bytes:,} bytes, {art.file_count} files)")
+        typer.echo(f"    SHA-256: {art.sha256}")
 
 
 @sandbox_app.command(name="check")

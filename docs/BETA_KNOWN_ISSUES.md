@@ -55,6 +55,11 @@ This document provides transparent, evidence-backed disclosure of observed capab
 - **Engine Protection:** `forge provider doctor` queries `http://localhost:11434/api/tags` directly, audits the local model inventory, and returns `[MISCONFIGURED]` with the exact `ollama pull <model>` command required. Automatic cloud fallback is strictly blocked.
 - **Operator Mitigation:** Run `forge provider doctor` before starting repair workflows to verify local model availability.
 
+### Issue 6: Cross-Platform Byte-for-Byte Bitstream Reproducibility
+- **Description:** Due to ZIP and tar archive header timestamps (mtime) and filesystem inode ordering variations across macOS, Linux, and Windows build environments, rebuilding wheel or sdist packages on different host machines may result in different SHA-256 binary bitstreams despite identical member files and source code.
+- **Engine Protection:** FORGE enforces strict structural and forensic determinism (identical member list, identical file sizes, zero leaked files), publishes authoritative cryptographic manifests (`release_manifest.json`), and provides SLSA build provenance attestations through GitHub Actions rather than falsely claiming byte-for-byte binary bitstream reproducibility.
+- **Operator Mitigation:** Verify downloaded release artifacts against the official `release_manifest.json` or `SHA256SUMS.txt` published with the release, or verify via GitHub CLI (`gh attestation verify`).
+
 ---
 
 ## 4. Operator Best Practices

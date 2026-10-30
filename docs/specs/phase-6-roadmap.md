@@ -1,7 +1,7 @@
 # Phase 6: Supervised Beta Packaging & Operational Readiness — Architecture & Roadmap
 
 - **Phase:** Phase 6 — Supervised Beta Packaging & Operational Readiness
-- **Status:** IN PROGRESS (Milestones 1–4 Complete)
+- **Status:** IN PROGRESS (Milestones 1–5 Complete)
 - **Target Repo Immutability:** STRICTLY ENFORCED (Zero automated mutation, zero commits, zero pushes, zero PRs)
 - **Traceability:** Implements Phase 6 specification and release gate per `AGENTS.md` (Sections 1, 2, 3, 4, 5, 7), synthesizing all findings from Supervised Pilots 01–08.
 
@@ -34,8 +34,8 @@ flowchart TD
     M1["M1: Beta Readiness Audit & Release Foundation"] --> M2["M2: Packaging, CLI Usability & Distribution"]
     M2 --> M3["M3: Operator Workflow Reliability & Recovery"]
     M3 --> M4["M4: Operational Diagnostics & Live Environment Validation"]
-    M4 --> M5["M5: Security Hardening, Attestation & Release Gate (NEXT)"]
-    M5 --> M6["M6: Supervised Beta Release Candidate & Verification"]
+    M4 --> M5["M5: Security Hardening, Attestation & Release Gate"]
+    M5 --> M6["M6: Supervised Beta Release Candidate & Verification (NEXT)"]
 ```
 
 ### Milestone 1: Beta Readiness Audit & Release Foundation (Completed)
@@ -86,14 +86,20 @@ flowchart TD
   - Dedicated M4 Specification (`docs/specs/phase-6-m4-operational-diagnostics-validation.md`).
   - Full regression verification (998 passed, 6 skipped).
 
-### Milestone 5: Security Hardening, Attestation & Release Gate (NEXT)
-- **Objective:** Finalize supply chain security, dependency auditing, and release provenance.
-- **Scope:**
-  - Automated dependency vulnerability scanning (`pip-audit` / safety).
-  - Cryptographic artifact checksums and SBOM generation.
-  - Release security review checklist.
+### Milestone 5: Security Hardening, Attestation & Release Gate (Completed)
+- **Objective:** Establish the software supply chain security, dependency auditing, artifact integrity, provenance, and release verification gates for the beta.
+- **Deliverables:**
+  - Comprehensive Security Threat Model and audit document (`docs/SECURITY_THREAT_MODEL.md`) analyzing complete beta attack surface, mitigations, and residual risks.
+  - Dependency vulnerability audit with `pip-audit` verifying zero known CVEs across all installed runtime and transitive dependencies.
+  - Strict dependency pinning in `requirements/constraints.txt` for deterministic and reproducible builds.
+  - Release manifest schema and generator (`app/forge/release/manifest.py`) producing `release_manifest.json` and standard `SHA256SUMS.txt`.
+  - Forensic archive scanning and cryptographic verification engine (`app/forge/release/verification.py`) guaranteeing zero leakage of secrets, databases, or test fixtures.
+  - Dedicated CLI release verification command (`forge release verify`) and standalone operator script (`scripts/verify_release_artifacts.py`).
+  - Hardened GitHub Actions CI/CD workflows (`.github/workflows/ci.yml` and `.github/workflows/release-build.yml`) with minimal permissions, pinned action commit SHAs, and SLSA build provenance attestation (`actions/attest-build-provenance@v2`).
+  - Dedicated M5 Specification (`docs/specs/phase-6-m5-security-attestation-release-gate.md`).
+  - 19 targeted security tests in `tests/unit/test_phase6_milestone5.py` and full regression test suite passing.
 
-### Milestone 6: Supervised Beta Release Candidate & Operational Verification (Planned)
+### Milestone 6: Supervised Beta Release Candidate & Operational Verification (NEXT)
 - **Objective:** End-to-end acceptance testing of the packaged beta across real-world Python repositories under operator supervision.
 - **Scope:**
   - Full acceptance test suite across clean virtual environments.

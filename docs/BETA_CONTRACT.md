@@ -104,3 +104,13 @@ Based on empirical evidence across Supervised Pilots 01 through 08 using local O
 - **Categorized Health Auditing:** System dependencies are audited through deterministic categories (`AVAILABLE_HEALTHY`, `MISSING_OPTIONAL`, `MISCONFIGURED_ENV`, `UNAVAILABLE_REQUIRED`, `PERMISSION_DENIED`, `NETWORK_FAILURE`, `UNSUPPORTED_RUNTIME`, `UNSAFE_CONFIGURATION`).
 - **Zero False Readiness:** FORGE strictly refuses to report the system as ready when mandatory runtime dependencies fail. If the Docker daemon is unreachable or socket permissions are restricted, FORGE downgrades readiness to `READY_FOR_STATIC_INSPECTION_ONLY` and halts live reproduction attempts.
 - **Dedicated Diagnostic CLI:** Operators verify dependency health using `forge doctor` (composite), `forge sandbox doctor` (Docker/isolation), and `forge provider doctor` (Ollama/model inventory).
+
+---
+
+## 7. Supply Chain Security, Provenance & Release Integrity
+
+### Invariant 6: Cryptographic Artifact Verification & Forensic Cleanliness
+- **Digest Matching:** Every official FORGE distribution package (.whl and .tar.gz) is cryptographically indexed in `release_manifest.json` and `SHA256SUMS.txt`. Operators must verify SHA-256 digests prior to execution using `forge release verify` or `scripts/verify_release_artifacts.py`.
+- **Zero Sensitive Data Leakage:** Distribution packages are forensically scanned to guarantee 100% exclusion of environment files (`.env`), SQLite databases (`*.db`, `*.sqlite3`), test fixtures, pilot directories, and internal caches.
+- **Distinction Between Integrity & Authenticity:** Checksums prove that an artifact has not been modified or corrupted since manifest creation (integrity). Cryptographic attestation (`gh attestation verify`) proves that the artifact was built from the official GitHub Actions workflow and repository source commit (authenticity).
+- **Pinned Dependencies & Zero Known Vulnerabilities:** Production installations must adhere to `requirements/constraints.txt`. All dependencies are audited against the PyPA vulnerability database (`pip-audit`) with zero tolerated CVEs.
