@@ -136,6 +136,8 @@ class EventType(str, Enum):
     TOOL_CALL_COMPLETED = "tool_call_completed"
     EVIDENCE_RECORDED = "evidence_recorded"
     FINDING_CREATED = "finding_created"
+    FINDING_DUPLICATE_DETECTED = "finding_duplicate_detected"
+    FINDING_VALIDATION_FAILED = "finding_validation_failed"
     FINDING_STATE_TRANSITIONED = "finding_state_transitioned"
     VERIFICATION_PASSED = "verification_passed"
     VERIFICATION_FAILED = "verification_failed"

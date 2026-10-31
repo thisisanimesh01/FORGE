@@ -295,7 +295,13 @@ FORGE supports multi-tier tool invocation formats across local and cloud LLM pro
 #### Finding Creation & Independent Evidence Verification
 When the model identifies a defect, it invokes the authorized `record_finding` tool:
 - **Server-Side Extraction:** FORGE never trusts model-supplied source code. The orchestrator independently verifies directory containment, reads actual lines directly from the workspace on disk, and computes an SHA-256 integrity digest (`content_digest`).
-- **Suspected Lifecycle State:** Newly recorded findings enter the `suspected` state (`FindingLifecycleState.SUSPECTED`). Transition to `verified` requires isolated execution evidence.
+- **Deterministic Claim Validation:** Before persisting a finding, the engine runs deterministic validation:
+  - *Static Python Syntax Parsing:* If a finding alleges a syntax error (e.g. missing colon, unexpected token), the engine parses the target Python file via in-memory `ast.parse`. If the file has valid syntax, false-positive syntax claims are deterministically rejected.
+  - *Category Consistency:* Validates that the declared defect category, title, description, and source context are internally consistent (e.g. rejecting loop defect classifications on non-loop dictionary entries).
+  - *Context Relevance:* Rejects empty/whitespace excerpts and ensures cited lines have context relevant to the claimed defect.
+- **Auditable Deduplication:** Overlapping line ranges with matching defect categories or high textual similarity are deduplicated. Identical duplicates are prevented from creating redundant finding records; non-identical evidence is linked to existing findings. All deduplication actions are recorded in the run event ledger.
+- **What Validation Establishes vs Cannot Establish:** The validator can deterministically prove or disprove syntax and parse claims, and enforce category consistency. It cannot prove semantic correctness or disprove subtle logic bugs without dynamic execution. Semantic findings are preserved in `suspected` state with explicit uncertainty notes.
+- **Suspected Lifecycle State:** Newly recorded findings enter the `suspected` state (`FindingLifecycleState.SUSPECTED`). Transition to `reproduced` or `verified` strictly requires isolated execution evidence.
 - **Inspect Recorded Findings:**
   ```bash
   # List findings from an investigation run:

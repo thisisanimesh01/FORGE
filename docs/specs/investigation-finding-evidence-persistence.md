@@ -125,3 +125,44 @@ When conversation history exceeds `max_context_chars`:
 - Message 0 (System prompt) and Message 1 (User prompt with Repository Architecture map) are unconditionally preserved.
 - Slicing proceeds backwards from the most recent message, grouping each `MessageRole.TOOL` response with its preceding `MessageRole.ASSISTANT` containing `tool_calls`.
 - Mid-conversation truncation notices use `MessageRole.USER` rather than `MessageRole.SYSTEM` to preserve chat template compatibility with compact local models.
+
+---
+
+## 7. Deterministic Evidence-to-Claim Validation
+
+To eliminate false-positive findings (such as those observed in the Apache Hamilton audit where valid dictionary entries were claimed to have syntax errors or classified as loops):
+
+### A. Python Static AST Syntax Analysis
+- If a finding alleges a syntax defect (`syntax_error`, or title/description alleging "missing colon", "syntax error", "unexpected token"), the target file is parsed using in-memory Python `ast.parse`.
+- If `ast.parse` succeeds without errors:
+  - The source file is provably, deterministically valid Python syntax.
+  - The claim is rejected with `SyntaxClaimValidationError`, preventing false positive findings from being recorded.
+- If `ast.parse` fails with `SyntaxError`:
+  - The syntax error line number (`err_line`) is compared against the cited line range `[start_line, end_line]`.
+  - If the cited range does not cover or localize the actual syntax error, the finding is rejected with `InsufficientEvidenceError`.
+- For specific "missing colon" claims, cited lines are inspected: if the line already contains a colon (e.g. `"key": value,`), the allegation is rejected as unsupported.
+
+### B. Defect Category & Context Consistency
+- Category and description consistency: If `defect_category` is "loop" or the title claims a loop defect, but the description describes a syntax error ("missing colon"), the finding is rejected with `ConsistencyValidationError`.
+- Evidence context relevance: If a loop defect is claimed, the cited excerpt (or its enclosing block in the AST) must contain an actual loop construct (`for`, `while`, or recursion). Ordinary dictionary mappings or assignments without loop constructs are rejected with `InsufficientEvidenceError`.
+- Non-empty content: Source excerpts must contain non-whitespace executable statements.
+
+### C. Uncertainty Preservation for Semantic Claims
+- Static analysis cannot prove or disprove semantic logic bugs without execution.
+- FORGE preserves explicit uncertainty: findings remain in `suspected` state, unearned `confirmed` confidence is downgraded to `high`, and `limitations` disclosures are automatically attached.
+- Target repository code is never executed on the host.
+
+---
+
+## 8. Deterministic Duplicate Detection & Linking Policy
+
+To prevent repetitive finding records across turns:
+- **Duplicate Matching Criteria**:
+  1. Identical normalized target file path.
+  2. Overlapping or identical line coordinates (`max(s1, s2) <= min(e1, e2)`).
+  3. Matching canonical defect category or description token Jaccard similarity $\ge 0.5$.
+  4. Identical or near-identical descriptions ($\ge 0.65$ similarity) even if the model altered the category string.
+- **Handling Policy**:
+  - *Identical Evidence*: If the candidate finding's excerpt has the exact same content digest and line range as an existing finding, creation of a redundant finding is prevented (`DuplicateFindingError`).
+  - *Additional Evidence*: If the candidate finding provides a new or expanded line slice for the same defect, the new evidence is linked to the existing finding (`status="duplicate_linked"`), without creating a duplicate finding row.
+- **Auditable Ledger**: Rejections and duplicate events are recorded in SQLite via `EventType.FINDING_VALIDATION_FAILED` and `EventType.FINDING_DUPLICATE_DETECTED`.

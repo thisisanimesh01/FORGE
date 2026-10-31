@@ -20,17 +20,23 @@ from forge.sandbox.docker import DockerSandbox
 from forge.sandbox.evidence import record_sandbox_result_in_store
 from forge.sandbox.models import SandboxRequest, ExecutionLimits
 from forge.schemas import (
+    EventType,
     EvidenceType,
     FindingConfidence,
     FindingLifecycleState,
     FindingSeverity,
 )
 from forge.storage.store import ForgeStore
-
-
-class ToolExecutionError(Exception):
-    """Raised when a tool execution fails or violates constraints."""
-    pass
+from forge.analysis.validation import (
+    ToolExecutionError,
+    FindingValidationError,
+    SyntaxClaimValidationError,
+    ConsistencyValidationError,
+    InsufficientEvidenceError,
+    DuplicateFindingError,
+    ValidationOutcome,
+    validate_finding_claim,
+)
 
 
 MAX_EXCERPT_LINES = 250
@@ -724,20 +730,107 @@ class ToolRegistry:
         raw_slice_text = "\n".join(slice_lines)
         content_digest = hashlib.sha256(raw_slice_text.encode("utf-8")).hexdigest()
 
-        # Step 8-9: Persist Finding and Evidence in store
+        # Step 8: Deterministic claim validation, category consistency, static syntax, and deduplication
         suggested_step = args.get("suggested_step")
         limitations = args.get("limitations")
         defect_category = args.get("defect_category")
+
+        try:
+            val_outcome = validate_finding_claim(
+                workspace_path=self.workspace_path,
+                norm_path=norm_path,
+                resolved_file=resolved_file,
+                start_line=start_line,
+                end_line=actual_end,
+                total_lines=total_lines,
+                slice_lines=slice_lines,
+                content_digest=content_digest,
+                defect_category=defect_category,
+                title=title,
+                description=description,
+                confidence=confidence,
+                store=self.store,
+                run_id=self.run_id,
+            )
+        except FindingValidationError as fve:
+            if self.store and self.run_id:
+                event_type = (
+                    EventType.FINDING_DUPLICATE_DETECTED
+                    if isinstance(fve, DuplicateFindingError)
+                    else EventType.FINDING_VALIDATION_FAILED
+                )
+                self.store.append_event(
+                    self.run_id,
+                    event_type,
+                    {
+                        "error_type": fve.__class__.__name__,
+                        "message": str(fve),
+                        "file": norm_path,
+                        "lines": f"{start_line}-{actual_end}",
+                        "title": title,
+                        "category": defect_category,
+                    },
+                )
+            raise
+
+        # Check if candidate finding was linked to an existing finding as additional evidence
+        if val_outcome.action == "duplicate_linked" and val_outcome.duplicate_of_id:
+            details = {
+                "content_digest": content_digest,
+                "digest_algorithm": "sha256",
+                "file_path": norm_path,
+                "start_line": start_line,
+                "end_line": actual_end,
+                "total_file_lines": total_lines,
+                "defect_category": defect_category,
+                "verified_against_workspace": True,
+                "linked_as_duplicate": True,
+            }
+            evidence = create_evidence(
+                run_id=self.run_id,
+                evidence_type=EvidenceType.SOURCE_EXCERPT,
+                description=f"Verified source excerpt from '{norm_path}' lines {start_line}-{actual_end}",
+                content=real_excerpt,
+                finding_id=val_outcome.duplicate_of_id,
+                file_path=norm_path,
+                start_line=start_line,
+                end_line=actual_end,
+                details=details,
+                provenance="forge:investigator:source_verification",
+            )
+            self.store.attach_evidence(evidence)
+            if self.store and self.run_id:
+                self.store.append_event(
+                    self.run_id,
+                    EventType.FINDING_DUPLICATE_DETECTED,
+                    {
+                        "action": "linked_evidence",
+                        "existing_finding_id": val_outcome.duplicate_of_id,
+                        "evidence_id": evidence.evidence_id,
+                        "file": norm_path,
+                        "lines": f"{start_line}-{actual_end}",
+                    },
+                )
+            return json.dumps({
+                "status": "duplicate_linked",
+                "finding_id": val_outcome.duplicate_of_id,
+                "evidence_id": evidence.evidence_id,
+                "message": f"Duplicate finding linked. Additional verified source evidence attached to existing finding '{val_outcome.duplicate_of_id}'.",
+            }, indent=2)
+
+        # Step 9: Persist validated Finding and Evidence in store
+        final_confidence = val_outcome.adjusted_confidence or confidence
+        final_limitations = limitations or val_outcome.limitations
 
         finding = self.store.create_finding(
             run_id=self.run_id,
             title=title,
             description=description,
             severity=severity,
-            confidence=confidence,
+            confidence=final_confidence,
             affected_files=[norm_path],
             suggested_step=suggested_step,
-            limitations=limitations,
+            limitations=final_limitations,
         )
 
         details = {
