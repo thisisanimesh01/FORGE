@@ -151,8 +151,21 @@ class ReportBuilder:
                 summary = f"Duplicate finding rejected{title_str}{loc_str}{brief_msg}"
             elif ev.event_type == EventType.FINDING_STATE_TRANSITIONED:
                 summary = f"Finding {ev.payload.get('finding_id', '?')} transitioned to {ev.payload.get('to_state', '?')}"
-            elif ev.event_type in {EventType.RUN_COMPLETED, EventType.RUN_FAILED}:
-                summary = f"Run finished with status: {ev.payload.get('status', ev.event_type.value)}"
+            elif ev.event_type == EventType.RUN_FAILED:
+                cat = ev.payload.get("failure_category")
+                err = ev.payload.get("error_message") or ev.payload.get("error")
+                stage = ev.payload.get("stage")
+                step = ev.payload.get("step")
+                cat_str = f" [{cat}]" if cat else ""
+                stage_str = f" at {stage}" if stage else ""
+                step_str = f" (turn {step})" if step else ""
+                err_str = f": {err[:120]}..." if err and len(err) > 120 else (f": {err}" if err else "")
+                if cat or err:
+                    summary = f"Run failed{cat_str}{stage_str}{step_str}{err_str}"
+                else:
+                    summary = f"Run finished with status: {ev.payload.get('status', 'failed')}"
+            elif ev.event_type == EventType.RUN_COMPLETED:
+                summary = f"Run completed successfully: {ev.payload.get('status', 'completed')}"
             else:
                 summary = f"{ev.event_type.value}"
 
@@ -178,6 +191,35 @@ class ReportBuilder:
             "rejected_claims_count": len(rejected_events),
         }
 
+        # Extract failure details and final synthesis
+        summary_dict = self.store.get_run_summary_dict(run_id) if hasattr(self.store, "get_run_summary_dict") else {}
+        failure_details = summary_dict.get("failure_details")
+        if not failure_details and run.status == "failed":
+            for ev in reversed(raw_events):
+                if ev.event_type == EventType.RUN_FAILED and ("error" in ev.payload or "failure_category" in ev.payload):
+                    cat = ev.payload.get("failure_category", "unknown")
+                    msg = redact_secrets(str(ev.payload.get("error_message") or ev.payload.get("error", "")))
+                    failure_details = {
+                        "category": cat,
+                        "failure_category": cat,
+                        "message": msg,
+                        "error_message": msg,
+                        "stage": ev.payload.get("stage", "unknown"),
+                        "step": ev.payload.get("step", 0),
+                        "retryable": ev.payload.get("retryable", False),
+                        "timestamp": ev.payload.get("timestamp", ev.timestamp.isoformat()),
+                    }
+                    break
+        elif failure_details:
+            cat = failure_details.get("category") or failure_details.get("failure_category", "unknown")
+            msg = redact_secrets(str(failure_details.get("message") or failure_details.get("error_message", "")))
+            failure_details["category"] = cat
+            failure_details["failure_category"] = cat
+            failure_details["message"] = msg
+            failure_details["error_message"] = msg
+
+        final_synthesis = summary_dict.get("final_synthesis")
+
         return InvestigationReport(
             schema_version=REPORT_SCHEMA_VERSION,
             run_id=run.run_id,
@@ -192,6 +234,8 @@ class ReportBuilder:
             findings=findings_list,
             evidence=all_evidence,
             events_timeline=events_timeline,
+            failure_details=failure_details,
+            final_synthesis=final_synthesis,
         )
 
 
@@ -233,6 +277,23 @@ def report_to_markdown(report: InvestigationReport) -> str:
     lines.append(f"- **Total Audit Events**: {counts.get('total_events', 0)}")
     lines.append(f"- **Rejected / Disproven Claims**: {counts.get('rejected_claims_count', 0)}")
     lines.append("")
+
+    # Failure Details if run failed
+    if report.failure_details:
+        fd = report.failure_details
+        lines.append("## Investigation Failure Details")
+        if fd.get("category"):
+            lines.append(f"- **Failure Category**: `{fd.get('category')}`")
+        if fd.get("stage"):
+            stage_str = f"`{fd.get('stage')}`"
+            if fd.get("step"):
+                stage_str += f" (Turn {fd.get('step')})"
+            lines.append(f"- **Execution Stage**: {stage_str}")
+        if "retryable" in fd:
+            lines.append(f"- **Retryable**: {'Yes' if fd.get('retryable') else 'No'}")
+        if fd.get("message"):
+            lines.append(f"- **Error Message**: {fd.get('message')}")
+        lines.append("")
 
     # Severity & Lifecycle Breakdowns
     sev_counts = counts.get("findings_by_severity", {})
@@ -280,6 +341,12 @@ def report_to_markdown(report: InvestigationReport) -> str:
             else:
                 lines.append("- *Evidence*: None attached (unverified claim).")
             lines.append("")
+
+    # Final Synthesis & Assessment
+    if report.final_synthesis:
+        lines.append("## Final Synthesis & Assessment")
+        lines.append(report.final_synthesis.strip())
+        lines.append("")
 
     # Timeline of Events
     if report.events_timeline:

@@ -19,6 +19,7 @@ from forge.llm.provider import (
     LLMContextLengthError,
     LLMProviderError,
     LLMRateLimitError,
+    LLMTimeoutError,
     LLMUnavailableError,
 )
 
@@ -222,7 +223,7 @@ class OpenAICompatibleProvider:
         api_key: Optional[str] = None,
         model: Optional[str] = None,
         api_base: Optional[str] = None,
-        timeout_seconds: float = 60.0,
+        timeout_seconds: Optional[float] = None,
         max_retries: int = 1,
         http_client: Optional[httpx.Client] = None,
     ):
@@ -231,7 +232,7 @@ class OpenAICompatibleProvider:
         self.model = model or settings.llm_model
         raw_base = api_base or settings.llm_api_base or ""
         self.api_base = raw_base.rstrip("/")
-        self.timeout_seconds = timeout_seconds
+        self.timeout_seconds = timeout_seconds if timeout_seconds is not None else getattr(settings, "llm_timeout_seconds", 60.0)
         self.max_retries = max(0, max_retries)
         self._custom_client = http_client
 
@@ -341,7 +342,7 @@ class OpenAICompatibleProvider:
                 break
             except httpx.TimeoutException as exc:
                 if attempt == total_attempts - 1:
-                    raise LLMUnavailableError(f"LLM request timed out after {self.timeout_seconds}s: {exc}")
+                    raise LLMTimeoutError(f"LLM request timed out after {self.timeout_seconds}s: {exc}")
             except httpx.RequestError as exc:
                 if attempt == total_attempts - 1:
                     sanitized_err = redact_secrets(str(exc))

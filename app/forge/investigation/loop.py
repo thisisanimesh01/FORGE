@@ -23,6 +23,7 @@ from forge.llm.provider import (
     LLMProvider,
     LLMProviderError,
     LLMRateLimitError,
+    LLMTimeoutError,
     LLMUnavailableError,
 )
 from forge.investigation.tools import ToolRegistry
@@ -64,6 +65,29 @@ class InvestigationResult(BaseModel):
     duration_seconds: float = 0.0
     inspected_files: List[str] = Field(default_factory=list)
     rejected_claims: List[Dict[str, Any]] = Field(default_factory=list)
+    failure_details: Optional[Dict[str, Any]] = None
+
+
+def _make_failure_payload(
+    category: str,
+    error_msg: str,
+    stage: str,
+    step: int,
+    retryable: bool,
+) -> Dict[str, Any]:
+    """Construct a sanitized structured failure event payload."""
+    sanitized = redact_secrets(error_msg)
+    return {
+        "category": category,
+        "failure_category": category,
+        "message": sanitized,
+        "error_message": sanitized,
+        "stage": stage,
+        "step": step,
+        "retryable": retryable,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "error": sanitized,
+    }
 
 
 class InvestigationLoop:
@@ -198,196 +222,317 @@ class InvestigationLoop:
         final_response_text: Optional[str] = None
         loop_status = "completed"
         error_msg: Optional[str] = None
+        failure_details: Optional[Dict[str, Any]] = None
+        failure_category: Optional[str] = None
+        is_retryable = False
+        current_stage = "initialization"
 
-        while steps_executed < self.max_steps:
-            # Check total wall clock budget
-            if (time.monotonic() - start_time) >= self.max_wall_clock_seconds:
-                loop_status = "max_time_exceeded"
-                final_response_text = f"Investigation halted: Exceeded wall-clock budget of {self.max_wall_clock_seconds}s."
-                break
-
-            steps_executed += 1
-            is_penultimate = (steps_executed == self.max_steps - 1) and (self.max_steps >= 2)
-            is_final_step = (steps_executed == self.max_steps)
-
-            # Turn budget notices and tool allocation
-            if is_final_step and self.max_steps >= 2:
-                # Dedicated final synthesis step: no tools provided so model produces a structured textual synthesis
-                request_tools = []
-                inspected_summary = ", ".join(sorted(self.inspected_files)[:10]) or "None"
-                rejected_count = (
-                    len(self.tool_registry.rejected_tracker._records)
-                    if self.tool_registry.rejected_tracker
-                    else 0
-                )
-                messages.append(
-                    ChatMessage(
-                        role=MessageRole.USER,
-                        content=(
-                            f"[Final Turn: Step {steps_executed} of {self.max_steps}. "
-                            "Conclude your investigation now with a structured final assessment detailing: "
-                            f"1. What was inspected across the repository (e.g. {inspected_summary}). "
-                            "2. Which findings were accepted (with supporting evidence). "
-                            f"3. Which claims were rejected and why ({rejected_count} claims rejected during this run). "
-                            "4. What evidence supports each accepted finding. "
-                            "5. What remains uncertain (explicit limitations). "
-                            "6. Truthful conclusion on whether the audit completed or exhausted its turn budget. "
-                            "If no findings were accepted, state truthfully that no defects were verified and explain the inspection "
-                            "limitations without claiming the repository is defect-free.]"
-                        ),
-                    )
-                )
-            elif is_penultimate and steps_executed > 1:
-                request_tools = tools
-                messages.append(
-                    ChatMessage(
-                        role=MessageRole.USER,
-                        content=(
-                            f"[Turn Budget Warning: Step {steps_executed} of {self.max_steps}. "
-                            "You have 1 turn remaining after this. Record any discovered findings using 'record_finding' now. "
-                            "Your final turn will be dedicated to synthesis.]"
-                        ),
-                    )
-                )
-            else:
-                request_tools = tools
-
-
-            bounded_messages = self._truncate_history(messages)
-
-            # Record LLM_REQUEST_STARTED event
-            self.store.append_event(
-                self.run_id,
-                EventType.LLM_REQUEST_STARTED,
-                {"step": steps_executed, "message_count": len(bounded_messages)},
-            )
-
-            request = LLMRequest(
-                messages=bounded_messages,
-                tools=request_tools,
-                temperature=0.0,
-            )
-
-            try:
-                response = self.provider.generate(request)
-            except (LLMAuthenticationError, LLMRateLimitError, LLMContextLengthError, LLMUnavailableError, LLMProviderError) as exc:
-                error_msg = f"LLM provider error on step {steps_executed}: {exc}"
-                loop_status = "failed"
-                self.store.append_event(
-                    self.run_id,
-                    EventType.RUN_FAILED,
-                    {"error": error_msg, "step": steps_executed},
-                )
-                break
-            except Exception as exc:
-                error_msg = f"Unexpected error during LLM generation: {exc}"
-                loop_status = "failed"
-                self.store.append_event(
-                    self.run_id,
-                    EventType.RUN_FAILED,
-                    {"error": error_msg, "step": steps_executed},
-                )
-                break
-
-            # Append assistant message to history
-            assistant_msg = ChatMessage(
-                role=MessageRole.ASSISTANT,
-                content=response.content,
-                tool_calls=response.tool_calls if response.tool_calls else None,
-            )
-            messages.append(assistant_msg)
-
-            # If no tool calls, check whether this is a genuine final answer or an unexecuted/malformed turn
-            if not response.tool_calls:
-                # 1. Did extraction detect a malformed/invalid tool call?
-                if response.extraction_error and not is_final_step:
-                    feedback_msg = (
-                        f"Tool invocation error: {response.extraction_error}. "
-                        f"Authorized tools: {[t.name for t in tools]}. "
-                        'Please re-issue your tool call as valid JSON: {"name": "<tool_name>", "arguments": {...}} '
-                        "or provide your final audit assessment."
-                    )
-                    messages.append(ChatMessage(role=MessageRole.USER, content=feedback_msg))
-                    continue
-
-                # 2. Check if this is Turn 1 with zero tools executed and zero findings
-                current_findings = self.store.list_findings(run_id=self.run_id)
-                if steps_executed == 1 and total_tool_calls == 0 and not current_findings and not is_final_step:
-                    prompt_msg = (
-                        "No audit tools have been executed yet. To perform the audit, use one of the available tools: "
-                        f"{[t.name for t in tools]}. "
-                        "If you have already concluded your inspection, provide your final structured assessment with clear limitations."
-                    )
-                    messages.append(ChatMessage(role=MessageRole.USER, content=prompt_msg))
-                    continue
-
-                # 3. If zero tools were executed and zero findings exist, do not falsely claim completion
-                if total_tool_calls == 0 and not current_findings:
-                    loop_status = "failed"
-                    error_msg = "Investigation terminated without audit activity: Zero tools executed and zero findings recorded."
-                    final_response_text = response.content or error_msg
+        try:
+            while steps_executed < self.max_steps:
+                # Check total wall clock budget
+                if (time.monotonic() - start_time) >= self.max_wall_clock_seconds:
+                    loop_status = "max_time_exceeded"
+                    final_response_text = f"Investigation halted: Exceeded wall-clock budget of {self.max_wall_clock_seconds}s."
                     break
 
-                # 4. Legitimate final assessment after tools or findings
-                if response.content and response.content.strip():
-                    final_response_text = response.content.strip()
-                    loop_status = "completed"
-                    break
-                else:
-                    if is_final_step:
-                        loop_status = "max_steps_exceeded"
-                        final_response_text = (
-                            f"Investigation halted: Reached maximum execution step limit of {self.max_steps} turns."
-                        )
-                        break
+                steps_executed += 1
+                is_penultimate = (steps_executed == self.max_steps - 1) and (self.max_steps >= 2)
+                is_final_step = (steps_executed == self.max_steps)
+
+                # Turn budget notices and tool allocation
+                if is_final_step and self.max_steps >= 2:
+                    current_stage = "synthesis"
+                    # Dedicated final synthesis step: no tools provided so model produces a structured textual synthesis
+                    request_tools = []
+                    inspected_summary = ", ".join(sorted(self.inspected_files)[:10]) or "None"
+                    rejected_count = (
+                        len(self.tool_registry.rejected_tracker._records)
+                        if self.tool_registry.rejected_tracker
+                        else 0
+                    )
                     messages.append(
                         ChatMessage(
                             role=MessageRole.USER,
-                            content="Your previous response was empty. Please use one of the available tools or provide your assessment.",
+                            content=(
+                                f"[Final Turn: Step {steps_executed} of {self.max_steps}. "
+                                "Conclude your investigation now with a structured final assessment detailing: "
+                                f"1. What was inspected across the repository (e.g. {inspected_summary}). "
+                                "2. Which findings were accepted (with supporting evidence). "
+                                f"3. Which claims were rejected and why ({rejected_count} claims rejected during this run). "
+                                "4. What evidence supports each accepted finding. "
+                                "5. What remains uncertain (explicit limitations). "
+                                "6. Truthful conclusion on whether the audit completed or exhausted its turn budget. "
+                                "If no findings were accepted, state truthfully that no defects were verified and explain the inspection "
+                                "limitations without claiming the repository is defect-free.]"
+                            ),
                         )
                     )
-                    continue
+                elif is_penultimate and steps_executed > 1:
+                    current_stage = "llm_generation"
+                    request_tools = tools
+                    messages.append(
+                        ChatMessage(
+                            role=MessageRole.USER,
+                            content=(
+                                f"[Turn Budget Warning: Step {steps_executed} of {self.max_steps}. "
+                                "You have 1 turn remaining after this. Record any discovered findings using 'record_finding' now. "
+                                "Your final turn will be dedicated to synthesis.]"
+                            ),
+                        )
+                    )
+                else:
+                    current_stage = "llm_generation"
+                    request_tools = tools
 
-            # Execute tool calls
-            for tc in response.tool_calls:
-                if total_tool_calls >= self.max_total_tool_calls:
-                    loop_status = "max_tool_calls_exceeded"
-                    final_response_text = f"Investigation halted: Exceeded total tool-call budget of {self.max_total_tool_calls} calls."
+                bounded_messages = self._truncate_history(messages)
+
+                # Record LLM_REQUEST_STARTED event
+                self.store.append_event(
+                    self.run_id,
+                    EventType.LLM_REQUEST_STARTED,
+                    {"step": steps_executed, "message_count": len(bounded_messages)},
+                )
+
+                request = LLMRequest(
+                    messages=bounded_messages,
+                    tools=request_tools,
+                    temperature=0.0,
+                )
+
+                try:
+                    response = self.provider.generate(request)
+                except LLMTimeoutError as exc:
+                    failure_category = "timeout"
+                    is_retryable = True
+                    sanitized_msg = redact_secrets(str(exc))
+                    error_msg = f"LLM provider request timed out on step {steps_executed}: {sanitized_msg}"
+                    loop_status = "failed"
+                    failure_details = _make_failure_payload(failure_category, error_msg, current_stage, steps_executed, is_retryable)
+                    self.store.append_event(self.run_id, EventType.RUN_FAILED, failure_details)
+                    break
+                except LLMAuthenticationError as exc:
+                    failure_category = "authentication_error"
+                    is_retryable = False
+                    sanitized_msg = redact_secrets(str(exc))
+                    error_msg = f"LLM provider authentication failed on step {steps_executed}: {sanitized_msg}"
+                    loop_status = "failed"
+                    failure_details = _make_failure_payload(failure_category, error_msg, current_stage, steps_executed, is_retryable)
+                    self.store.append_event(self.run_id, EventType.RUN_FAILED, failure_details)
+                    break
+                except LLMRateLimitError as exc:
+                    failure_category = "rate_limit"
+                    is_retryable = True
+                    sanitized_msg = redact_secrets(str(exc))
+                    error_msg = f"LLM provider rate limit exceeded on step {steps_executed}: {sanitized_msg}"
+                    loop_status = "failed"
+                    failure_details = _make_failure_payload(failure_category, error_msg, current_stage, steps_executed, is_retryable)
+                    self.store.append_event(self.run_id, EventType.RUN_FAILED, failure_details)
+                    break
+                except LLMContextLengthError as exc:
+                    failure_category = "context_length"
+                    is_retryable = False
+                    sanitized_msg = redact_secrets(str(exc))
+                    error_msg = f"LLM provider context length exceeded on step {steps_executed}: {sanitized_msg}"
+                    loop_status = "failed"
+                    failure_details = _make_failure_payload(failure_category, error_msg, current_stage, steps_executed, is_retryable)
+                    self.store.append_event(self.run_id, EventType.RUN_FAILED, failure_details)
+                    break
+                except LLMUnavailableError as exc:
+                    sanitized_msg = redact_secrets(str(exc))
+                    if "network error" in sanitized_msg.lower() or "connect" in sanitized_msg.lower():
+                        failure_category = "connection_error"
+                    else:
+                        failure_category = "provider_unavailable"
+                    is_retryable = True
+                    error_msg = f"LLM provider unavailable on step {steps_executed}: {sanitized_msg}"
+                    loop_status = "failed"
+                    failure_details = _make_failure_payload(failure_category, error_msg, current_stage, steps_executed, is_retryable)
+                    self.store.append_event(self.run_id, EventType.RUN_FAILED, failure_details)
+                    break
+                except LLMProviderError as exc:
+                    sanitized_msg = redact_secrets(str(exc))
+                    lower_msg = sanitized_msg.lower()
+                    if "malformed json" in lower_msg:
+                        failure_category = "malformed_response"
+                    elif "no choices" in lower_msg:
+                        failure_category = "empty_response"
+                    else:
+                        failure_category = "provider_error"
+                    is_retryable = False
+                    error_msg = f"LLM provider error on step {steps_executed}: {sanitized_msg}"
+                    loop_status = "failed"
+                    failure_details = _make_failure_payload(failure_category, error_msg, current_stage, steps_executed, is_retryable)
+                    self.store.append_event(self.run_id, EventType.RUN_FAILED, failure_details)
+                    break
+                except Exception as exc:
+                    failure_category = "unexpected_exception"
+                    is_retryable = False
+                    sanitized_msg = redact_secrets(str(exc))
+                    error_msg = f"Unexpected error during LLM generation on step {steps_executed}: {sanitized_msg}"
+                    loop_status = "failed"
+                    failure_details = _make_failure_payload(failure_category, error_msg, current_stage, steps_executed, is_retryable)
+                    self.store.append_event(self.run_id, EventType.RUN_FAILED, failure_details)
                     break
 
-                total_tool_calls += 1
-                tool_key = tc.to_hashable_key()
-                self.repeated_tool_count[tool_key] = self.repeated_tool_count.get(tool_key, 0) + 1
+                # Append assistant message to history
+                assistant_msg = ChatMessage(
+                    role=MessageRole.ASSISTANT,
+                    content=response.content,
+                    tool_calls=response.tool_calls if response.tool_calls else None,
+                )
+                messages.append(assistant_msg)
 
-                # Exact duplicate call protection (>2 times identical arguments)
-                if self.repeated_tool_count[tool_key] > 2:
-                    tool_output = json.dumps({
-                        "warning": "Loop detected: Identical tool call repeated multiple times. Please synthesize findings or investigate an alternative code path.",
-                    })
-                # Phase D: Same-file pagination protection for read_source_excerpt
-                elif tc.name == "read_source_excerpt":
-                    file_path_arg = str(tc.arguments.get("file_path", "")).strip().lstrip("/")
-                    if file_path_arg:
-                        self.inspected_files.add(file_path_arg)
-                    self.file_read_counts[file_path_arg] = self.file_read_counts.get(file_path_arg, 0) + 1
-                    read_cnt = self.file_read_counts[file_path_arg]
+                # If no tool calls, check whether this is a genuine final answer or an unexecuted/malformed turn
+                if not response.tool_calls:
+                    # 1. Did extraction detect a malformed/invalid tool call?
+                    if response.extraction_error and not is_final_step:
+                        feedback_msg = (
+                            f"Tool invocation error: {response.extraction_error}. "
+                            f"Authorized tools: {[t.name for t in tools]}. "
+                            'Please re-issue your tool call as valid JSON: {"name": "<tool_name>", "arguments": {...}} '
+                            "or provide your final audit assessment."
+                        )
+                        messages.append(ChatMessage(role=MessageRole.USER, content=feedback_msg))
+                        continue
 
-                    if read_cnt > 4:
-                        tool_output = json.dumps({
-                            "warning": (
-                                f"Excessive sequential reads on file '{file_path_arg}' ({read_cnt} excerpts). "
-                                "Further reading of this file is halted to preserve turn budget. "
-                                "Please record any findings using 'record_finding', inspect other modules, or conclude your investigation."
-                            )
-                        })
+                    # 2. Check if this is Turn 1 with zero tools executed and zero findings
+                    current_findings = self.store.list_findings(run_id=self.run_id)
+                    if steps_executed == 1 and total_tool_calls == 0 and not current_findings and not is_final_step:
+                        prompt_msg = (
+                            "No audit tools have been executed yet. To perform the audit, use one of the available tools: "
+                            f"{[t.name for t in tools]}. "
+                            "If you have already concluded your inspection, provide your final structured assessment with clear limitations."
+                        )
+                        messages.append(ChatMessage(role=MessageRole.USER, content=prompt_msg))
+                        continue
+
+                    # 3. If zero tools were executed and zero findings exist, do not falsely claim completion
+                    if total_tool_calls == 0 and not current_findings:
+                        loop_status = "failed"
+                        failure_category = "no_activity"
+                        error_msg = "Investigation terminated without audit activity: Zero tools executed and zero findings recorded."
+                        final_response_text = response.content or error_msg
+                        failure_details = _make_failure_payload(failure_category, error_msg, current_stage, steps_executed, False)
+                        self.store.append_event(self.run_id, EventType.RUN_FAILED, failure_details)
+                        break
+
+                    # 4. Legitimate final assessment after tools or findings
+                    if response.content and response.content.strip():
+                        final_response_text = response.content.strip()
+                        loop_status = "completed"
+                        break
                     else:
+                        if is_final_step:
+                            loop_status = "max_steps_exceeded"
+                            final_response_text = (
+                                f"Investigation halted: Reached maximum execution step limit of {self.max_steps} turns."
+                            )
+                            break
+                        messages.append(
+                            ChatMessage(
+                                role=MessageRole.USER,
+                                content="Your previous response was empty. Please use one of the available tools or provide your assessment.",
+                            )
+                        )
+                        continue
+
+                # Execute tool calls
+                for tc in response.tool_calls:
+                    if total_tool_calls >= self.max_total_tool_calls:
+                        loop_status = "max_tool_calls_exceeded"
+                        final_response_text = f"Investigation halted: Exceeded total tool-call budget of {self.max_total_tool_calls} calls."
+                        break
+
+                    total_tool_calls += 1
+                    tool_key = tc.to_hashable_key()
+                    self.repeated_tool_count[tool_key] = self.repeated_tool_count.get(tool_key, 0) + 1
+
+                    # Exact duplicate call protection (>2 times identical arguments)
+                    if self.repeated_tool_count[tool_key] > 2:
+                        tool_output = json.dumps({
+                            "warning": "Loop detected: Identical tool call repeated multiple times. Please synthesize findings or investigate an alternative code path.",
+                        })
+                    # Phase D: Same-file pagination protection for read_source_excerpt
+                    elif tc.name == "read_source_excerpt":
+                        file_path_arg = str(tc.arguments.get("file_path", "")).strip().lstrip("/")
+                        if file_path_arg:
+                            self.inspected_files.add(file_path_arg)
+                        self.file_read_counts[file_path_arg] = self.file_read_counts.get(file_path_arg, 0) + 1
+                        read_cnt = self.file_read_counts[file_path_arg]
+
+                        if read_cnt > 4:
+                            tool_output = json.dumps({
+                                "warning": (
+                                    f"Excessive sequential reads on file '{file_path_arg}' ({read_cnt} excerpts). "
+                                    "Further reading of this file is halted to preserve turn budget. "
+                                    "Please record any findings using 'record_finding', inspect other modules, or conclude your investigation."
+                                )
+                            })
+                        else:
+                            self.store.append_event(
+                                self.run_id,
+                                EventType.TOOL_CALL_REQUESTED,
+                                {"call_id": tc.call_id, "tool_name": tc.name, "step": steps_executed},
+                            )
+
+                            current_stage = "tool_dispatch"
+                            try:
+                                tool_output = self.tool_registry.execute_tool(tc.name, tc.arguments)
+                            except Exception as exc:
+                                failure_category = "tool_dispatch_error"
+                                is_retryable = False
+                                sanitized_msg = redact_secrets(str(exc))
+                                error_msg = f"Tool dispatch error for '{tc.name}' on step {steps_executed}: {sanitized_msg}"
+                                loop_status = "failed"
+                                failure_details = _make_failure_payload(failure_category, error_msg, current_stage, steps_executed, is_retryable)
+                                self.store.append_event(self.run_id, EventType.RUN_FAILED, failure_details)
+                                break
+
+                            self.store.append_event(
+                                self.run_id,
+                                EventType.TOOL_CALL_COMPLETED,
+                                {
+                                    "call_id": tc.call_id,
+                                    "tool_name": tc.name,
+                                    "output_snippet": tool_output[:200],
+                                    "step": steps_executed,
+                                },
+                            )
+
+                            if read_cnt >= 3:
+                                tool_output += (
+                                    f"\n\n[Warning: Sequential source reading detected across {read_cnt} turns for '{file_path_arg}'. "
+                                    "If defects were identified, use 'record_finding' to document them with verified evidence. "
+                                    "Otherwise, proceed to inspect other modules or synthesize your findings.]"
+                                )
+                    else:
+                        if tc.name == "record_finding":
+                            aff_file = str(tc.arguments.get("affected_file", "")).strip().lstrip("/")
+                            if aff_file:
+                                self.inspected_files.add(aff_file)
+                        elif tc.name == "find_related_files":
+                            rf = str(tc.arguments.get("file_path", "")).strip().lstrip("/")
+                            if rf:
+                                self.inspected_files.add(rf)
+
                         self.store.append_event(
                             self.run_id,
                             EventType.TOOL_CALL_REQUESTED,
                             {"call_id": tc.call_id, "tool_name": tc.name, "step": steps_executed},
                         )
 
-                        tool_output = self.tool_registry.execute_tool(tc.name, tc.arguments)
+                        current_stage = "tool_dispatch"
+                        try:
+                            tool_output = self.tool_registry.execute_tool(tc.name, tc.arguments)
+                        except Exception as exc:
+                            failure_category = "tool_dispatch_error"
+                            is_retryable = False
+                            sanitized_msg = redact_secrets(str(exc))
+                            error_msg = f"Tool dispatch error for '{tc.name}' on step {steps_executed}: {sanitized_msg}"
+                            loop_status = "failed"
+                            failure_details = _make_failure_payload(failure_category, error_msg, current_stage, steps_executed, is_retryable)
+                            self.store.append_event(self.run_id, EventType.RUN_FAILED, failure_details)
+                            break
 
                         self.store.append_event(
                             self.run_id,
@@ -400,54 +545,28 @@ class InvestigationLoop:
                             },
                         )
 
-                        if read_cnt >= 3:
-                            tool_output += (
-                                f"\n\n[Warning: Sequential source reading detected across {read_cnt} turns for '{file_path_arg}'. "
-                                "If defects were identified, use 'record_finding' to document them with verified evidence. "
-                                "Otherwise, proceed to inspect other modules or synthesize your findings.]"
-                            )
-                else:
-                    if tc.name == "record_finding":
-                        aff_file = str(tc.arguments.get("affected_file", "")).strip().lstrip("/")
-                        if aff_file:
-                            self.inspected_files.add(aff_file)
-                    elif tc.name == "find_related_files":
-                        rf = str(tc.arguments.get("file_path", "")).strip().lstrip("/")
-                        if rf:
-                            self.inspected_files.add(rf)
-
-                    self.store.append_event(
-                        self.run_id,
-                        EventType.TOOL_CALL_REQUESTED,
-                        {"call_id": tc.call_id, "tool_name": tc.name, "step": steps_executed},
+                    messages.append(
+                        ChatMessage(
+                            role=MessageRole.TOOL,
+                            name=tc.name,
+                            tool_call_id=tc.call_id,
+                            content=tool_output,
+                        )
                     )
 
-                    tool_output = self.tool_registry.execute_tool(tc.name, tc.arguments)
+                if loop_status in ("max_tool_calls_exceeded", "failed"):
+                    break
+        except Exception as exc:
+            if loop_status != "failed":
+                loop_status = "failed"
+                failure_category = "unexpected_exception"
+                is_retryable = False
+                sanitized_msg = redact_secrets(str(exc))
+                error_msg = f"Unexpected loop execution exception: {sanitized_msg}"
+                failure_details = _make_failure_payload(failure_category, error_msg, current_stage, steps_executed, is_retryable)
+                self.store.append_event(self.run_id, EventType.RUN_FAILED, failure_details)
 
-                    self.store.append_event(
-                        self.run_id,
-                        EventType.TOOL_CALL_COMPLETED,
-                        {
-                            "call_id": tc.call_id,
-                            "tool_name": tc.name,
-                            "output_snippet": tool_output[:200],
-                            "step": steps_executed,
-                        },
-                    )
-
-                messages.append(
-                    ChatMessage(
-                        role=MessageRole.TOOL,
-                        name=tc.name,
-                        tool_call_id=tc.call_id,
-                        content=tool_output,
-                    )
-                )
-
-            if loop_status == "max_tool_calls_exceeded":
-                break
-
-        if steps_executed >= self.max_steps and not final_response_text:
+        if steps_executed >= self.max_steps and not final_response_text and loop_status != "failed":
             loop_status = "max_steps_exceeded"
             final_response_text = (
                 f"Investigation halted: Reached maximum execution step limit of {self.max_steps} turns."
@@ -459,20 +578,34 @@ class InvestigationLoop:
         # Invariant: A run with zero tool calls and zero findings must not be marked completed
         if loop_status == "completed" and total_tool_calls == 0 and not findings:
             loop_status = "failed"
+            failure_category = failure_category or "no_activity"
             error_msg = error_msg or "Investigation terminated without audit activity: Zero tools executed and zero findings recorded."
             if not final_response_text:
                 final_response_text = error_msg
 
+        if loop_status == "failed" and not failure_details:
+            failure_category = failure_category or "investigation_failed"
+            error_msg = error_msg or "Investigation failed"
+            failure_details = _make_failure_payload(failure_category, error_msg, current_stage, steps_executed, is_retryable)
+
         # Finish run in store
+        run_summary = {
+            "steps_executed": steps_executed,
+            "total_tool_calls": total_tool_calls,
+            "findings_count": len(findings),
+            "duration_seconds": round(duration, 2),
+        }
+        if error_msg:
+            run_summary["error_message"] = redact_secrets(error_msg)
+        if failure_details:
+            run_summary["failure_details"] = failure_details
+        if final_response_text:
+            run_summary["final_synthesis"] = final_response_text
+
         self.store.finish_run(
             self.run_id,
             status=loop_status,
-            summary={
-                "steps_executed": steps_executed,
-                "total_tool_calls": total_tool_calls,
-                "findings_count": len(findings),
-                "duration_seconds": round(duration, 2),
-            },
+            summary=run_summary,
         )
 
         rejected_records = []
@@ -498,4 +631,5 @@ class InvestigationLoop:
             duration_seconds=duration,
             inspected_files=sorted(list(self.inspected_files)),
             rejected_claims=rejected_records,
+            failure_details=failure_details,
         )

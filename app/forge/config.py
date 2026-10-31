@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 SECRET_PATTERNS = [
     re.compile(r"(?i)(api[_-]?key|secret|token|password|auth|bearer)\s*[:=]\s*['\"]?([a-zA-Z0-9_\-\.]{8,})['\"]?"),
     re.compile(r"(?i)(bearer\s+)([a-zA-Z0-9_\-\.]{12,})"),
-    re.compile(r"ghp_[a-zA-Z0-9]{36}"),
+    re.compile(r"ghp_[a-zA-Z0-9]{20,}"),
     re.compile(r"github_pat_[a-zA-Z0-9_]{82}"),
     re.compile(r"sk-[a-zA-Z0-9_\-]{20,64}"),
     re.compile(r"xox[baprs]-[a-zA-Z0-9]{10,48}"),
@@ -84,6 +84,11 @@ class ForgeSettings(BaseSettings):
     # Safety & Resource Limits
     max_steps: int = Field(default=10, description="Maximum agent execution turns per investigation")
     step_timeout_seconds: int = Field(default=60, description="Timeout in seconds per tool execution")
+    llm_timeout_seconds: float = Field(
+        default=120.0,
+        description="Timeout in seconds for LLM API requests",
+        validation_alias=AliasChoices("LLM_TIMEOUT_SECONDS", "FORGE_LLM_TIMEOUT_SECONDS"),
+    )
     max_output_bytes: int = Field(default=50_000, description="Maximum allowed output bytes per tool execution")
     max_context_tokens: int = Field(default=8_000, description="Token budget cap for prompt context")
 

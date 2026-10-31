@@ -65,3 +65,5 @@ class InvestigationReport(BaseModel):
     findings: List[ReportFinding] = Field(default_factory=list)
     evidence: List[ReportEvidenceItem] = Field(default_factory=list)
     events_timeline: List[ReportTimelineEvent] = Field(default_factory=list)
+    failure_details: Optional[Dict[str, Any]] = None
+    final_synthesis: Optional[str] = None

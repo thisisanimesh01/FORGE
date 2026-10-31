@@ -87,6 +87,21 @@ class ForgeStore:
         finally:
             conn.close()
 
+    def get_run_summary_dict(self, run_id: str) -> Dict[str, Any]:
+        """Fetch raw summary JSON dict for a run."""
+        conn = self._conn()
+        try:
+            cur = conn.execute("SELECT summary_json FROM runs WHERE run_id = ?", (run_id,))
+            row = cur.fetchone()
+            if not row or not row["summary_json"]:
+                return {}
+            try:
+                return json.loads(row["summary_json"])
+            except Exception:
+                return {}
+        finally:
+            conn.close()
+
     def finish_run(self, run_id: str, status: str = "completed", summary: Optional[Dict[str, Any]] = None) -> None:
         """Mark a run as completed or failed and record corresponding event."""
         now = datetime.now(timezone.utc).isoformat()

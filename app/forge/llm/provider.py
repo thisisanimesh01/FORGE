@@ -29,6 +29,11 @@ class LLMUnavailableError(LLMProviderError):
     pass
 
 
+class LLMTimeoutError(LLMUnavailableError):
+    """Raised when an LLM provider request times out."""
+    pass
+
+
 @runtime_checkable
 class LLMProvider(Protocol):
     """Protocol defining the interface for an LLM provider."""

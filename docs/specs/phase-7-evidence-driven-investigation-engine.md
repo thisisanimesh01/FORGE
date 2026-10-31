@@ -141,3 +141,48 @@ The implementation is verified by a 10-point regression suite in `tests/unit/tes
 8. `test_correctly_supported_findings_remain_accepted`: Verifies that genuine verified bugs are accepted with preserved uncertainty.
 9. `test_insufficient_evidence_results_in_unverified_outcome`: Verifies that insufficient evidence leaves the store unpolluted.
 10. `test_final_synthesis_accurately_reporting_accepted_and_rejected_claims`: Verifies truthful loop completion and report synthesis.
+
+---
+
+## 6. Pilot Run Failure Forensic Analysis & Engine Remediation (`run_ce01ff96700b`)
+
+### A. Failure Case
+- **Run ID**: `run_ce01ff96700b`
+- **Target**: `https://github.com/fastapi/fastapi.git` (commit `45cb2252c737906f37544f5ba6bee0295fb81468`)
+- **Provider**: Ollama (`qwen2.5-coder:1.5b`)
+- **Status**: `FAILED` (duration: 144.91s)
+- **Timeline Observation**: Turn 5 started at `19:11:28`, run failed at `19:13:28` (an exact 120.0-second gap).
+
+### B. Forensic Root Cause
+1. **Primary**: During Step 5, the model request to Ollama's `/chat/completions` endpoint exceeded the HTTP read timeout.
+2. **120-Second Gap Explained**: `OpenAICompatibleProvider` defaulted to `timeout_seconds = 60.0` and `max_retries = 1`. When the first request attempt timed out after 60s, `httpx.TimeoutException` was caught by the retry loop, which executed a second attempt that timed out after another 60s. Total elapsed time before raising `LLMUnavailableError`: exactly `2 * 60.0s = 120.0s`.
+3. **Audit Visibility Gap**: The loop caught `LLMUnavailableError` and logged a generic error string, but no structured failure event was persisted, and the report builder did not surface failure details or execution stage in exported JSON or Markdown reports.
+4. **Synthesis Invariant Gap**: Runs failing during or before final synthesis did not distinguish between partial progress and clean completion in report models.
+
+### C. Remediation Implemented
+1. **Configurable LLM Timeout**: Added `llm_timeout_seconds` to `ForgeSettings` (default `120.0s`), wired through `OpenAICompatibleProvider` and all provider factories.
+2. **Explicit `LLMTimeoutError`**: Introduced a dedicated subclass of `LLMUnavailableError` to classify timeout exceptions separately from network connection failures.
+3. **Structured Failure Event**: Standardized `EventType.RUN_FAILED` payloads containing:
+   - `failure_category` (`timeout`, `connection_error`, `authentication_error`, `rate_limit`, `context_length`, `provider_error`, `malformed_response`, `empty_response`, `tool_dispatch_error`, `synthesis_error`, `unexpected_exception`)
+   - `error_message` (sanitized with zero secrets)
+   - `stage` (`initialization`, `llm_generation`, `tool_dispatch`, `synthesis`)
+   - `step` (turn number)
+   - `retryable` (boolean flag)
+   - `timestamp` (ISO-8601 UTC)
+4. **Report Failure Details Exposure**: `InvestigationReport` model now incorporates `failure_details` and `final_synthesis`. Both JSON and Markdown reports prominently render failure diagnosis while preserving all partial investigation findings, evidence, and event history.
+5. **Synthesis Integrity**: Enforced that a run cannot be marked `completed` if final synthesis did not succeed. If turn budget is reached without synthesis, status is marked `max_steps_exceeded`; if synthesis fails with an exception, status is marked `failed` with stage `synthesis`.
+
+### D. Regression Suite
+Verified by 12 regression tests in `tests/unit/test_phase7_failed_run_root_cause.py`:
+1. `test_ollama_request_timeout`
+2. `test_ollama_connection_failure`
+3. `test_empty_model_response`
+4. `test_malformed_model_response`
+5. `test_invalid_tool_call_response`
+6. `test_tool_dispatch_exception`
+7. `test_investigation_loop_unexpected_exception`
+8. `test_final_synthesis_failure`
+9. `test_failure_event_persistence`
+10. `test_report_rendering_of_failure_details`
+11. `test_secret_redaction_in_failure_messages`
+12. `test_preservation_of_partial_investigation_history`

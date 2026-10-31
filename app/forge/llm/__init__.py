@@ -15,6 +15,7 @@ from forge.llm.provider import (
     LLMProviderError,
     LLMRateLimitError,
     LLMUnavailableError,
+    LLMTimeoutError,
 )
 from forge.llm.fake import FakeLLMProvider
 from forge.llm.openai import OpenAICompatibleProvider
@@ -33,6 +34,7 @@ __all__ = [
     "LLMRateLimitError",
     "LLMContextLengthError",
     "LLMUnavailableError",
+    "LLMTimeoutError",
     "FakeLLMProvider",
     "OpenAICompatibleProvider",
     "get_provider",
