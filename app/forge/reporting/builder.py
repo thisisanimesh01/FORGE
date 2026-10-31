@@ -165,12 +165,17 @@ class ReportBuilder:
                 )
             )
 
+        rejected_events = [
+            ev for ev in raw_events
+            if ev.event_type in (EventType.FINDING_VALIDATION_FAILED, EventType.FINDING_DUPLICATE_DETECTED)
+        ]
         summary_counts = {
             "total_findings": len(findings_list),
             "findings_by_severity": findings_by_severity,
             "findings_by_state": findings_by_state,
             "total_evidence": len(all_evidence),
             "total_events": len(raw_events),
+            "rejected_claims_count": len(rejected_events),
         }
 
         return InvestigationReport(
@@ -226,6 +231,7 @@ def report_to_markdown(report: InvestigationReport) -> str:
     lines.append(f"- **Total Findings**: {counts.get('total_findings', 0)}")
     lines.append(f"- **Total Evidence Records**: {counts.get('total_evidence', 0)}")
     lines.append(f"- **Total Audit Events**: {counts.get('total_events', 0)}")
+    lines.append(f"- **Rejected / Disproven Claims**: {counts.get('rejected_claims_count', 0)}")
     lines.append("")
 
     # Severity & Lifecycle Breakdowns

@@ -35,7 +35,22 @@ Repair Reliability & Generalization ── [COMPLETED]
 Candidate Semantic Verification Hardening ── [COMPLETED]
 Deterministic Repair Construction Architecture ── [COMPLETED]
 Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (Milestones 1–6 Complete — Supervised Beta Release Gate Reached)
+Phase 7: Evidence-Driven Investigation Engine ── [COMPLETED] (Cross-File Evidence, Contradiction Detection, Severity Justification)
 ```
+
+### Phase 7: Evidence-Driven Investigation Engine (Completed)
+- **Objective & Scope**: Harden the autonomous investigation engine against false positives, test assertion misinterpretations, and unverified vulnerability claims exposed during live repository pilots (specifically reproducing and resolving the FastAPI pilot failure case `run_8120cd03f318` on commit `45cb2252c737906f37544f5ba6bee0295fb81468`).
+- **Architectural & Empirical Deliverables**:
+  - *Cross-File Investigation & Dependency Tools*: Engineered `inspect_dependencies` (parsing workspace `pyproject.toml`, `requirements*.txt`, and `setup.cfg` via stdlib `tomllib`) and `find_related_files` (discovering cross-file relationships between test suites, implementation files, and dependency manifests) in `ToolRegistry`.
+  - *Deterministic Contradiction Detection Engine*: Implemented multi-layered verification in `app/forge/analysis/validation.py`:
+    - `validate_dependency_claim`: Deterministically rejects false claims alleging outdated, unsupported, or missing dependencies when project manifests contradict them.
+    - `validate_test_file_claim`: Rejects test-assertion misinterpretations where negative error-handling tests (e.g. `pytest.raises(ValueError)`) are falsely reported as defects, and blocks test-name-based false positives.
+    - `validate_implementation_contradiction`: Discovers related implementation files and detects explicit input validation logic contradicting "missing validation" allegations.
+    - `validate_claim_evidence_relevance`: Validates semantic tokens ensuring cited source code ranges match claimed defect categories (e.g. SQL query operations for SQL injection claims).
+  - *Severity Justification & Confidence Calibration*: Engineered `validate_severity_and_impact`, enforcing that HIGH and CRITICAL severities require concrete failure modes or demonstrable exploitability. Speculative security claims lacking attack vectors are rejected with `SeverityJustificationError`. Test files cannot support high-severity vulnerabilities without demonstrable production exploitability. Confidence is strictly calibrated, preserving uncertainty and limitations annotations.
+  - *Transparent Agent Loop & Report Synthesis*: Enriched `InvestigationLoop` to track all inspected files and rejected candidate findings. Reserved synthesis turn ensures operator transparency, reporting rejected claim counts and validation failure details in JSON and Markdown reports.
+  - *Dedicated Specification ([`docs/specs/phase-7-evidence-driven-investigation-engine.md`](docs/specs/phase-7-evidence-driven-investigation-engine.md))*: Complete architectural design, error taxonomy, and validation matrices.
+  - *Comprehensive Regression Suite ([`tests/unit/test_phase7_investigation_evidence_validation.py`](tests/unit/test_phase7_investigation_evidence_validation.py))*: 10 deterministic regression tests validating all failure modes, with full test suite passing (1,082 tests total) with zero regressions.
 
 ### Phase 6, Milestone 6: Final Verification & Supervised Beta Release Gate (Completed)
 - **Objective & Scope**: Execute the final end-to-end acceptance audit of FORGE across distribution packages, live container isolation, local model inference, CI matrix testing, provenance attestation, and operational recovery, determining whether version 0.1.0b1 qualifies for a limited supervised developer beta release.

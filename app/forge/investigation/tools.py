@@ -27,12 +27,21 @@ from forge.schemas import (
     FindingSeverity,
 )
 from forge.storage.store import ForgeStore
+from forge.analysis.dependency_manifest import (
+    DependencyManifest,
+    parse_workspace_dependencies,
+    find_related_workspace_files,
+)
 from forge.analysis.validation import (
     ToolExecutionError,
     FindingValidationError,
     SyntaxClaimValidationError,
     ConsistencyValidationError,
     InsufficientEvidenceError,
+    UnrelatedEvidenceError,
+    ContradictionValidationError,
+    SeverityJustificationError,
+    TestAssertionMisinterpretationError,
     DuplicateFindingError,
     RepeatedRejectedClaimError,
     ValidationOutcome,
@@ -354,6 +363,43 @@ class ToolRegistry:
         )
         self._handlers["record_finding"] = self._handle_record_finding
 
+        # 11. inspect_dependencies
+        self._definitions.append(
+            ToolDefinition(
+                name="inspect_dependencies",
+                description="Inspect declared dependencies, constraints, and package configuration across repository manifests (e.g. pyproject.toml, requirements.txt, setup.cfg).",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "package_name": {
+                            "type": "string",
+                            "description": "Optional specific package name to inspect (e.g. 'pydantic')",
+                        },
+                    },
+                },
+            )
+        )
+        self._handlers["inspect_dependencies"] = self._handle_inspect_dependencies
+
+        # 12. find_related_files
+        self._definitions.append(
+            ToolDefinition(
+                name="find_related_files",
+                description="Find related files for a given file (e.g., locate implementations corresponding to a test file, or locate tests and configuration for an implementation file).",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Relative file path within the repository root (e.g. 'tests/test_datastructures.py')",
+                        },
+                    },
+                    "required": ["file_path"],
+                },
+            )
+        )
+        self._handlers["find_related_files"] = self._handle_find_related_files
+
     # -------------------------------------------------------------
     # Tool Handlers
     # -------------------------------------------------------------
@@ -527,6 +573,50 @@ class ToolRegistry:
             "query": query,
             "total_results": len(results),
             "results": results,
+        }, indent=2)
+
+    def _handle_inspect_dependencies(self, args: Dict[str, Any]) -> str:
+        """Inspect declared dependencies, constraints, and package configuration across repository manifests."""
+        pkg_filter = args.get("package_name")
+        manifest = parse_workspace_dependencies(self.workspace_path)
+
+        if pkg_filter:
+            norm_pkg = pkg_filter.strip().lower().replace("_", "-")
+            constraint = manifest.dependencies.get(norm_pkg)
+            return json.dumps({
+                "package_name": pkg_filter,
+                "declared": constraint is not None,
+                "constraint": constraint,
+                "manifest_sources": manifest.manifest_sources,
+                "python_requires": manifest.python_requires,
+            }, indent=2)
+
+        return json.dumps({
+            "manifest_sources": manifest.manifest_sources,
+            "python_requires": manifest.python_requires,
+            "total_dependencies": len(manifest.dependencies),
+            "dependencies": manifest.dependencies,
+        }, indent=2)
+
+    def _handle_find_related_files(self, args: Dict[str, Any]) -> str:
+        """Find related implementations, tests, and configuration files for a given file."""
+        file_path = args.get("file_path", "")
+        if not file_path:
+            raise ToolExecutionError("file_path parameter is required")
+
+        norm_path = normalize_relative_path(file_path)
+        if not norm_path:
+            raise ToolExecutionError("file_path must be a non-empty relative path")
+
+        candidate = self.workspace_path / norm_path
+        assert_contained_path(candidate, self.workspace_path)
+
+        related = find_related_workspace_files(self.workspace_path, norm_path)
+        return json.dumps({
+            "file_path": norm_path,
+            "implementations": related.get("implementations", []),
+            "tests": related.get("tests", []),
+            "dependencies": related.get("dependencies", []),
         }, indent=2)
 
     def _handle_get_evidence(self, args: Dict[str, Any]) -> str:
@@ -798,6 +888,7 @@ class ToolRegistry:
                 title=title,
                 description=description,
                 confidence=confidence,
+                severity=severity,
                 finding_provider=self.store,
                 run_id=self.run_id,
                 rejected_tracker=self.rejected_tracker,
@@ -900,6 +991,7 @@ class ToolRegistry:
             }, indent=2)
 
         # Step 9: Persist validated Finding and Evidence in store
+        final_severity = val_outcome.adjusted_severity or severity
         final_confidence = val_outcome.adjusted_confidence or confidence
         final_limitations = limitations or val_outcome.limitations
 
@@ -907,7 +999,7 @@ class ToolRegistry:
             run_id=self.run_id,
             title=title,
             description=description,
-            severity=severity,
+            severity=final_severity,
             confidence=final_confidence,
             affected_files=[norm_path],
             suggested_step=suggested_step,
@@ -946,6 +1038,7 @@ class ToolRegistry:
             "severity": finding.severity.value,
             "confidence": finding.confidence.value,
             "lifecycle_state": finding.lifecycle_state.value,
+            "limitations": finding.limitations,
             "affected_file": norm_path,
             "lines": f"{start_line}-{actual_end}",
             "evidence_id": evidence.evidence_id,

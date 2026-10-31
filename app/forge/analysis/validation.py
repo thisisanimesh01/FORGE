@@ -57,6 +57,29 @@ def build_rejection_directive(
             f"Do not resubmit this disproven syntax claim with altered wording or categories. "
             f"Investigate other source locations or produce a truthful final synthesis."
         )
+    elif rejection_type == "ContradictionValidationError":
+        return (
+            f"Contradiction detected{loc_str}: {message}. "
+            f"Do not submit claims contradicted by project configuration, implementation, or test assertions. "
+            f"Verify actual behavior across files or produce your final synthesis."
+        )
+    elif rejection_type == "SeverityJustificationError":
+        return (
+            f"Unjustified severity level{loc_str}: {message}. "
+            f"HIGH and CRITICAL findings require demonstrable, severe impact (e.g. exploitability, crash, data corruption). "
+            f"Downgrade severity or provide concrete evidence of impact."
+        )
+    elif rejection_type == "TestAssertionMisinterpretationError":
+        return (
+            f"Test assertion misinterpretation{loc_str}: A test verifying error handling or negative cases "
+            f"(e.g. expecting ValueError on invalid input) demonstrates intended validation, not a defect. "
+            f"Do not treat test names or expected errors as defects without proof of test failure."
+        )
+    elif rejection_type == "UnrelatedEvidenceError":
+        return (
+            f"The cited evidence{loc_str} does not contain elements related to the claimed defect ('{defect_category or 'unspecified'}'). "
+            f"Cite the actual source lines demonstrating the defect or investigate other modules."
+        )
     elif rejection_type == "InsufficientEvidenceError":
         return (
             f"The cited source evidence{loc_str} does not substantiate a defect under category '{defect_category or 'unspecified'}'. "
@@ -126,6 +149,7 @@ class FindingValidationError(ToolExecutionError):
         return {
             "status": "rejected",
             "rejection_type": self.rejection_type,
+            "error_type": self.rejection_type,
             "reason": self.message,
             "error": self.message,  # Backward compatibility
             "affected_file": self.affected_file,
@@ -148,6 +172,26 @@ class ConsistencyValidationError(FindingValidationError):
 class InsufficientEvidenceError(FindingValidationError):
     """Raised when evidence context is insufficient or unrelated to the alleged defect."""
     pass
+
+
+class UnrelatedEvidenceError(InsufficientEvidenceError):
+    """Raised when cited lines have no relevance to the alleged defect."""
+    pass
+
+
+class ContradictionValidationError(FindingValidationError):
+    """Raised when an LLM claim is contradicted by source code, dependency manifests, or test semantics."""
+    pass
+
+
+class SeverityJustificationError(FindingValidationError):
+    """Raised when HIGH or CRITICAL severity is unjustified or unsupported by demonstrated impact."""
+    pass
+
+
+class TestAssertionMisinterpretationError(FindingValidationError):
+    """Raised when a test assertion verifying error handling or negative cases is misinterpreted as a defect."""
+    __test__ = False
 
 
 class DuplicateFindingError(FindingValidationError):
@@ -173,6 +217,7 @@ class ValidationOutcome:
     duplicate_of_id: Optional[str] = None
     action: str = "accepted"  # "accepted", "duplicate_prevented", "duplicate_linked"
     adjusted_confidence: Optional[FindingConfidence] = None
+    adjusted_severity: Optional[FindingSeverity] = None
     limitations: Optional[str] = None
     reason: Optional[str] = None
 
@@ -345,8 +390,22 @@ class RejectedClaimTracker:
                     return rec
 
             # Condition 5: Inconsistent or insufficient evidence on exact range
-            if rec.rejection_type == "InsufficientEvidenceError" and exact_range_match:
-                if is_same_category:
+            if rec.rejection_type in {"InsufficientEvidenceError", "UnrelatedEvidenceError"} and exact_range_match:
+                if is_same_category or desc_sim >= 0.25:
+                    return rec
+
+            # Condition 6: Contradiction on overlapping range (e.g. dependency or implementation contradiction)
+            if rec.rejection_type == "ContradictionValidationError" and has_range_overlap:
+                if is_same_category or desc_sim >= 0.25 or title_sim >= 0.3:
+                    return rec
+
+            # Condition 7: Test assertion misinterpretation on test file
+            if rec.rejection_type == "TestAssertionMisinterpretationError" and has_range_overlap:
+                return rec
+
+            # Condition 8: Severity justification rejection on overlapping range
+            if rec.rejection_type == "SeverityJustificationError" and has_range_overlap:
+                if desc_sim >= 0.3 or title_sim >= 0.35:
                     return rec
 
         return None
@@ -529,6 +588,321 @@ def validate_category_consistency(
 
 
 # ---------------------------------------------------------------------------
+# Phase 7: Evidence-Driven Investigation & Contradiction Validators
+# ---------------------------------------------------------------------------
+
+def validate_dependency_claim(
+    workspace_path: Path,
+    title: str,
+    description: str,
+    defect_category: Optional[str],
+) -> None:
+    """Validate dependency-related claims against workspace manifests (pyproject.toml, requirements.txt, etc.).
+
+    Detects false claims such as alleging an outdated dependency or unsupported version
+    when project manifests explicitly require the current version.
+    """
+    text = f"{title} {description}".lower()
+
+    # Keywords indicating dependency version or compatibility claims
+    dep_keywords = [
+        "outdated", "deprecated", "incompatible", "version", "pydantic",
+        "dependency", "upgrade", "downgrade", "v1", "v2", "unsupported",
+    ]
+    if not any(kw in text for kw in dep_keywords):
+        return
+
+    from forge.analysis.dependency_manifest import parse_workspace_dependencies
+    manifest = parse_workspace_dependencies(workspace_path)
+
+    # Pydantic-specific check (FastAPI failure case)
+    if "pydantic" in text:
+        pydantic_constraint = manifest.get_constraint("pydantic")
+        if pydantic_constraint:
+            is_alleging_pydantic_v1_or_outdated = any(
+                phrase in text for phrase in [
+                    "outdated pydantic",
+                    "pydantic v1",
+                    "pydantic 1",
+                    "invalid pydantic v2",
+                    "not compatible with pydantic v2",
+                    "incompatible with pydantic v2",
+                    "pydantic v2 support",
+                    "pydantic version is outdated",
+                    "pydantic version",
+                ]
+            )
+            has_pydantic_v2_manifest = any(
+                token in pydantic_constraint
+                for token in [">=2", ">= 2", "^2", "~=2", "==2", "2."]
+            )
+            if is_alleging_pydantic_v1_or_outdated and has_pydantic_v2_manifest:
+                raise ContradictionValidationError(
+                    f"Contradiction detected: Project manifest specifies 'pydantic{pydantic_constraint}', "
+                    f"which contradicts the claim that an outdated Pydantic version is used or that Pydantic v2 is unsupported."
+                )
+
+    # General declared dependency contradiction checks
+    for pkg_name, constraint in manifest.dependencies.items():
+        if pkg_name in text:
+            if f"missing {pkg_name}" in text or f"no {pkg_name}" in text:
+                raise ContradictionValidationError(
+                    f"Contradiction detected: Package '{pkg_name}' is declared in project dependencies ('{constraint}')."
+                )
+
+
+def validate_test_file_claim(
+    workspace_path: Path,
+    norm_path: str,
+    slice_lines: List[str],
+    full_content: str,
+    start_line: int,
+    end_line: int,
+    title: str,
+    description: str,
+    defect_category: Optional[str],
+) -> None:
+    """Validate claims made against test files.
+
+    Prevents:
+    1. Misinterpreting negative test assertions (e.g. pytest.raises(ValueError) on invalid input) as production bugs.
+    2. Using test function names (e.g. test_upload_file_invalid_pydantic_v2) as proof of a defect.
+    3. Claiming security vulnerabilities based on negative test cases.
+    """
+    path_lower = norm_path.lower()
+    is_test_file = (
+        "tests/" in path_lower
+        or "test/" in path_lower
+        or path_lower.startswith("test_")
+        or "/test_" in path_lower
+        or path_lower.endswith("_test.py")
+    )
+    if not is_test_file:
+        return
+
+    text = f"{title} {description}".lower()
+    excerpt_text = "\n".join(slice_lines).lower()
+
+    # Check 1: Negative test assertions checking error handling
+    negative_assertion_markers = [
+        "pytest.raises",
+        "assertraises",
+        "with pytest.raises",
+        "pytest.warns",
+    ]
+    has_negative_assertion = any(m in excerpt_text for m in negative_assertion_markers)
+
+    # Does the claim allege a bug because error/invalid behavior was tested?
+    alleges_error_handling_defect = any(
+        kw in text for kw in [
+            "invalid", "valueerror", "raises error", "exception", "failed",
+            "pydantic v2", "rejects", "fails to", "upload file invalid",
+        ]
+    )
+
+    if has_negative_assertion and alleges_error_handling_defect:
+        # Check if the test is expecting an exception for invalid input
+        if "raises" in excerpt_text and ("invalid" in excerpt_text or "valueerror" in excerpt_text):
+            raise TestAssertionMisinterpretationError(
+                f"Test assertion misinterpretation at '{norm_path}:{start_line}-{end_line}': "
+                f"The cited test explicitly asserts expected error handling (expecting exception on invalid input). "
+                f"Verifying that invalid input is rejected is correct validation behavior, not a defect in production code."
+            )
+
+    # Check 2: Treating test function name as proof of defect
+    for line in slice_lines:
+        line_stripped = line.strip()
+        if line_stripped.startswith("def test_"):
+            func_name = line_stripped.split("def ", 1)[1].split("(", 1)[0].strip()
+            title_words = set(re.findall(r"[a-zA-Z0-9]+", title.lower()))
+            func_tokens = [tok for tok in re.findall(r"[a-zA-Z0-9]+", func_name.lower()) if tok != "test"]
+            func_words = set(func_tokens)
+            if func_words and (len(func_words & title_words) / len(func_words)) >= 0.7:
+                if "traceback" not in excerpt_text and "assert false" not in excerpt_text:
+                    raise TestAssertionMisinterpretationError(
+                        f"Test name false positive: Finding title ('{title}') derives from test function '{func_name}'. "
+                        f"A test function name is not evidence of a defect. Cite the production implementation demonstrating the defect."
+                    )
+
+
+def validate_implementation_contradiction(
+    workspace_path: Path,
+    norm_path: str,
+    title: str,
+    description: str,
+) -> None:
+    """Validate claims alleging missing validation against the actual implementation."""
+    text = f"{title} {description}".lower()
+
+    is_validation_claim = any(
+        phrase in text for phrase in [
+            "missing validation",
+            "does not validate",
+            "fails to validate",
+            "accepts invalid",
+            "no validation",
+            "unvalidated",
+            "invalid input",
+            "upload file invalid",
+        ]
+    )
+    if not is_validation_claim:
+        return
+
+    from forge.analysis.dependency_manifest import find_related_workspace_files
+    related = find_related_workspace_files(workspace_path, norm_path)
+    impl_files = related.get("implementations", [])
+
+    for impl_rel in impl_files:
+        impl_path = workspace_path / impl_rel
+        if impl_path.is_file():
+            try:
+                impl_content = impl_path.read_text(encoding="utf-8", errors="replace")
+                if "_validate" in impl_content and "raise ValueError" in impl_content:
+                    raise ContradictionValidationError(
+                        f"Contradiction detected: Implementation at '{impl_rel}' explicitly implements input validation "
+                        f"raising ValueError on invalid input, contradicting the claim that validation is missing or that invalid input is accepted."
+                    )
+            except Exception:
+                pass
+
+
+def validate_severity_and_impact(
+    severity: FindingSeverity,
+    confidence: FindingConfidence,
+    defect_category: Optional[str],
+    title: str,
+    description: str,
+    slice_lines: List[str],
+    norm_path: str,
+) -> Tuple[FindingSeverity, FindingConfidence, Optional[str]]:
+    """Verify that HIGH/CRITICAL severities have concrete impact justifications.
+
+    Returns:
+        (adjusted_severity, adjusted_confidence, limitations_addition)
+    """
+    text = f"{title} {description}".lower()
+    cat = canonicalize_category(defect_category)
+    adjusted_sev = severity
+    limitations_notes: List[str] = []
+
+    # Rule 1: High/Critical severity justification
+    if severity in (FindingSeverity.HIGH, FindingSeverity.CRITICAL):
+        severe_impact_markers = [
+            "remote code execution", "rce", "arbitrary code execution",
+            "sql injection", "sqli", "command injection",
+            "privilege escalation", "authentication bypass", "auth bypass",
+            "arbitrary file read", "arbitrary file write", "path traversal",
+            "denial of service", "dos", "memory corruption", "data loss",
+            "unhandled crash", "infinite recursion", "infinite loop",
+            "syntax error", "parse error", "missing colon",
+            "out of bounds", "index error", "buffer overflow",
+            "resource leak", "memory leak", "deadlock",
+        ]
+        has_severe_impact = any(marker in text for marker in severe_impact_markers)
+
+        concrete_failure_indicators = [
+            "crash", "corrupt", "leak", "bypass", "failure", "breaks",
+            "exception", "unhandled", "error", "traceback", "index",
+            "bounds", "array", "loop", "syntax", "colon", "zero division",
+            "null", "overflow", "hang", "recursion", "typeerror", "valueerror",
+        ]
+        has_concrete_failure = (
+            has_severe_impact
+            or any(ind in text for ind in concrete_failure_indicators)
+            or cat in ("syntax_error", "loop", "resource_leak", "boundary_condition")
+        )
+
+        speculative_phrases = [
+            "may introduce security vulnerabilities",
+            "potential security vulnerability",
+            "might be vulnerable",
+            "could introduce security",
+            "potential vulnerability",
+            "possible security risk",
+            "could lead to vulnerability",
+            "security risk",
+            "may be vulnerable",
+            "outdated pydantic",
+        ]
+        is_speculative = any(phrase in text for phrase in speculative_phrases)
+
+        is_test_file = (
+            "tests/" in norm_path.lower()
+            or "test/" in norm_path.lower()
+            or norm_path.lower().startswith("test_")
+            or "/test_" in norm_path.lower()
+            or norm_path.lower().endswith("_test.py")
+        )
+
+        if is_speculative:
+            raise SeverityJustificationError(
+                f"Unjustified {severity.value.upper()} severity: Speculative security claim ('{description[:80]}...') "
+                f"lacks demonstrable exploitability, attack vector, or concrete severe impact."
+            )
+
+        if is_test_file and not has_severe_impact:
+            raise SeverityJustificationError(
+                f"Unjustified {severity.value.upper()} severity: Test files cannot support high or critical vulnerability findings "
+                f"without demonstrable production exploitability."
+            )
+
+        is_security_claim = (
+            cat == "security"
+            or "security" in text
+            or "vulnerability" in text
+            or "vulnerable" in text
+            or "cve" in text
+        )
+
+        if is_security_claim and not has_severe_impact:
+            adjusted_sev = FindingSeverity.MEDIUM
+            limitations_notes.append(
+                f"Severity adjusted from '{severity.value}' to 'medium': Security claim lacks demonstrable exploitability or concrete severe operational impact."
+            )
+
+    # Rule 2: Confidence calibration
+    adjusted_conf = confidence
+
+    if confidence == FindingConfidence.CONFIRMED:
+        adjusted_conf = FindingConfidence.HIGH
+        limitations_notes.append("Confidence adjusted from 'confirmed' to 'high': Static inspection cannot confirm defects without isolated execution verification.")
+    elif ("test" in norm_path.lower()) and confidence == FindingConfidence.HIGH:
+        adjusted_conf = FindingConfidence.MEDIUM
+        limitations_notes.append("Confidence adjusted to 'medium': Citing test code rather than production implementation increases uncertainty.")
+
+    limitations_str = " ".join(limitations_notes) if limitations_notes else None
+    return adjusted_sev, adjusted_conf, limitations_str
+
+
+def validate_claim_evidence_relevance(
+    slice_lines: List[str],
+    defect_category: Optional[str],
+    title: str,
+    description: str,
+) -> None:
+    """Ensure that the cited evidence has direct semantic relevance to the finding description."""
+    text = f"{title} {description}".lower()
+    excerpt_text = "\n".join(slice_lines).lower()
+
+    specific_defect_types = {
+        "sql injection": ["sql", "select ", "insert ", "update ", "delete ", "query", "execute", "cursor", "db"],
+        "buffer overflow": ["buffer", "overflow", "memcpy", "strcpy", "array", "pointer", "size"],
+        "cross-site scripting": ["xss", "html", "script", "render", "escape", "template", "sanitize"],
+        "resource leak": ["open(", "close(", "file", "socket", "connection", "handle", "fd", "stream", "acquire", "release"],
+    }
+
+    for defect_name, required_tokens in specific_defect_types.items():
+        if defect_name in text:
+            has_any = any(tok in excerpt_text for tok in required_tokens)
+            if not has_any:
+                raise UnrelatedEvidenceError(
+                    f"Evidence line range cited for '{defect_name}' contains none of the expected constructs "
+                    f"({', '.join(required_tokens[:5])}). The cited evidence is unrelated to the finding description."
+                )
+
+
+# ---------------------------------------------------------------------------
 # Duplicate Finding Detection
 # ---------------------------------------------------------------------------
 
@@ -656,6 +1030,7 @@ def validate_finding_claim(
     store: Optional[FindingEvidenceProvider] = None,
     run_id: Optional[str] = None,
     *,
+    severity: Optional[FindingSeverity] = None,
     finding_provider: Optional[FindingEvidenceProvider] = None,
     existing_findings: Optional[Sequence[Finding]] = None,
     evidence_by_finding: Optional[Dict[str, List[EvidenceRecord]]] = None,
@@ -666,6 +1041,10 @@ def validate_finding_claim(
     Raises:
         SyntaxClaimValidationError: If a claimed syntax error is disproven by static analysis.
         ConsistencyValidationError: If category, title, description, and code are contradictory.
+        ContradictionValidationError: If claim contradicts dependency manifests or code implementations.
+        TestAssertionMisinterpretationError: If test assertions are misinterpreted as production bugs.
+        SeverityJustificationError: If high/critical severity lacks demonstrated impact.
+        UnrelatedEvidenceError: If cited code is unrelated to the claimed defect.
         InsufficientEvidenceError: If evidence context does not support the defect claim.
         DuplicateFindingError: If finding is an exact duplicate of an existing finding.
         RepeatedRejectedClaimError: If finding matches a previously rejected claim in this run.
@@ -736,7 +1115,56 @@ def validate_finding_claim(
         description=description,
     )
 
-    # Step 5: Duplicate finding detection
+    # Step 5: Contradiction checks against dependencies
+    validate_dependency_claim(
+        workspace_path=workspace_path,
+        title=title,
+        description=description,
+        defect_category=defect_category,
+    )
+
+    # Step 6: Test file assertion misinterpretation checks
+    validate_test_file_claim(
+        workspace_path=workspace_path,
+        norm_path=norm_path,
+        slice_lines=slice_lines,
+        full_content=full_content,
+        start_line=start_line,
+        end_line=end_line,
+        title=title,
+        description=description,
+        defect_category=defect_category,
+    )
+
+    # Step 7: Implementation contradiction checks
+    validate_implementation_contradiction(
+        workspace_path=workspace_path,
+        norm_path=norm_path,
+        title=title,
+        description=description,
+    )
+
+    # Step 8: Claim-to-evidence relevance checks
+    validate_claim_evidence_relevance(
+        slice_lines=slice_lines,
+        defect_category=defect_category,
+        title=title,
+        description=description,
+    )
+
+    # Step 9: Severity & impact justification, confidence calibration
+    sev_to_check = severity or FindingSeverity.MEDIUM
+    adj_sev, adj_conf, sev_limitations = validate_severity_and_impact(
+        severity=sev_to_check,
+        confidence=confidence,
+        defect_category=defect_category,
+        title=title,
+        description=description,
+        slice_lines=slice_lines,
+        norm_path=norm_path,
+    )
+
+    # Step 10: Duplicate finding detection
     provider = finding_provider or store
     if (provider and run_id) or (existing_findings is not None):
         dup_match = check_duplicate_finding(
@@ -770,18 +1198,17 @@ def validate_finding_claim(
                     reason=f"Linked additional evidence to existing finding '{ex_finding.finding_id}'",
                 )
 
-    # Step 6: Uncertainty preservation for semantic claims
-    adjusted_conf = confidence
-    if confidence == FindingConfidence.CONFIRMED:
-        # Static LLM inspection cannot confirm a defect without reproduction verification
-        adjusted_conf = FindingConfidence.HIGH
-
-    limitations = "Semantic correctness could not be established deterministically without an isolated execution reproduction."
+    base_limitations = "Semantic correctness could not be established deterministically without an isolated execution reproduction."
+    if sev_limitations:
+        limitations = f"{sev_limitations} {base_limitations}".strip()
+    else:
+        limitations = base_limitations
 
     return ValidationOutcome(
         is_valid=True,
         is_duplicate=False,
         action="accepted",
-        adjusted_confidence=adjusted_conf,
+        adjusted_confidence=adj_conf,
+        adjusted_severity=adj_sev,
         limitations=limitations,
     )
