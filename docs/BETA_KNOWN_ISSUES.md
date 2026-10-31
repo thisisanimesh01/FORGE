@@ -70,6 +70,11 @@ This document provides transparent, evidence-backed disclosure of observed capab
 - **Engine Protection:** `OpenAICompatibleProvider` implements safe multi-tier content-based tool extraction (validating tool names against authorized request tools, validating arguments against parameter schemas, and rejecting malformed JSON or unknown tools). Furthermore, `InvestigationLoop` provides bounded diagnostic correction turns and strictly prevents marking runs as `COMPLETED` when zero tools and zero evidence records exist.
 - **Operator Mitigation:** Operators running investigations with 1.5B models can rely on automatic content-based extraction. For complex multi-turn investigations involving deeply nested arguments, 7B or 14B parameter models provide higher tool-calling reliability.
 
+### Issue 9: Source-Level Defect Verification and Finding Evidence Binding
+- **Description:** Compact LLM models may observe code defects and attempt to summarize them textually without linking them to verified evidence, or may exhaust turn budgets by repeatedly reading slices of a single file without recording structured findings.
+- **Engine Protection:** FORGE provides the authorized `record_finding` tool with strict server-side validation. FORGE never trusts model-supplied source excerpts: the orchestrator independently extracts the real source lines from disk, verifies workspace containment, computes an SHA-256 integrity digest, and links the finding in the `suspected` state. Furthermore, turn-budget warnings and sequential same-file pagination limits prevent models from running out of turns without completing synthesis.
+- **Operator Mitigation:** Review recorded findings via `forge findings list --run-id <run_id>` and `forge findings show <finding_id>`. For large repositories, configure `--max-steps 10` to allow sufficient exploration before the final synthesis turn.
+
 ---
 
 ## 4. Operator Best Practices

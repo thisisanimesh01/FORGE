@@ -691,6 +691,13 @@ forge benchmark run --mode llm
 
 The investigation engine supports multi-tier tool-calling protocols: native OpenAI function-calling wire frames, direct JSON objects, markdown code fences, and `<tool_call>` tags. Parameter schemas are strictly validated against tool specifications, and investigations without executed tools or findings cannot falsely complete.
 
+#### Finding & Evidence Persistence Lifecycles
+- **Authorized `record_finding` Tool**: Autonomous agents record concrete defects using the structured `record_finding` tool, persisting `Finding` records in SQLite in the initial `suspected` lifecycle state.
+- **Server-Verified Evidence**: FORGE enforces zero-trust against model-provided excerpts. When a finding is recorded, the engine independently verifies path containment within the repository workspace, rejects symlink escapes, reads the ground-truth lines directly from disk, and computes a cryptographic SHA-256 digest linked to the newly created `EvidenceRecord`. Hallucinated line excerpts or fabricated source fragments are rejected at the persistence boundary.
+- **Turn Budget Visibility & Penultimate Synthesis**: Investigation loops provide dynamic step-budget tracking (`[Turn Budget: Step M of N]`). On the penultimate step, the model receives an explicit synthesis warning. On the final step, tool availability is scoped strictly to `record_finding`, forcing compact models to synthesize findings rather than exploring further.
+- **Same-File Pagination Safeguards**: Successive reads of the same file are tracked across turns; advisory warnings are emitted at $\ge 3$ reads, and execution halts with safety instructions at $> 4$ reads to prevent compact models from exhausting turn budgets on pagination loops.
+- **Truthful Investigation Outcomes**: When turn budgets expire without final synthesis, investigations are recorded honestly as `MAX_STEPS_EXCEEDED` rather than falsely marked `COMPLETED`. Investigations with zero findings explicitly report `Findings discovered: 0 (No defect findings identified)`.
+
 ---
 
 ## Benchmark Metrics & Evaluation

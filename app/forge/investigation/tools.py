@@ -1,9 +1,15 @@
 """Typed, bounded, read-only investigation tools for FORGE agents."""
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from forge.analysis.evidence import (
+    create_evidence,
+    normalize_relative_path,
+    EvidenceValidationError,
+)
 from forge.config import redact_secrets
 from forge.llm.models import ToolDefinition
 from forge.repository.architecture import RepositoryMap
@@ -13,6 +19,12 @@ from forge.sandbox.adapter import Sandbox
 from forge.sandbox.docker import DockerSandbox
 from forge.sandbox.evidence import record_sandbox_result_in_store
 from forge.sandbox.models import SandboxRequest, ExecutionLimits
+from forge.schemas import (
+    EvidenceType,
+    FindingConfidence,
+    FindingLifecycleState,
+    FindingSeverity,
+)
 from forge.storage.store import ForgeStore
 
 
@@ -259,6 +271,72 @@ class ToolRegistry:
             )
         )
         self._handlers["run_sandbox_check"] = self._handle_run_sandbox_check
+
+        # 10. record_finding
+        self._definitions.append(
+            ToolDefinition(
+                name="record_finding",
+                description=(
+                    "Record a structured defect or security finding with server-side verified source evidence. "
+                    "The affected_file and line range must exist in the repository workspace. FORGE independently "
+                    "verifies and extracts the real source excerpt from disk, computes its SHA-256 digest, and persists "
+                    "the finding in 'suspected' state."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Concise summary title of the suspected defect",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Detailed explanation of why this code is defective or vulnerable",
+                        },
+                        "affected_file": {
+                            "type": "string",
+                            "description": "Repository-relative file path containing the defective code",
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "Starting line number of the relevant code excerpt (1-indexed)",
+                            "minimum": 1,
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "description": "Ending line number of the relevant code excerpt (inclusive)",
+                            "minimum": 1,
+                        },
+                        "severity": {
+                            "type": "string",
+                            "enum": ["critical", "high", "medium", "low", "info"],
+                            "description": "Severity level of the issue",
+                            "default": "medium",
+                        },
+                        "confidence": {
+                            "type": "string",
+                            "enum": ["confirmed", "high", "medium", "low"],
+                            "description": "Confidence level in the defect observation",
+                            "default": "medium",
+                        },
+                        "defect_category": {
+                            "type": "string",
+                            "description": "Optional defect category (e.g. 'syntax_error', 'logic_bug', 'security', 'resource_leak')",
+                        },
+                        "suggested_step": {
+                            "type": "string",
+                            "description": "Optional suggested next verification step or reproduction check",
+                        },
+                        "limitations": {
+                            "type": "string",
+                            "description": "Optional known uncertainties or limitations regarding this finding",
+                        },
+                    },
+                    "required": ["title", "description", "affected_file", "start_line", "end_line"],
+                },
+            )
+        )
+        self._handlers["record_finding"] = self._handle_record_finding
 
     # -------------------------------------------------------------
     # Tool Handlers
@@ -545,4 +623,158 @@ class ToolRegistry:
             "timed_out": result.timed_out,
             "isolation_established": result.isolation_established,
             "error_message": result.error_message,
+        }, indent=2)
+
+    def _handle_record_finding(self, args: Dict[str, Any]) -> str:
+        """Handle record_finding by independently verifying source evidence from disk and persisting Finding and Evidence."""
+        if not self.store:
+            raise ToolExecutionError("Database store unavailable: cannot persist findings")
+
+        title = str(args.get("title", "")).strip()
+        if not title:
+            raise ToolExecutionError("title is required")
+
+        description = str(args.get("description", "")).strip()
+        if not description:
+            raise ToolExecutionError("description is required")
+
+        sev_str = str(args.get("severity", "medium")).lower().strip()
+        try:
+            severity = FindingSeverity(sev_str)
+        except ValueError:
+            raise ToolExecutionError(
+                f"Invalid severity '{sev_str}'. Allowed: {[s.value for s in FindingSeverity]}"
+            )
+
+        conf_str = str(args.get("confidence", "medium")).lower().strip()
+        try:
+            confidence = FindingConfidence(conf_str)
+        except ValueError:
+            raise ToolExecutionError(
+                f"Invalid confidence '{conf_str}'. Allowed: {[c.value for c in FindingConfidence]}"
+            )
+
+        raw_file = args.get("affected_file") or args.get("file_path")
+        if not raw_file or not str(raw_file).strip():
+            raise ToolExecutionError("affected_file parameter is required")
+        raw_file_str = str(raw_file).strip()
+
+        # Step 1-3: Path normalization & containment check
+        try:
+            norm_path = normalize_relative_path(raw_file_str)
+        except EvidenceValidationError as exc:
+            raise ToolExecutionError(f"Invalid affected_file path: {exc}")
+
+        if not norm_path:
+            raise ToolExecutionError("affected_file cannot be empty")
+
+        candidate = self.workspace_path / norm_path
+        resolved_file = assert_contained_path(candidate, self.workspace_path)
+
+        if not resolved_file.exists() or not resolved_file.is_file():
+            raise ToolExecutionError(f"Affected file not found: '{norm_path}'")
+
+        # Reject symlinks escaping workspace
+        assert_contained_path(resolved_file.resolve(), self.workspace_path)
+
+        # Step 4-5: Line range validation
+        start_line_raw = args.get("start_line", 1)
+        end_line_raw = args.get("end_line", 1)
+        try:
+            start_line = int(start_line_raw)
+            end_line = int(end_line_raw)
+        except (TypeError, ValueError):
+            raise ToolExecutionError("start_line and end_line must be valid integers")
+
+        if start_line < 1:
+            raise ToolExecutionError(f"start_line must be >= 1, got {start_line}")
+        if end_line < start_line:
+            raise ToolExecutionError(
+                f"end_line must be >= start_line, got start_line={start_line}, end_line={end_line}"
+            )
+
+        # Step 6: Read actual source directly from disk
+        try:
+            file_content = resolved_file.read_text(encoding="utf-8", errors="replace")
+        except Exception as exc:
+            raise ToolExecutionError(f"Failed to read file '{norm_path}': {exc}")
+
+        lines = file_content.splitlines()
+        total_lines = len(lines)
+        if start_line > total_lines:
+            raise ToolExecutionError(
+                f"start_line {start_line} exceeds total file lines ({total_lines}) in '{norm_path}'"
+            )
+
+        actual_end = min(end_line, total_lines)
+        slice_lines = lines[start_line - 1 : actual_end]
+        if not slice_lines:
+            raise ToolExecutionError(f"No source lines extracted for range {start_line}-{end_line}")
+
+        numbered_lines = [
+            f"{start_line + i:4d} | {line}"
+            for i, line in enumerate(slice_lines)
+        ]
+        real_excerpt = (
+            f"=== File: {norm_path} (Lines {start_line}-{actual_end} of {total_lines}) ===\n"
+            + "\n".join(numbered_lines)
+        )
+
+        # Step 7: Integrity digest calculation
+        raw_slice_text = "\n".join(slice_lines)
+        content_digest = hashlib.sha256(raw_slice_text.encode("utf-8")).hexdigest()
+
+        # Step 8-9: Persist Finding and Evidence in store
+        suggested_step = args.get("suggested_step")
+        limitations = args.get("limitations")
+        defect_category = args.get("defect_category")
+
+        finding = self.store.create_finding(
+            run_id=self.run_id,
+            title=title,
+            description=description,
+            severity=severity,
+            confidence=confidence,
+            affected_files=[norm_path],
+            suggested_step=suggested_step,
+            limitations=limitations,
+        )
+
+        details = {
+            "content_digest": content_digest,
+            "digest_algorithm": "sha256",
+            "file_path": norm_path,
+            "start_line": start_line,
+            "end_line": actual_end,
+            "total_file_lines": total_lines,
+            "defect_category": defect_category,
+            "verified_against_workspace": True,
+        }
+
+        evidence = create_evidence(
+            run_id=self.run_id,
+            evidence_type=EvidenceType.SOURCE_EXCERPT,
+            description=f"Verified source excerpt from '{norm_path}' lines {start_line}-{actual_end}",
+            content=real_excerpt,
+            finding_id=finding.finding_id,
+            file_path=norm_path,
+            start_line=start_line,
+            end_line=actual_end,
+            details=details,
+            provenance="forge:investigator:source_verification",
+        )
+        self.store.attach_evidence(evidence)
+
+        return json.dumps({
+            "status": "success",
+            "finding_id": finding.finding_id,
+            "title": finding.title,
+            "severity": finding.severity.value,
+            "confidence": finding.confidence.value,
+            "lifecycle_state": finding.lifecycle_state.value,
+            "affected_file": norm_path,
+            "lines": f"{start_line}-{actual_end}",
+            "evidence_id": evidence.evidence_id,
+            "content_digest": content_digest,
+            "message": f"Finding '{finding.finding_id}' successfully recorded in 'suspected' state with verified source evidence '{evidence.evidence_id}'.",
         }, indent=2)

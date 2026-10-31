@@ -292,10 +292,25 @@ FORGE supports multi-tier tool invocation formats across local and cloud LLM pro
 3. **Markdown Fenced JSON**: Code fence blocks (````json {"name": "...", "arguments": {...}} ````).
 4. **`<tool_call>` Tags**: XML-style tags (`<tool_call>{"name": "...", "arguments": {...}}</tool_call>`).
 
+#### Finding Creation & Independent Evidence Verification
+When the model identifies a defect, it invokes the authorized `record_finding` tool:
+- **Server-Side Extraction:** FORGE never trusts model-supplied source code. The orchestrator independently verifies directory containment, reads actual lines directly from the workspace on disk, and computes an SHA-256 integrity digest (`content_digest`).
+- **Suspected Lifecycle State:** Newly recorded findings enter the `suspected` state (`FindingLifecycleState.SUSPECTED`). Transition to `verified` requires isolated execution evidence.
+- **Inspect Recorded Findings:**
+  ```bash
+  # List findings from an investigation run:
+  forge findings list --run-id <RUN_ID>
+
+  # Inspect full finding details and attached verified evidence:
+  forge findings show <FINDING_ID>
+  ```
+
 #### Investigation Safety & Invariant Guarantees
-- **Authorized Tool Allowlist**: Only tools declared in the request (`get_repository_map`, `search_symbols`, `read_source_excerpt`, `list_directory`, `run_sandbox_check`, `record_finding`) are permitted. Unknown tool names are strictly rejected.
+- **Authorized Tool Allowlist**: Only tools declared in the request (`get_repository_map`, `search_symbols`, `read_source_excerpt`, `list_directory`, `search_text`, `run_sandbox_check`, `record_finding`) are permitted. Unknown tool names are strictly rejected.
 - **Strict Parameter Validation**: Tool arguments are validated against JSON schema definitions (required fields, types, and enum values) before execution.
 - **Diagnostic Correction**: If a model generates malformed arguments or invalid JSON, FORGE supplies non-secret diagnostic feedback allowing the model a bounded opportunity to re-issue a corrected call.
+- **Turn-Budget Awareness**: Agents are notified of their step budget on turn 1 and receive a dedicated warning on the penultimate step (`max_steps - 1`). On the final step, exploration tools are omitted to reserve the turn for `record_finding` and structured synthesis.
+- **Same-File Pagination Limits**: Successive reads of the same file trigger guidance warnings at 3+ reads and halt further reads of that file at 5 reads to prevent infinite pagination.
 - **Anti-Premature Completion**: An investigation is strictly prohibited from finishing as `COMPLETED` on Step 1 if zero tools were executed and zero findings were recorded. Unexecuted or abandoned investigations are truthfully recorded as `FAILED`.
 
 ---

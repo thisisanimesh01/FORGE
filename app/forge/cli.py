@@ -823,6 +823,8 @@ def investigate(
             typer.echo(f"\nFindings discovered: {len(result.findings)}")
             for f in result.findings:
                 typer.echo(f"  - [{f.severity.value.upper()}] {f.title} ({f.finding_id})")
+        else:
+            typer.echo("\nFindings discovered: 0 (No defect findings identified)")
 
     finally:
         cleanup_repository(acquired)
