@@ -749,7 +749,7 @@ class ToolRegistry:
                 title=title,
                 description=description,
                 confidence=confidence,
-                store=self.store,
+                finding_provider=self.store,
                 run_id=self.run_id,
             )
         except FindingValidationError as fve:

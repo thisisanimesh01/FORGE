@@ -1,4 +1,4 @@
-"""Deterministic finding claim, evidence, and deduplication validation."""
+from __future__ import annotations
 
 import ast
 import hashlib
@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Sequence, Set, Tuple, runtime_checkable
 
 from forge.analysis.evidence import normalize_relative_path
 from forge.schemas import (
@@ -17,7 +17,18 @@ from forge.schemas import (
     FindingLifecycleState,
     FindingSeverity,
 )
-from forge.storage.store import ForgeStore
+
+
+@runtime_checkable
+class FindingEvidenceProvider(Protocol):
+    """Narrow read-only interface for finding and evidence querying during validation."""
+
+    def list_findings(self, run_id: Optional[str] = None) -> List[Finding]:
+        ...
+
+    def list_evidence_for_finding(self, finding_id: str) -> List[EvidenceRecord]:
+        ...
+
 
 
 # ---------------------------------------------------------------------------
@@ -311,41 +322,61 @@ def validate_category_consistency(
 # ---------------------------------------------------------------------------
 
 def check_duplicate_finding(
-    store: Optional[ForgeStore],
-    run_id: str,
-    norm_path: str,
-    start_line: int,
-    end_line: int,
-    defect_category: Optional[str],
-    title: str,
-    description: str,
-    content_digest: str,
+    store: Optional[FindingEvidenceProvider] = None,
+    run_id: Optional[str] = None,
+    norm_path: str = "",
+    start_line: int = 1,
+    end_line: int = 1,
+    defect_category: Optional[str] = None,
+    title: str = "",
+    description: str = "",
+    content_digest: str = "",
+    *,
+    existing_findings: Optional[Sequence[Finding]] = None,
+    evidence_by_finding: Optional[Dict[str, List[EvidenceRecord]]] = None,
+    finding_provider: Optional[FindingEvidenceProvider] = None,
 ) -> Optional[Tuple[Finding, bool]]:
     """Detect whether a candidate finding is a duplicate of an existing finding in this run.
+
+    Findings and evidence can be supplied directly via `existing_findings` and
+    `evidence_by_finding`, or queried dynamically via `finding_provider` / `store`.
 
     Returns:
         (existing_finding, is_identical_evidence) or None if not a duplicate.
     """
-    if not store:
-        return None
+    provider = finding_provider or store
 
-    try:
-        existing_findings = store.list_findings(run_id=run_id)
-    except Exception:
-        return None
+    if existing_findings is None:
+        if not provider or not run_id:
+            return None
+        try:
+            findings_list = provider.list_findings(run_id=run_id)
+        except Exception:
+            return None
+    else:
+        findings_list = list(existing_findings)
 
-    if not existing_findings:
+    if not findings_list:
         return None
 
     cand_tokens = normalize_tokens(description)
     cand_title_tokens = normalize_tokens(title)
     cand_cat = canonicalize_category(defect_category)
 
-    for ex in existing_findings:
+    for ex in findings_list:
         if norm_path not in ex.affected_files:
             continue
 
-        ex_evidence = store.list_evidence_for_finding(ex.finding_id)
+        if evidence_by_finding is not None and ex.finding_id in evidence_by_finding:
+            ex_evidence = evidence_by_finding[ex.finding_id]
+        elif provider:
+            try:
+                ex_evidence = provider.list_evidence_for_finding(ex.finding_id)
+            except Exception:
+                ex_evidence = []
+        else:
+            ex_evidence = []
+
         # Check evidence line overlap for this file
         matching_ev = [
             ev for ev in ex_evidence
@@ -411,8 +442,12 @@ def validate_finding_claim(
     title: str,
     description: str,
     confidence: FindingConfidence,
-    store: Optional[ForgeStore] = None,
+    store: Optional[FindingEvidenceProvider] = None,
     run_id: Optional[str] = None,
+    *,
+    finding_provider: Optional[FindingEvidenceProvider] = None,
+    existing_findings: Optional[Sequence[Finding]] = None,
+    evidence_by_finding: Optional[Dict[str, List[EvidenceRecord]]] = None,
 ) -> ValidationOutcome:
     """Perform deterministic claim validation, static syntax checks, and deduplication.
 
@@ -468,10 +503,11 @@ def validate_finding_claim(
     )
 
     # Step 5: Duplicate finding detection
-    if store and run_id:
+    provider = finding_provider or store
+    if (provider and run_id) or (existing_findings is not None):
         dup_match = check_duplicate_finding(
-            store=store,
-            run_id=run_id,
+            store=provider,
+            run_id=run_id or "",
             norm_path=norm_path,
             start_line=start_line,
             end_line=end_line,
@@ -479,6 +515,9 @@ def validate_finding_claim(
             title=title,
             description=description,
             content_digest=content_digest,
+            existing_findings=existing_findings,
+            evidence_by_finding=evidence_by_finding,
+            finding_provider=provider,
         )
         if dup_match:
             ex_finding, is_identical_evidence = dup_match
