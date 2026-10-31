@@ -34,7 +34,11 @@ from forge.analysis.validation import (
     ConsistencyValidationError,
     InsufficientEvidenceError,
     DuplicateFindingError,
+    RepeatedRejectedClaimError,
     ValidationOutcome,
+    RejectedClaimRecord,
+    RejectedClaimTracker,
+    build_rejection_directive,
     validate_finding_claim,
 )
 
@@ -56,6 +60,7 @@ class ToolRegistry:
         run_id: Optional[str] = None,
         sandbox: Optional[Sandbox] = None,
         max_output_chars: int = 50_000,
+        rejected_tracker: Optional[RejectedClaimTracker] = None,
     ):
         self.workspace_path = workspace_path.resolve()
         self.repo_map = repo_map
@@ -64,6 +69,7 @@ class ToolRegistry:
         self.run_id = run_id or "run_default"
         self.sandbox = sandbox or DockerSandbox()
         self.max_output_chars = max_output_chars
+        self.rejected_tracker = rejected_tracker or RejectedClaimTracker()
         self._handlers: Dict[str, Callable[[Dict[str, Any]], str]] = {}
         self._definitions: List[ToolDefinition] = []
 
@@ -91,12 +97,16 @@ class ToolRegistry:
                     + f"\n\n[TRUNCATED: Output exceeded maximum allowed size of {self.max_output_chars} characters]"
                 )
             return redacted
+        except FindingValidationError as fve:
+            rejection = fve.to_rejection_dict()
+            return json.dumps(rejection, indent=2)
         except SecurityError as sec_err:
             return json.dumps({"error": f"Security violation: {sec_err}"})
         except ToolExecutionError as tool_err:
             return json.dumps({"error": str(tool_err)})
         except Exception as exc:
             return json.dumps({"error": f"Unexpected tool execution error: {exc}"})
+
 
     def _register_tools(self) -> None:
         """Register all typed read-only investigation tools."""
@@ -735,6 +745,45 @@ class ToolRegistry:
         limitations = args.get("limitations")
         defect_category = args.get("defect_category")
 
+        # Check per-run rejected claim tracker to prevent duplicate/spam retries
+        if self.rejected_tracker:
+            prior_rejection = self.rejected_tracker.check_repeated_rejection(
+                norm_path=norm_path,
+                start_line=start_line,
+                end_line=actual_end,
+                defect_category=defect_category,
+                title=title,
+                description=description,
+            )
+            if prior_rejection:
+                err_msg = (
+                    f"Repeated rejected finding submission: A claim on '{norm_path}:{start_line}-{actual_end}' "
+                    f"was already rejected ({prior_rejection.rejection_reason})."
+                )
+                repeat_err = RepeatedRejectedClaimError(
+                    err_msg,
+                    affected_file=norm_path,
+                    start_line=start_line,
+                    end_line=actual_end,
+                    defect_category=defect_category,
+                    rejection_type="RepeatedRejectedClaimError",
+                )
+                if self.store and self.run_id:
+                    self.store.append_event(
+                        self.run_id,
+                        EventType.FINDING_VALIDATION_FAILED,
+                        {
+                            "error_type": "RepeatedRejectedClaimError",
+                            "message": err_msg,
+                            "file": norm_path,
+                            "lines": f"{start_line}-{actual_end}",
+                            "title": title,
+                            "category": defect_category,
+                            "prior_rejection_type": prior_rejection.rejection_type,
+                        },
+                    )
+                raise repeat_err
+
         try:
             val_outcome = validate_finding_claim(
                 workspace_path=self.workspace_path,
@@ -751,8 +800,40 @@ class ToolRegistry:
                 confidence=confidence,
                 finding_provider=self.store,
                 run_id=self.run_id,
+                rejected_tracker=self.rejected_tracker,
             )
         except FindingValidationError as fve:
+            if fve.affected_file is None:
+                fve.affected_file = norm_path
+            if fve.start_line is None:
+                fve.start_line = start_line
+            if fve.end_line is None:
+                fve.end_line = actual_end
+            if fve.defect_category is None:
+                fve.defect_category = defect_category
+            if fve.directive is None:
+                fve.directive = build_rejection_directive(
+                    rejection_type=fve.rejection_type,
+                    message=fve.message,
+                    affected_file=norm_path,
+                    start_line=start_line,
+                    end_line=actual_end,
+                    defect_category=defect_category,
+                )
+
+            # Record in rejected-claim tracker so retries are intercepted
+            if self.rejected_tracker and not isinstance(fve, RepeatedRejectedClaimError):
+                self.rejected_tracker.record_rejected_claim(
+                    norm_path=norm_path,
+                    start_line=start_line,
+                    end_line=actual_end,
+                    defect_category=defect_category,
+                    title=title,
+                    description=description,
+                    rejection_type=fve.__class__.__name__,
+                    rejection_reason=str(fve),
+                )
+
             if self.store and self.run_id:
                 event_type = (
                     EventType.FINDING_DUPLICATE_DETECTED

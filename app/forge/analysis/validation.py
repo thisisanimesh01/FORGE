@@ -40,9 +40,99 @@ class ToolExecutionError(Exception):
     pass
 
 
+def build_rejection_directive(
+    rejection_type: str,
+    message: str,
+    affected_file: Optional[str] = None,
+    start_line: Optional[int] = None,
+    end_line: Optional[int] = None,
+    defect_category: Optional[str] = None,
+) -> str:
+    """Generate concise, actionable corrective directive for rejected findings."""
+    loc_str = f" for '{affected_file}:{start_line}-{end_line}'" if affected_file and start_line else (f" in '{affected_file}'" if affected_file else "")
+
+    if rejection_type == "SyntaxClaimValidationError":
+        return (
+            f"Deterministic static syntax analysis confirmed that lines{loc_str} have valid Python syntax. "
+            f"Do not resubmit this disproven syntax claim with altered wording or categories. "
+            f"Investigate other source locations or produce a truthful final synthesis."
+        )
+    elif rejection_type == "InsufficientEvidenceError":
+        return (
+            f"The cited source evidence{loc_str} does not substantiate a defect under category '{defect_category or 'unspecified'}'. "
+            f"Do not resubmit this claim for this line range without concrete observed evidence. "
+            f"Investigate other source locations or conclude your investigation."
+        )
+    elif rejection_type == "ConsistencyValidationError":
+        return (
+            f"Finding classification contradicts the cited code or description{loc_str}. "
+            f"Do not submit contradictory defect classifications. Verify the actual code construct or produce your final synthesis."
+        )
+    elif rejection_type == "DuplicateFindingError":
+        return (
+            f"This defect is already recorded under an existing finding{loc_str}. "
+            f"Do not resubmit duplicate findings. Inspect other modules or synthesize your findings."
+        )
+    elif rejection_type == "RepeatedRejectedClaimError":
+        return (
+            f"A substantially equivalent claim{loc_str} was already rejected earlier in this investigation. "
+            f"Do not repeatedly retry claims for this line range. Investigate other files or provide your final synthesis."
+        )
+    else:
+        return (
+            f"Finding claim rejected{loc_str}: {message}. "
+            f"Do not resubmit this claim. Investigate other source locations or produce a truthful final synthesis."
+        )
+
+
 class FindingValidationError(ToolExecutionError):
-    """Base exception for finding claim validation failures."""
-    pass
+    """Base exception for finding claim validation failures with structured context."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        affected_file: Optional[str] = None,
+        start_line: Optional[int] = None,
+        end_line: Optional[int] = None,
+        defect_category: Optional[str] = None,
+        directive: Optional[str] = None,
+        rejection_type: Optional[str] = None,
+    ):
+        super().__init__(message)
+        self.message = message
+        self.affected_file = affected_file
+        self.start_line = start_line
+        self.end_line = end_line
+        self.defect_category = defect_category
+        self.rejection_type = rejection_type or self.__class__.__name__
+        self.directive = directive
+
+    def to_rejection_dict(self) -> Dict[str, Any]:
+        """Convert finding rejection into structured, actionable feedback dictionary."""
+        line_range = None
+        if self.start_line is not None and self.end_line is not None:
+            line_range = {"start": self.start_line, "end": self.end_line}
+
+        directive = self.directive or build_rejection_directive(
+            rejection_type=self.rejection_type,
+            message=self.message,
+            affected_file=self.affected_file,
+            start_line=self.start_line,
+            end_line=self.end_line,
+            defect_category=self.defect_category,
+        )
+
+        return {
+            "status": "rejected",
+            "rejection_type": self.rejection_type,
+            "reason": self.message,
+            "error": self.message,  # Backward compatibility
+            "affected_file": self.affected_file,
+            "line_range": line_range,
+            "defect_category": self.defect_category,
+            "directive": directive,
+        }
 
 
 class SyntaxClaimValidationError(FindingValidationError):
@@ -63,6 +153,12 @@ class InsufficientEvidenceError(FindingValidationError):
 class DuplicateFindingError(FindingValidationError):
     """Raised when a candidate finding is rejected as an unhandled duplicate."""
     pass
+
+
+class RepeatedRejectedClaimError(FindingValidationError):
+    """Raised when a candidate finding was already rejected earlier in the same investigation."""
+    pass
+
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +236,121 @@ def compute_token_jaccard_similarity(tokens1: Set[str], tokens2: Set[str]) -> fl
     intersection = len(tokens1 & tokens2)
     union = len(tokens1 | tokens2)
     return intersection / union if union > 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Per-Run Rejected Claim Memory & Anti-Retry Tracker
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RejectedClaimRecord:
+    """Record of a rejected candidate finding within an audit run."""
+    norm_path: str
+    start_line: int
+    end_line: int
+    canonical_category: str
+    title_tokens: Set[str]
+    description_tokens: Set[str]
+    raw_title: str
+    raw_description: str
+    rejection_type: str
+    rejection_reason: str
+
+
+class RejectedClaimTracker:
+    """Tracks rejected finding submissions per run to prevent duplicate/spam retries."""
+
+    def __init__(self) -> None:
+        self._records: List[RejectedClaimRecord] = []
+
+    def record_rejected_claim(
+        self,
+        norm_path: str,
+        start_line: int,
+        end_line: int,
+        defect_category: Optional[str],
+        title: str,
+        description: str,
+        rejection_type: str,
+        rejection_reason: str,
+    ) -> None:
+        """Store a rejected finding candidate to detect subsequent retries."""
+        cand_cat = canonicalize_category(defect_category)
+        if cand_cat == "general":
+            cand_cat = canonicalize_category(title)
+        self._records.append(
+            RejectedClaimRecord(
+                norm_path=norm_path,
+                start_line=start_line,
+                end_line=end_line,
+                canonical_category=cand_cat,
+                title_tokens=normalize_tokens(title),
+                description_tokens=normalize_tokens(description),
+                raw_title=title,
+                raw_description=description,
+                rejection_type=rejection_type,
+                rejection_reason=rejection_reason,
+            )
+        )
+
+    def check_repeated_rejection(
+        self,
+        norm_path: str,
+        start_line: int,
+        end_line: int,
+        defect_category: Optional[str],
+        title: str,
+        description: str,
+    ) -> Optional[RejectedClaimRecord]:
+        """Detect whether this submission is a repeated or rephrased attempt of an already rejected claim.
+
+        Returns matching RejectedClaimRecord if repeated, or None if genuinely distinct.
+        """
+        cand_cat = canonicalize_category(defect_category)
+        if cand_cat == "general":
+            cand_cat = canonicalize_category(title)
+        cand_desc_tokens = normalize_tokens(description)
+        cand_title_tokens = normalize_tokens(title)
+
+        for rec in self._records:
+            if rec.norm_path != norm_path:
+                continue
+
+            # Check for range overlap
+            has_range_overlap = max(start_line, rec.start_line) <= min(end_line, rec.end_line)
+            if not has_range_overlap:
+                continue
+
+            exact_range_match = (start_line == rec.start_line and end_line == rec.end_line)
+
+            desc_sim = compute_token_jaccard_similarity(cand_desc_tokens, rec.description_tokens)
+            title_sim = compute_token_jaccard_similarity(cand_title_tokens, rec.title_tokens)
+            is_same_category = (cand_cat == rec.canonical_category)
+
+            # Condition 1: Substantially identical description on overlapping range (even if title changed)
+            if desc_sim >= 0.5 or (description.strip().lower() == rec.raw_description.strip().lower() and len(description.strip()) > 5):
+                return rec
+
+            # Condition 2: Same category and moderate similarity on overlapping range
+            if is_same_category and (desc_sim >= 0.3 or title_sim >= 0.4):
+                return rec
+
+            # Condition 3: Exact range match with moderate description or title similarity
+            if exact_range_match and (desc_sim >= 0.35 or title_sim >= 0.45):
+                return rec
+
+            # Condition 4: Disproven syntax error on the exact range
+            if rec.rejection_type == "SyntaxClaimValidationError" and exact_range_match:
+                if cand_cat == "syntax_error" or "syntax" in cand_title_tokens or "syntax" in cand_desc_tokens:
+                    return rec
+
+            # Condition 5: Inconsistent or insufficient evidence on exact range
+            if rec.rejection_type == "InsufficientEvidenceError" and exact_range_match:
+                if is_same_category:
+                    return rec
+
+        return None
+
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +659,7 @@ def validate_finding_claim(
     finding_provider: Optional[FindingEvidenceProvider] = None,
     existing_findings: Optional[Sequence[Finding]] = None,
     evidence_by_finding: Optional[Dict[str, List[EvidenceRecord]]] = None,
+    rejected_tracker: Optional[RejectedClaimTracker] = None,
 ) -> ValidationOutcome:
     """Perform deterministic claim validation, static syntax checks, and deduplication.
 
@@ -456,7 +668,29 @@ def validate_finding_claim(
         ConsistencyValidationError: If category, title, description, and code are contradictory.
         InsufficientEvidenceError: If evidence context does not support the defect claim.
         DuplicateFindingError: If finding is an exact duplicate of an existing finding.
+        RepeatedRejectedClaimError: If finding matches a previously rejected claim in this run.
     """
+    # Step 0: Check per-run rejected claim tracker
+    if rejected_tracker:
+        prior_rejection = rejected_tracker.check_repeated_rejection(
+            norm_path=norm_path,
+            start_line=start_line,
+            end_line=end_line,
+            defect_category=defect_category,
+            title=title,
+            description=description,
+        )
+        if prior_rejection:
+            raise RepeatedRejectedClaimError(
+                f"Repeated rejected finding submission: A claim on '{norm_path}:{start_line}-{end_line}' "
+                f"was already rejected ({prior_rejection.rejection_reason}).",
+                affected_file=norm_path,
+                start_line=start_line,
+                end_line=end_line,
+                defect_category=defect_category,
+                rejection_type="RepeatedRejectedClaimError",
+            )
+
     # Step 1: Content non-emptiness
     non_empty_lines = [l for l in slice_lines if l.strip()]
     if not non_empty_lines:

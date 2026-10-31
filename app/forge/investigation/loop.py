@@ -203,11 +203,27 @@ class InvestigationLoop:
                 break
 
             steps_executed += 1
-            is_penultimate = (steps_executed == self.max_steps - 1)
+            is_penultimate = (steps_executed == self.max_steps - 1) and (self.max_steps >= 2)
             is_final_step = (steps_executed == self.max_steps)
 
-            # Turn budget notices for multi-step runs (when past Step 1)
-            if is_penultimate and steps_executed > 1:
+            # Turn budget notices and tool allocation
+            if is_final_step and self.max_steps >= 2:
+                # Dedicated final synthesis step: no tools provided so model produces a structured textual synthesis
+                request_tools = []
+                messages.append(
+                    ChatMessage(
+                        role=MessageRole.USER,
+                        content=(
+                            f"[Final Turn: Step {steps_executed} of {self.max_steps}. "
+                            "Conclude your investigation now with a structured final assessment detailing all observations, "
+                            "accepted findings, rejected claims, affected modules, and limitations. "
+                            "If no findings were accepted, state truthfully that no defects were verified and explain the inspection "
+                            "limitations without claiming the repository is defect-free.]"
+                        ),
+                    )
+                )
+            elif is_penultimate and steps_executed > 1:
+                request_tools = tools
                 messages.append(
                     ChatMessage(
                         role=MessageRole.USER,
@@ -218,26 +234,9 @@ class InvestigationLoop:
                         ),
                     )
                 )
-            elif is_final_step and steps_executed > 1:
-                messages.append(
-                    ChatMessage(
-                        role=MessageRole.USER,
-                        content=(
-                            f"[Final Turn: Step {steps_executed} of {self.max_steps}. "
-                            "Conclude your investigation now. Record any remaining finding using 'record_finding' "
-                            "or provide your structured final assessment detailing all observations, suspected defects, "
-                            "affected modules, and limitations.]"
-                        ),
-                    )
-                )
-
-            # On the final step, restrict available tools to only record_finding
-            # This prevents burning the final step on reading more lines without synthesizing
-            if is_final_step:
-                record_finding_tools = [t for t in tools if t.name == "record_finding"]
-                request_tools = record_finding_tools if record_finding_tools else []
             else:
                 request_tools = tools
+
 
             bounded_messages = self._truncate_history(messages)
 
@@ -315,9 +314,24 @@ class InvestigationLoop:
                     break
 
                 # 4. Legitimate final assessment after tools or findings
-                final_response_text = response.content
-                loop_status = "completed"
-                break
+                if response.content and response.content.strip():
+                    final_response_text = response.content.strip()
+                    loop_status = "completed"
+                    break
+                else:
+                    if is_final_step:
+                        loop_status = "max_steps_exceeded"
+                        final_response_text = (
+                            f"Investigation halted: Reached maximum execution step limit of {self.max_steps} turns."
+                        )
+                        break
+                    messages.append(
+                        ChatMessage(
+                            role=MessageRole.USER,
+                            content="Your previous response was empty. Please use one of the available tools or provide your assessment.",
+                        )
+                    )
+                    continue
 
             # Execute tool calls
             for tc in response.tool_calls:

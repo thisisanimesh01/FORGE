@@ -9,6 +9,7 @@ from forge.reporting.models import (
 )
 from forge.reporting.builder import (
     ReportBuilder,
+    InvestigationReportBuilder,
     ReportError,
     report_to_json,
     report_to_markdown,
@@ -22,6 +23,7 @@ __all__ = [
     "ReportEvidenceItem",
     "ReportTimelineEvent",
     "ReportBuilder",
+    "InvestigationReportBuilder",
     "ReportError",
     "report_to_json",
     "report_to_markdown",

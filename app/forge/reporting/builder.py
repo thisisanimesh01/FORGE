@@ -128,6 +128,27 @@ class ReportBuilder:
                 summary = f"Tool finished: {ev.payload.get('tool_name', '?')}"
             elif ev.event_type == EventType.FINDING_CREATED:
                 summary = f"Finding created: {ev.payload.get('title', '?')}"
+            elif ev.event_type == EventType.FINDING_VALIDATION_FAILED:
+                err_type = str(ev.payload.get("error_type", "ValidationError")).strip()
+                title = str(ev.payload.get("title", "")).strip()
+                f_path = str(ev.payload.get("file", "")).strip()
+                lines = str(ev.payload.get("lines", "")).strip()
+                cat = ev.payload.get("category")
+                msg = str(ev.payload.get("message", "")).strip().replace("\n", " ")
+                loc_str = f" at {f_path}:{lines}" if f_path and lines else (f" in {f_path}" if f_path else "")
+                title_str = f" for '{title}'" if title else ""
+                cat_str = f" [{cat}]" if cat else ""
+                brief_msg = f": {msg[:120]}..." if len(msg) > 120 else (f": {msg}" if msg else "")
+                summary = f"Finding validation failed [{err_type}]{cat_str}{title_str}{loc_str}{brief_msg}"
+            elif ev.event_type == EventType.FINDING_DUPLICATE_DETECTED:
+                title = str(ev.payload.get("title", "")).strip()
+                f_path = str(ev.payload.get("file", "")).strip()
+                lines = str(ev.payload.get("lines", "")).strip()
+                msg = str(ev.payload.get("message", "")).strip().replace("\n", " ")
+                loc_str = f" at {f_path}:{lines}" if f_path and lines else (f" in {f_path}" if f_path else "")
+                title_str = f" '{title}'" if title else ""
+                brief_msg = f": {msg[:120]}..." if len(msg) > 120 else (f": {msg}" if msg else "")
+                summary = f"Duplicate finding rejected{title_str}{loc_str}{brief_msg}"
             elif ev.event_type == EventType.FINDING_STATE_TRANSITIONED:
                 summary = f"Finding {ev.payload.get('finding_id', '?')} transitioned to {ev.payload.get('to_state', '?')}"
             elif ev.event_type in {EventType.RUN_COMPLETED, EventType.RUN_FAILED}:
@@ -167,6 +188,9 @@ class ReportBuilder:
             evidence=all_evidence,
             events_timeline=events_timeline,
         )
+
+
+InvestigationReportBuilder = ReportBuilder
 
 
 def report_to_json(report: InvestigationReport, indent: int = 2) -> str:
