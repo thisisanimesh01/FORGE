@@ -53,3 +53,48 @@ class DuplicatePublicationError(PublicationError):
 class SecretDetectedError(PublicationError):
     """Raised when credentials or secrets are detected in commit messages, branch names, or metadata."""
     pass
+
+
+class PublicationWorkspaceError(PublicationError):
+    """Raised when provisioning, configuring, or cleaning an isolated publication workspace fails."""
+    pass
+
+
+class TargetRepoMutationError(PublicationError):
+    """Raised when the original target repository is detected to have been mutated during publication."""
+    pass
+
+
+class BranchCreationError(PublicationError):
+    """Raised when branch planning or creation fails."""
+    pass
+
+
+class BranchCollisionError(PublicationError):
+    """Raised when proposed branch name already exists in target repository or workspace."""
+    pass
+
+
+class PatchStagingError(PublicationError):
+    """Raised when applying or staging approved patch in publication workspace fails."""
+    pass
+
+
+class CommitCreationError(PublicationError):
+    """Raised when creating a commit in the isolated publication workspace fails."""
+    pass
+
+
+class CommitVerificationError(PublicationError):
+    """Raised when post-commit verification checks (parent, tree, diff, author) fail."""
+    pass
+
+
+class WorkspaceIntegrityError(PublicationError):
+    """Raised when publication workspace filesystem integrity is violated."""
+    pass
+
+
+class SymlinkEscapeError(WorkspaceIntegrityError):
+    """Raised when a symlink escapes the publication workspace root."""
+    pass

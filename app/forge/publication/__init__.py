@@ -10,17 +10,28 @@ from forge.publication.authorization import (
     is_action_authorized,
     validate_action_authorization,
 )
+from forge.publication.branch import GitBranchManager
+from forge.publication.commit import GitCommitBuilder
 from forge.publication.failures import (
     ArtifactBindingMismatchError,
+    BranchCollisionError,
+    BranchCreationError,
+    CommitCreationError,
+    CommitVerificationError,
     DuplicatePublicationError,
+    PatchStagingError,
     ProtectedBranchViolationError,
     PublicationActionMismatchError,
     PublicationAuthorizationError,
     PublicationError,
     PublicationPolicyViolationError,
+    PublicationWorkspaceError,
     RepositoryDirtyError,
     RepositoryIdentityMismatchError,
     SecretDetectedError,
+    SymlinkEscapeError,
+    TargetRepoMutationError,
+    WorkspaceIntegrityError,
 )
 from forge.publication.inspector import GitRepositoryInspector
 from forge.publication.interfaces import (
@@ -36,11 +47,14 @@ from forge.publication.models import (
     CommitAuthor,
     CommitProposal,
     PublicationAction,
+    PublicationExecutionState,
     PublicationPlan,
     PublicationRequest,
     PublicationStatus,
     PublicationValidationResult,
     RepositoryIdentity,
+    StagedCommitRecord,
+    WorkspaceIntegritySnapshot,
 )
 from forge.publication.planner import GitPublicationPlanner
 from forge.publication.policy import (
@@ -50,12 +64,15 @@ from forge.publication.policy import (
     validate_branch_name,
     validate_remote_url,
 )
+from forge.publication.staging import PublicationStagingCoordinator
 from forge.publication.storage import PublicationStore
 from forge.publication.validator import GitPublicationValidator
+from forge.publication.workspace import PublicationWorkspace
 
 __all__ = [
     # Models
     "PublicationAction",
+    "PublicationExecutionState",
     "PublicationStatus",
     "RepositoryIdentity",
     "CommitAuthor",
@@ -64,6 +81,8 @@ __all__ = [
     "PublicationPlan",
     "PublicationRequest",
     "PublicationValidationResult",
+    "StagedCommitRecord",
+    "WorkspaceIntegritySnapshot",
     # Protocols
     "GitRepositoryInspectorProtocol",
     "GitBranchManagerProtocol",
@@ -82,6 +101,15 @@ __all__ = [
     "ArtifactBindingMismatchError",
     "DuplicatePublicationError",
     "SecretDetectedError",
+    "PublicationWorkspaceError",
+    "TargetRepoMutationError",
+    "BranchCreationError",
+    "BranchCollisionError",
+    "PatchStagingError",
+    "CommitCreationError",
+    "CommitVerificationError",
+    "WorkspaceIntegrityError",
+    "SymlinkEscapeError",
     # Policy & Authorization
     "GitPublicationPolicy",
     "is_protected_branch",
@@ -97,4 +125,8 @@ __all__ = [
     "GitPublicationValidator",
     "GitPublicationPlanner",
     "PublicationStore",
+    "PublicationWorkspace",
+    "GitBranchManager",
+    "GitCommitBuilder",
+    "PublicationStagingCoordinator",
 ]

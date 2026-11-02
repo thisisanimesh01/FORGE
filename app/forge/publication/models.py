@@ -121,3 +121,66 @@ class PublicationValidationResult(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc),
         description="Validation evaluation timestamp."
     )
+
+
+class PublicationExecutionState(str, Enum):
+    """Lifecycle state of an isolated branch staging and commit workflow."""
+    INITIALIZED = "initialized"
+    WORKSPACE_PROVISIONED = "workspace_provisioned"
+    BRANCH_CREATED = "branch_created"
+    PATCH_APPLIED = "patch_applied"
+    COMMITTED = "committed"
+    VERIFIED = "verified"
+    FAILED = "failed"
+    ABORTED = "aborted"
+    CLEANED = "cleaned"
+
+
+class WorkspaceIntegritySnapshot(BaseModel):
+    """Integrity assessment of publication workspace against baseline."""
+    baseline_file_count: int = Field(0, description="Total baseline files fingerprinted.")
+    modified_files: List[str] = Field(default_factory=list, description="Files with modified content.")
+    added_files: List[str] = Field(default_factory=list, description="Unexpected added files.")
+    removed_files: List[str] = Field(default_factory=list, description="Unexpected removed files.")
+    is_contained: bool = Field(True, description="True if all operations were contained inside workspace.")
+    target_repo_immutable: bool = Field(True, description="True if target repo remained unmutated.")
+
+
+class StagedCommitRecord(BaseModel):
+    """Persisted record of an approved, locally staged Git commit in an isolated workspace."""
+    staging_id: str = Field(..., description="Unique staging identifier.")
+    workspace_id: str = Field(..., description="Isolated publication workspace identifier.")
+    plan_id: str = Field(..., description="Associated publication plan ID.")
+    repair_id: str = Field(..., description="Associated repair ID.")
+    decision_id: str = Field(..., description="Authorizing operator decision ID.")
+    finding_id: str = Field(..., description="Associated defect finding ID.")
+    branch_name: str = Field(..., description="Staged Git branch name.")
+    base_commit_sha: str = Field(..., description="Parent base commit revision.")
+    commit_sha: Optional[str] = Field(None, description="SHA of created commit.")
+    tree_sha: Optional[str] = Field(None, description="SHA of created commit tree.")
+    parent_commit_sha: Optional[str] = Field(None, description="Verified parent commit SHA.")
+    patch_artifact_id: str = Field(..., description="Applied patch artifact ID.")
+    patch_sha256: str = Field(..., description="SHA-256 digest of applied patch.")
+    changed_files: List[str] = Field(default_factory=list, description="Exact files modified in commit.")
+    author: CommitAuthor = Field(..., description="Commit author.")
+    committer: CommitAuthor = Field(..., description="Commit committer.")
+    commit_message: str = Field(..., description="Exact commit message.")
+    state: PublicationExecutionState = Field(
+        default=PublicationExecutionState.INITIALIZED,
+        description="Current execution state."
+    )
+    failure_reason: Optional[str] = Field(None, description="Diagnostic error message if failed.")
+    workspace_path: str = Field(..., description="Filesystem path of publication workspace.")
+    target_repo_path: str = Field(..., description="Original target repository path.")
+    workspace_integrity: Optional[WorkspaceIntegritySnapshot] = Field(
+        None,
+        description="Integrity snapshot recorded after commit creation."
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Record creation timestamp."
+    )
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Last update timestamp."
+    )

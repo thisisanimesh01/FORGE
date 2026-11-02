@@ -14,12 +14,16 @@ from typing import Any, Dict, List, Optional
 from forge.config import redact_secrets
 from forge.publication.interfaces import PublicationAuditStoreProtocol
 from forge.publication.models import (
+    CommitAuthor,
     CommitProposal,
     PublicationAction,
+    PublicationExecutionState,
     PublicationPlan,
     PublicationRequest,
     PublicationStatus,
     RepositoryIdentity,
+    StagedCommitRecord,
+    WorkspaceIntegritySnapshot,
 )
 from forge.repair.execution.models import (
     RepairActor,
@@ -326,5 +330,147 @@ class PublicationStore(PublicationAuditStoreProtocol):
                         now_str,
                     ),
                 )
+        finally:
+            conn.close()
+
+    # -------------------------------------------------------------------------
+    # Staged Commit Persistence (Milestone 2)
+    # -------------------------------------------------------------------------
+
+    def save_staged_commit(self, record: StagedCommitRecord) -> None:
+        """Persist or update a StagedCommitRecord."""
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO publication_staged_commits (
+                        staging_id, workspace_id, plan_id, repair_id, decision_id,
+                        finding_id, branch_name, base_commit_sha, commit_sha,
+                        tree_sha, parent_commit_sha, patch_artifact_id, patch_sha256,
+                        changed_files_json, author_json, committer_json, commit_message,
+                        state, failure_reason, workspace_path, target_repo_path,
+                        workspace_integrity_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(staging_id) DO UPDATE SET
+                        commit_sha = excluded.commit_sha,
+                        tree_sha = excluded.tree_sha,
+                        parent_commit_sha = excluded.parent_commit_sha,
+                        changed_files_json = excluded.changed_files_json,
+                        state = excluded.state,
+                        failure_reason = excluded.failure_reason,
+                        workspace_integrity_json = excluded.workspace_integrity_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        record.staging_id,
+                        record.workspace_id,
+                        record.plan_id,
+                        record.repair_id,
+                        record.decision_id,
+                        record.finding_id,
+                        record.branch_name,
+                        record.base_commit_sha,
+                        record.commit_sha,
+                        record.tree_sha,
+                        record.parent_commit_sha,
+                        record.patch_artifact_id,
+                        record.patch_sha256,
+                        json.dumps(record.changed_files),
+                        record.author.model_dump_json(),
+                        record.committer.model_dump_json(),
+                        record.commit_message,
+                        record.state.value,
+                        record.failure_reason,
+                        record.workspace_path,
+                        record.target_repo_path,
+                        record.workspace_integrity.model_dump_json() if record.workspace_integrity else "{}",
+                        record.created_at.isoformat(),
+                        record.updated_at.isoformat(),
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def _row_to_staged_commit(self, row: sqlite3.Row) -> StagedCommitRecord:
+        """Hydrate StagedCommitRecord from sqlite3.Row."""
+        integrity_obj = None
+        if row["workspace_integrity_json"] and row["workspace_integrity_json"] != "{}":
+            try:
+                integrity_obj = WorkspaceIntegritySnapshot.model_validate_json(row["workspace_integrity_json"])
+            except Exception:
+                pass
+
+        return StagedCommitRecord(
+            staging_id=row["staging_id"],
+            workspace_id=row["workspace_id"],
+            plan_id=row["plan_id"],
+            repair_id=row["repair_id"],
+            decision_id=row["decision_id"],
+            finding_id=row["finding_id"],
+            branch_name=row["branch_name"],
+            base_commit_sha=row["base_commit_sha"],
+            commit_sha=row["commit_sha"],
+            tree_sha=row["tree_sha"],
+            parent_commit_sha=row["parent_commit_sha"],
+            patch_artifact_id=row["patch_artifact_id"],
+            patch_sha256=row["patch_sha256"],
+            changed_files=json.loads(row["changed_files_json"]),
+            author=CommitAuthor.model_validate_json(row["author_json"]),
+            committer=CommitAuthor.model_validate_json(row["committer_json"]),
+            commit_message=row["commit_message"],
+            state=PublicationExecutionState(row["state"]),
+            failure_reason=row["failure_reason"],
+            workspace_path=row["workspace_path"],
+            target_repo_path=row["target_repo_path"],
+            workspace_integrity=integrity_obj,
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def get_staged_commit(self, staging_id: str) -> Optional[StagedCommitRecord]:
+        """Fetch StagedCommitRecord by staging_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM publication_staged_commits WHERE staging_id = ?",
+                (staging_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_staged_commit(row)
+        finally:
+            conn.close()
+
+    def get_staged_commit_for_repair(self, repair_id: str) -> Optional[StagedCommitRecord]:
+        """Fetch the latest StagedCommitRecord for a repair_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM publication_staged_commits WHERE repair_id = ? ORDER BY created_at DESC LIMIT 1",
+                (repair_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_staged_commit(row)
+        finally:
+            conn.close()
+
+    def list_staged_commits(self, repair_id: Optional[str] = None) -> List[StagedCommitRecord]:
+        """List StagedCommitRecords, optionally filtered by repair_id."""
+        conn = self._conn()
+        try:
+            if repair_id:
+                cur = conn.execute(
+                    "SELECT * FROM publication_staged_commits WHERE repair_id = ? ORDER BY created_at DESC",
+                    (repair_id,),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM publication_staged_commits ORDER BY created_at DESC"
+                )
+            return [self._row_to_staged_commit(row) for row in cur.fetchall()]
         finally:
             conn.close()

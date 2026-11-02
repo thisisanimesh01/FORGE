@@ -37,8 +37,23 @@ Deterministic Repair Construction Architecture ── [COMPLETED]
 Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (Milestones 1–6 Complete — Supervised Beta Release Gate Reached)
 Phase 7: Evidence-Driven Investigation Engine ── [COMPLETED] (Cross-File Evidence, Contradiction Detection, Investigation Orchestration)
 Phase 8: Controlled Evidence-Grounded Software Repair ── [COMPLETED] (Milestones 1–6 Completed & Verified)
-Phase 9: Safe Git Publication & Upstream Integration ── [IN PROGRESS] (Milestone 1 Completed)
+Phase 9: Safe Git Publication & Upstream Integration ── [IN PROGRESS] (Milestones 1 & 2 Completed)
 ```
+
+### Phase 9, Milestone 2: Isolated Branch Staging & Commit Creation (Completed)
+- **Objective & Scope**: Implement safe, isolated local Git branch staging and commit creation for Phase 8 verified and operator-authorized candidate repairs, provisioning dedicated scratch Git clones, creating deterministic branches, staging approved patches, and constructing verified commits with strict target repository immutability.
+- **Architectural Deliverables**:
+  - *Strict Target Repository Immutability (`forge.publication.workspace`)*: Target repository is treated as strictly read-only and immutable. An initial cryptographic snapshot (`HEAD` SHA, current branch, git status, tree SHA, remote URL) is captured at intake and re-verified before and after every staging, branch creation, patch application, and commit operation. Any modification raises `TargetRepoMutationError`.
+  - *Isolated Scratch Publication Workspace (`forge.publication.workspace`)*: Engineered `PublicationWorkspace` provisioning isolated scratch clones outside the target repository via `git clone --no-hardlinks`, configured with `core.hooksPath=/dev/null`, push disabled (`git remote set-url --push origin disabled://no-push`), and detached checkout at approved `base_commit_sha`. Enforces path traversal containment and symlink escape defenses (`SymlinkEscapeError`).
+  - *Deterministic Branch Management (`forge.publication.branch`)*: Implemented `GitBranchManager` generating deterministic branch names (`forge/fix-<finding-id>-<patch-hash[:8]>`), validating ref syntax against dangerous Git characters, proactively detecting branch collisions across both target repo and workspace (`BranchCollisionError`), and strictly rejecting protected branches (`main`, `master`, `release/*`, `production/*`, `stable/*`).
+  - *Normal Descriptive Commit Builder (`forge.publication.commit`)*: Implemented `GitCommitBuilder` applying approved patch bytes, verifying touched files against `allowed_files`, rejecting binary changes or unexpected staged files, enforcing normal descriptive commit messages without conventional commit prefixes (`feat:`, `fix:`, `docs:`, etc.), and scanning outbound commit messages and author/committer identities for exposed secrets.
+  - *Post-Commit Cryptographic Verification*: Asserts commit parent SHA equals approved `base_commit_sha`, commit tree SHA equals workspace tree SHA, touched files match `allowed_files` via `git diff-tree`, and workspace working tree is clean.
+  - *Real-Time Operator Approval Re-Validation (`forge.publication.staging`)*: Directly queries authoritative `ApprovalDecisionRecord` from SQLite storage and re-validates approval status, expiration, and artifact binding immediately before branch creation and immediately before commit creation. Revoked or expired approvals abort staging immediately.
+  - *Typed SQLite Persistence & Audit Ledger (`forge.storage.database`, `forge.publication.storage`)*: Added `publication_staged_commits` table and indices to SQLite schema (Schema Version 3). Implemented `StagedCommitRecord` persistence in `PublicationStore` and recorded sequential, secret-redacted audit events (`workspace_provisioned`, `branch_created`, `patch_applied`, `commit_created`, `commit_verified`) with `RepairActor.ORCHESTRATOR` in `repair_execution_events`.
+  - *CLI Commands (`forge.cli`)*: Added `forge repair publish stage`, `forge repair publish commit`, `forge repair publish status`, `forge repair publish inspect`, and top-level aliases `forge publish stage`, `forge publish status`, `forge publish inspect`.
+  - *Dedicated Specification ([`docs/specs/phase-9-m2-isolated-branch-staging.md`](docs/specs/phase-9-m2-isolated-branch-staging.md))*: Formal architecture specification detailing workspace isolation, deterministic branch naming, commit construction, post-commit verification, and SQLite schemas.
+  - *Verification Suite*: 25 unit tests in `tests/unit/test_phase9_m2_branch_staging.py` and 1,331 tests across the full pytest suite passing with zero regressions.
+  - *Scope Boundary*: Staging and commit creation execute strictly inside isolated scratch publication workspaces; automated Git pushes to remote repositories, pull-request creation, and merges remain strictly forbidden. Pull request creation is deferred to Milestone 3.
 
 ### Phase 9, Milestone 1: Git Integration Architecture & Publication Policy (Completed)
 - **Objective & Scope**: Design and implement the architectural foundation for safe Git publication of verified, operator-authorized candidate repairs, establishing Git integration contracts, publication policies, repository identity verification, authorization checks, planning models, and SQLite persistence.
@@ -712,6 +727,32 @@ forge repair test --scenario ACC01
 
 # Export machine-readable JSON acceptance report with automated secret scrubbing
 forge repair test --format json --output reports/acceptance_report.json
+```
+
+### Isolated Branch Staging & Commit Creation (Phase 9 Milestone 2)
+```bash
+# Stage an approved repair branch and commit inside an isolated publication scratch workspace
+forge repair publish stage rep_12345
+
+# Stage with a custom compliant branch name
+forge repair publish stage rep_12345 --branch forge/fix-login-null-pointer
+
+# Explicit commit alias for staging and commit creation
+forge repair publish commit rep_12345
+
+# View publication and staged commit status for a repair
+forge repair publish status rep_12345
+
+# Inspect metadata, touched files, and commit hashes for a staged commit
+forge repair publish inspect sc_1234567890ab
+
+# Inspect staged commit in JSON format
+forge repair publish inspect sc_1234567890ab --format json
+
+# Top-level CLI aliases
+forge publish stage rep_12345
+forge publish status rep_12345
+forge publish inspect sc_1234567890ab
 ```
 
 ### Safe Git Publication Planning & Validation (Phase 9 Milestone 1)

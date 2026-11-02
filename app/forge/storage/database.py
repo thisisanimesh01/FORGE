@@ -6,7 +6,7 @@ from typing import Optional
 from forge.config import get_settings
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 INIT_SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -499,6 +499,35 @@ CREATE TABLE IF NOT EXISTS publication_plans (
     FOREIGN KEY(decision_id) REFERENCES repair_approval_decisions(decision_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS publication_staged_commits (
+    staging_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    plan_id TEXT NOT NULL,
+    repair_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    finding_id TEXT NOT NULL,
+    branch_name TEXT NOT NULL,
+    base_commit_sha TEXT NOT NULL,
+    commit_sha TEXT,
+    tree_sha TEXT,
+    parent_commit_sha TEXT,
+    patch_artifact_id TEXT NOT NULL,
+    patch_sha256 TEXT NOT NULL,
+    changed_files_json TEXT NOT NULL DEFAULT '[]',
+    author_json TEXT NOT NULL DEFAULT '{}',
+    committer_json TEXT NOT NULL DEFAULT '{}',
+    commit_message TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL,
+    failure_reason TEXT,
+    workspace_path TEXT NOT NULL,
+    target_repo_path TEXT NOT NULL,
+    workspace_integrity_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE,
+    FOREIGN KEY(decision_id) REFERENCES repair_approval_decisions(decision_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
@@ -544,6 +573,9 @@ CREATE INDEX IF NOT EXISTS idx_pub_requests_repair ON publication_requests(repai
 CREATE INDEX IF NOT EXISTS idx_pub_requests_status ON publication_requests(status);
 CREATE INDEX IF NOT EXISTS idx_pub_plans_pub ON publication_plans(publication_id);
 CREATE INDEX IF NOT EXISTS idx_pub_plans_repair ON publication_plans(repair_id);
+CREATE INDEX IF NOT EXISTS idx_pub_staged_commits_repair ON publication_staged_commits(repair_id);
+CREATE INDEX IF NOT EXISTS idx_pub_staged_commits_branch ON publication_staged_commits(branch_name);
+CREATE INDEX IF NOT EXISTS idx_pub_staged_commits_state ON publication_staged_commits(state);
 """
 
 

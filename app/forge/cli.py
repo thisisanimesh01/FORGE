@@ -2633,6 +2633,174 @@ def publish_list(
 
 
 # =============================================================================
+# Isolated Branch Staging & Commit Creation CLI Commands (Phase 9 M2)
+# =============================================================================
+
+@publish_app.command(name="stage")
+def publish_stage(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to stage in isolated workspace"),
+    repo_path: Optional[str] = typer.Option(None, "--repo", "-r", help="Target repository directory (defaults to cwd)"),
+    branch_name: Optional[str] = typer.Option(None, "--branch", "-b", help="Custom branch name"),
+    author_name: str = typer.Option("FORGE Autonomous Agent", "--author-name", help="Commit author name"),
+    author_email: str = typer.Option("forge@local.agent", "--author-email", help="Commit author email"),
+    auto_cleanup: bool = typer.Option(False, "--clean", help="Automatically clean up workspace after verification"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output result as JSON"),
+) -> None:
+    """Stage approved repair branch and create verified commit inside isolated workspace."""
+    from forge.publication.staging import PublicationStagingCoordinator
+    from forge.publication.storage import PublicationStore
+    from forge.repair.execution.storage import RepairExecutionStore
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    target_repo = Path(repo_path).resolve() if repo_path else Path.cwd().resolve()
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+    forge_store = ForgeStore(db_path=settings.db_path)
+    pub_store = PublicationStore(db_path=settings.db_path)
+
+    coordinator = PublicationStagingCoordinator(
+        execution_store=exec_store,
+        forge_store=forge_store,
+        publication_store=pub_store,
+    )
+
+    try:
+        record = coordinator.stage_and_commit(
+            repair_id=repair_id,
+            repository_path=target_repo,
+            custom_branch_name=branch_name,
+            author_name=author_name,
+            author_email=author_email,
+            auto_cleanup=auto_cleanup,
+        )
+    except Exception as e:
+        typer.secho(f"Staging failed: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if as_json:
+        typer.echo(record.model_dump_json(indent=2))
+        return
+
+    typer.secho(f"[STAGED] Repair '{repair_id}' successfully staged in isolated workspace.", fg=typer.colors.GREEN)
+    typer.echo(f"  Staging ID:     {record.staging_id}")
+    typer.echo(f"  Branch Name:    {record.branch_name}")
+    typer.echo(f"  Commit SHA:     {record.commit_sha}")
+    typer.echo(f"  Tree SHA:       {record.tree_sha}")
+    typer.echo(f"  Parent Commit:  {record.parent_commit_sha}")
+    typer.echo(f"  Touched Files:  {', '.join(record.changed_files)}")
+    typer.echo(f"  Execution State:{record.state.value}")
+    typer.echo(f"  Workspace Path: {record.workspace_path}")
+    typer.echo(f"  Target Repo:    {record.target_repo_path} (IMMUTABLE / UNTOUCHED)")
+
+
+@publish_app.command(name="commit")
+def publish_commit(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to stage and commit"),
+    repo_path: Optional[str] = typer.Option(None, "--repo", "-r", help="Target repository directory (defaults to cwd)"),
+    branch_name: Optional[str] = typer.Option(None, "--branch", "-b", help="Custom branch name"),
+    author_name: str = typer.Option("FORGE Autonomous Agent", "--author-name", help="Commit author name"),
+    author_email: str = typer.Option("forge@local.agent", "--author-email", help="Commit author email"),
+    auto_cleanup: bool = typer.Option(False, "--clean", help="Automatically clean up workspace after verification"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output result as JSON"),
+) -> None:
+    """Create a verified commit for an approved repair in an isolated workspace."""
+    publish_stage(
+        repair_id=repair_id,
+        repo_path=repo_path,
+        branch_name=branch_name,
+        author_name=author_name,
+        author_email=author_email,
+        auto_cleanup=auto_cleanup,
+        as_json=as_json,
+    )
+
+
+@publish_app.command(name="status")
+def publish_status(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to check staging status for"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output status as JSON"),
+) -> None:
+    """Check staging and commit status for an approved repair."""
+    from forge.publication.storage import PublicationStore
+
+    settings = get_settings()
+    pub_store = PublicationStore(db_path=settings.db_path)
+    record = pub_store.get_staged_commit_for_repair(repair_id)
+
+    if not record:
+        typer.secho(f"No staged commit found for repair '{repair_id}'.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+
+    if as_json:
+        typer.echo(record.model_dump_json(indent=2))
+        return
+
+    typer.echo(f"Publication Staging Status for Repair: {repair_id}")
+    typer.echo(f"  Staging ID:     {record.staging_id}")
+    typer.echo(f"  State:          {record.state.value}")
+    typer.echo(f"  Branch Name:    {record.branch_name}")
+    typer.echo(f"  Commit SHA:     {record.commit_sha or 'Not created'}")
+    typer.echo(f"  Parent Commit:  {record.parent_commit_sha or 'None'}")
+    typer.echo(f"  Touched Files:  {', '.join(record.changed_files)}")
+    if record.failure_reason:
+        typer.secho(f"  Failure:        {record.failure_reason}", fg=typer.colors.RED)
+    typer.echo(f"  Created At:     {record.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+
+
+@publish_app.command(name="inspect")
+def publish_inspect(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to inspect publication artifacts for"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output inspection as JSON"),
+) -> None:
+    """Inspect detailed staging, commit metadata, and sequential audit trail for a repair."""
+    from forge.publication.storage import PublicationStore
+    from forge.repair.execution.storage import RepairExecutionStore
+
+    settings = get_settings()
+    pub_store = PublicationStore(db_path=settings.db_path)
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+
+    record = pub_store.get_staged_commit_for_repair(repair_id)
+    if not record:
+        typer.secho(f"No staged commit found for repair '{repair_id}'.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+
+    events = exec_store.get_events_for_repair(repair_id)
+    pub_events = [e for e in events if "workspace" in str(e.payload) or "commit" in str(e.payload) or "branch" in str(e.payload) or "patch" in str(e.payload) or "staging" in str(e.payload)]
+
+    if as_json:
+        payload = {
+            "staged_commit": record.model_dump(mode="json"),
+            "audit_events": [e.model_dump(mode="json") for e in pub_events],
+        }
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    typer.secho(f"Detailed Publication Inspection: {repair_id}", bold=True)
+    typer.echo("=" * 60)
+    typer.echo(f"  Staging ID:       {record.staging_id}")
+    typer.echo(f"  Workspace ID:     {record.workspace_id}")
+    typer.echo(f"  State:            {record.state.value}")
+    typer.echo(f"  Branch Name:      {record.branch_name}")
+    typer.echo(f"  Commit SHA:       {record.commit_sha or 'None'}")
+    typer.echo(f"  Tree SHA:         {record.tree_sha or 'None'}")
+    typer.echo(f"  Parent Commit:    {record.parent_commit_sha or 'None'}")
+    typer.echo(f"  Author:           {record.author.name} <{record.author.email}>")
+    typer.echo(f"  Committer:        {record.committer.name} <{record.committer.email}>")
+    typer.echo(f"  Touched Files:    {', '.join(record.changed_files)}")
+    typer.echo(f"  Target Repository:{record.target_repo_path}")
+    typer.echo("")
+    typer.echo("Commit Message:")
+    for line in record.commit_message.splitlines():
+        typer.echo(f"    {line}")
+    typer.echo("")
+    typer.echo(f"Audit Trail ({len(pub_events)} events):")
+    for ev in pub_events:
+        typer.echo(f"  [{ev.sequence}] {ev.timestamp.strftime('%H:%M:%S')} {ev.actor.value if hasattr(ev.actor, 'value') else ev.actor}: {ev.payload.get('action', ev.to_state.value)}")
+
+
+
+# =============================================================================
 # Controlled Repair Orchestration Workflow CLI Commands (Phase 4 M4)
 # =============================================================================
 
