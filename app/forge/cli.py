@@ -813,6 +813,7 @@ def investigate(
         result = loop.run()
 
         typer.echo(f"\nInvestigation finished with status: {result.status.upper()}")
+        typer.echo(f"Investigation Quality: {result.investigation_quality.upper()}")
         typer.echo(f"Steps executed: {result.steps_executed} (Tool calls: {result.total_tool_calls})")
         if result.final_response:
             typer.echo("\n--- Agent Assessment ---")

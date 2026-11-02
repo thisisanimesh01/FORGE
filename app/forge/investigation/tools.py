@@ -44,6 +44,7 @@ from forge.analysis.validation import (
     TestAssertionMisinterpretationError,
     DuplicateFindingError,
     RepeatedRejectedClaimError,
+    RejectionBudgetExceededError,
     ValidationOutcome,
     RejectedClaimRecord,
     RejectedClaimTracker,
@@ -70,6 +71,7 @@ class ToolRegistry:
         sandbox: Optional[Sandbox] = None,
         max_output_chars: int = 50_000,
         rejected_tracker: Optional[RejectedClaimTracker] = None,
+        rejection_budget: Optional[int] = None,
     ):
         self.workspace_path = workspace_path.resolve()
         self.repo_map = repo_map
@@ -78,7 +80,14 @@ class ToolRegistry:
         self.run_id = run_id or "run_default"
         self.sandbox = sandbox or DockerSandbox()
         self.max_output_chars = max_output_chars
-        self.rejected_tracker = rejected_tracker or RejectedClaimTracker()
+        if rejected_tracker is not None:
+            self.rejected_tracker = rejected_tracker
+            if rejection_budget is not None:
+                self.rejected_tracker.rejection_budget = rejection_budget
+        else:
+            self.rejected_tracker = RejectedClaimTracker(
+                rejection_budget=rejection_budget if rejection_budget is not None else 3
+            )
         self._handlers: Dict[str, Callable[[Dict[str, Any]], str]] = {}
         self._definitions: List[ToolDefinition] = []
 
@@ -256,7 +265,7 @@ class ToolRegistry:
         self._definitions.append(
             ToolDefinition(
                 name="get_run_history",
-                description="Retrieve a list of recent historical audit runs from the database, including status and summary.",
+                description="Retrieve past audit run records from the local database. (Database utility only: does not inspect target repository source code or dependencies).",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -837,6 +846,36 @@ class ToolRegistry:
 
         # Check per-run rejected claim tracker to prevent duplicate/spam retries
         if self.rejected_tracker:
+            if self.rejected_tracker.is_budget_exhausted():
+                err_msg = (
+                    f"Rejection budget of {self.rejected_tracker.rejection_budget} reached "
+                    f"({self.rejected_tracker.rejection_count} claims rejected). "
+                    "Further finding submissions are disabled for this run. "
+                    "Inspect relevant implementation files, tests, and dependency manifests, or proceed to synthesize your assessment."
+                )
+                budget_err = RejectionBudgetExceededError(
+                    err_msg,
+                    affected_file=norm_path,
+                    start_line=start_line,
+                    end_line=actual_end,
+                    defect_category=defect_category,
+                    rejection_type="RejectionBudgetExceededError",
+                )
+                if self.store and self.run_id:
+                    self.store.append_event(
+                        self.run_id,
+                        EventType.FINDING_VALIDATION_FAILED,
+                        {
+                            "error_type": "RejectionBudgetExceededError",
+                            "message": err_msg,
+                            "file": norm_path,
+                            "lines": f"{start_line}-{actual_end}",
+                            "title": title,
+                            "category": defect_category,
+                        },
+                    )
+                raise budget_err
+
             prior_rejection = self.rejected_tracker.check_repeated_rejection(
                 norm_path=norm_path,
                 start_line=start_line,
@@ -844,6 +883,7 @@ class ToolRegistry:
                 defect_category=defect_category,
                 title=title,
                 description=description,
+                severity=severity.value if hasattr(severity, "value") else str(severity) if severity else None,
             )
             if prior_rejection:
                 err_msg = (

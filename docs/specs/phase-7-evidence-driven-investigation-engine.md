@@ -186,3 +186,64 @@ Verified by 12 regression tests in `tests/unit/test_phase7_failed_run_root_cause
 10. `test_report_rendering_of_failure_details`
 11. `test_secret_redaction_in_failure_messages`
 12. `test_preservation_of_partial_investigation_history`
+
+---
+
+## 7. Investigation Intelligence & Synthesis Remediation (`run_747548f2008e` & `run_d7744d583e06`)
+
+### A. Background & Observed Defect
+In a follow-up pilot against FastAPI (`run_747548f2008e`, model `qwen2.5-coder:1.5b`), the model submitted an invalid syntax finding on whitespace lines (`tests/test_datastructures.py:10-10`), which was correctly rejected by server-side validators. However:
+1. The loop failed to convey actionable directives to prevent duplicate submissions.
+2. The model re-attempted the identical unsupported claim 3 times until the turn budget was exhausted.
+3. Upon exhausting steps, the model emitted a conversational apology:
+   `"I apologize for the confusion. Please provide me with the necessary information to assist you further."`
+4. The run was marked `completed` despite zero valid findings, zero evidence records, 4 rejected claims, and an unusable conversational apology.
+
+### B. Architectural Remediations Implemented
+1. **Semantic Duplicate Claim Tracking**:
+   `RejectedClaimTracker` intercepts not only exact duplicate claims, but also semantically equivalent claims with rephrased titles, category variations, and overlapping lines. Corrected submissions with downgraded severity or expanded substantive code ranges are evaluated freshly.
+2. **Configurable Rejection Budget**:
+   `rejection_budget` (default 3, configurable via `FORGE_REJECTION_BUDGET`) enforces a hard limit on invalid finding submissions. When exhausted:
+   - `record_finding` tool calls raise `RejectionBudgetExceededError`.
+   - The loop dynamically removes `record_finding` from the model's available tools on subsequent turns, forcing the agent to inspect source code/dependencies or synthesize findings.
+3. **Structured Synthesis Quality Gate**:
+   `validate_synthesis_quality` strictly filters out conversational apologies, chat evasion fillers, raw JSON tool call dumps, and unstructured text.
+4. **Autonomous Synthesis Retry & Deterministic Fallback**:
+   When the model outputs an invalid response on its final turn, FORGE triggers an explicit synthesis retry turn with structured formatting instructions. If the retry fails to produce a valid technical assessment, FORGE deterministically generates a verifiable fallback synthesis labeled `[System-Generated Fallback Synthesis]`, referencing actual inspected files and rejected claim records without fabrication.
+5. **Investigation Quality Classification Gate**:
+   Separated system execution status (`completed`, `failed`, `max_steps_exceeded`) from investigation quality:
+   - `completed`: Verified findings with evidence, or comprehensive clean repository inspection with valid technical synthesis.
+   - `completed_with_limitations`: Execution completed, but limitations exist (fallback synthesis used, turn budget exhausted, or partial inspection).
+   - `insufficient_evidence`: Execution finished, but candidate claims lacked evidence or zero substantive source files were inspected.
+   - `failed`: System/provider failure, crash, timeout, or zero activity.
+6. **Transparent Reporting**:
+   Exposed `investigation_quality`, `files_inspected`, `rejected_claims`, and `limitations` in `InvestigationReport` model, JSON report exports, and Markdown reports.
+
+### C. Verification Suite
+Verified by 17 regression tests in `tests/unit/test_phase7_investigation_intelligence.py`:
+1. `test_invalid_evidence_rejection_followed_by_useful_recovery`
+2. `test_exact_duplicate_rejected_claim`
+3. `test_semantically_equivalent_rejected_claim_with_different_title`
+4. `test_corrected_claim_with_genuinely_new_evidence`
+5. `test_rejection_budget_exhaustion`
+6. `test_agent_switches_from_finding_submission_to_source_inspection`
+7. `test_dependency_manifest_inspection`
+8. `test_implementation_and_test_relationship_inspection`
+9. `test_generic_apology_rejected_as_final_synthesis`
+10. `test_structured_synthesis_retry`
+11. `test_deterministic_fallback_synthesis`
+12. `test_fallback_does_not_fabricate_inspected_files_or_findings`
+13. `test_insufficient_evidence_quality_classification`
+14. `test_meaningful_zero_finding_investigation_classification`
+15. `test_completed_execution_with_failed_quality_gate`
+16. `test_json_and_markdown_quality_status_reporting`
+17. `test_existing_historical_report_compatibility`
+
+### D. Real-World Live Acceptance Run
+- **Target**: `https://github.com/fastapi/fastapi.git` (commit `45cb2252c737906f37544f5ba6bee0295fb81468`)
+- **Run ID**: `run_d7744d583e06`
+- **Provider**: Ollama (`qwen2.5-coder:1.5b`)
+- **Execution Status**: `COMPLETED`
+- **Investigation Quality**: `INSUFFICIENT_EVIDENCE`
+- **Total Findings**: 0 (zero hallucinated defects)
+- **Final Assessment**: `[System-Generated Fallback Synthesis]` properly synthesized the investigation scope, inspected state, and limitations without conversational apologies.

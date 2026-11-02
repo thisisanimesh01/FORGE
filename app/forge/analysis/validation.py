@@ -101,6 +101,11 @@ def build_rejection_directive(
             f"A substantially equivalent claim{loc_str} was already rejected earlier in this investigation. "
             f"Do not repeatedly retry claims for this line range. Investigate other files or provide your final synthesis."
         )
+    elif rejection_type == "RejectionBudgetExceededError":
+        return (
+            f"Rejection budget exhausted: Maximum allowed rejected claims reached for this investigation. "
+            f"Finding submissions are disabled. Inspect relevant implementation or dependency files, or produce your final synthesis."
+        )
     else:
         return (
             f"Finding claim rejected{loc_str}: {message}. "
@@ -201,6 +206,11 @@ class DuplicateFindingError(FindingValidationError):
 
 class RepeatedRejectedClaimError(FindingValidationError):
     """Raised when a candidate finding was already rejected earlier in the same investigation."""
+    pass
+
+
+class RejectionBudgetExceededError(FindingValidationError):
+    """Raised when an investigation exceeds its allowed quota of rejected finding claims."""
     pass
 
 
@@ -305,8 +315,27 @@ class RejectedClaimRecord:
 class RejectedClaimTracker:
     """Tracks rejected finding submissions per run to prevent duplicate/spam retries."""
 
-    def __init__(self) -> None:
+    def __init__(self, rejection_budget: int = 3) -> None:
+        self.rejection_budget = rejection_budget
         self._records: List[RejectedClaimRecord] = []
+
+    @property
+    def rejection_count(self) -> int:
+        """Total number of rejected claims recorded in this tracker."""
+        return len(self._records)
+
+    @property
+    def total_rejections(self) -> int:
+        """Alias for rejection_count."""
+        return len(self._records)
+
+    def is_budget_exhausted(self) -> bool:
+        """Check whether the rejection budget for this investigation run has been reached."""
+        return len(self._records) >= self.rejection_budget
+
+    def get_records(self) -> List[RejectedClaimRecord]:
+        """Return a shallow copy of all rejected claim records."""
+        return list(self._records)
 
     def record_rejected_claim(
         self,
@@ -346,6 +375,7 @@ class RejectedClaimTracker:
         defect_category: Optional[str],
         title: str,
         description: str,
+        severity: Optional[str] = None,
     ) -> Optional[RejectedClaimRecord]:
         """Detect whether this submission is a repeated or rephrased attempt of an already rejected claim.
 
@@ -372,41 +402,55 @@ class RejectedClaimTracker:
             title_sim = compute_token_jaccard_similarity(cand_title_tokens, rec.title_tokens)
             is_same_category = (cand_cat == rec.canonical_category)
 
+            # Condition 0: If previous rejection was SeverityJustificationError and severity is now downgraded,
+            # allow the corrected submission through to validation
+            if rec.rejection_type == "SeverityJustificationError":
+                norm_sev = str(severity).lower() if severity else ""
+                if norm_sev in ("medium", "low", "info"):
+                    continue
+
             # Condition 1: Substantially identical description on overlapping range (even if title changed)
             if desc_sim >= 0.5 or (description.strip().lower() == rec.raw_description.strip().lower() and len(description.strip()) > 5):
                 return rec
 
             # Condition 2: Same category and moderate similarity on overlapping range
-            if is_same_category and (desc_sim >= 0.3 or title_sim >= 0.4):
+            if is_same_category and (desc_sim >= 0.25 or title_sim >= 0.35):
                 return rec
 
             # Condition 3: Exact range match with moderate description or title similarity
-            if exact_range_match and (desc_sim >= 0.35 or title_sim >= 0.45):
+            if exact_range_match and (desc_sim >= 0.30 or title_sim >= 0.35):
                 return rec
 
-            # Condition 4: Disproven syntax error on the exact range
+            # Condition 4: Disproven syntax error on the exact range or same category
             if rec.rejection_type == "SyntaxClaimValidationError" and exact_range_match:
                 if cand_cat == "syntax_error" or "syntax" in cand_title_tokens or "syntax" in cand_desc_tokens:
                     return rec
 
             # Condition 5: Inconsistent or insufficient evidence on exact range
-            if rec.rejection_type in {"InsufficientEvidenceError", "UnrelatedEvidenceError"} and exact_range_match:
-                if is_same_category or desc_sim >= 0.25:
+            # Any claim on the exact same empty/whitespace or non-code range is an unsupported retry
+            if rec.rejection_type in {"InsufficientEvidenceError", "UnrelatedEvidenceError"}:
+                if exact_range_match:
+                    return rec
+                if has_range_overlap and (is_same_category or desc_sim >= 0.20 or title_sim >= 0.25):
                     return rec
 
             # Condition 6: Contradiction on overlapping range (e.g. dependency or implementation contradiction)
             if rec.rejection_type == "ContradictionValidationError" and has_range_overlap:
-                if is_same_category or desc_sim >= 0.25 or title_sim >= 0.3:
+                if is_same_category or desc_sim >= 0.20 or title_sim >= 0.25:
                     return rec
 
             # Condition 7: Test assertion misinterpretation on test file
             if rec.rejection_type == "TestAssertionMisinterpretationError" and has_range_overlap:
                 return rec
 
-            # Condition 8: Severity justification rejection on overlapping range
+            # Condition 8: Severity justification rejection on overlapping range when severity wasn't downgraded
             if rec.rejection_type == "SeverityJustificationError" and has_range_overlap:
-                if desc_sim >= 0.3 or title_sim >= 0.35:
+                if desc_sim >= 0.25 or title_sim >= 0.30:
                     return rec
+
+            # Condition 9: Semantically equivalent attempt with rephrased title on exact range
+            if exact_range_match and (is_same_category or cand_cat in ("general", rec.canonical_category)):
+                return rec
 
         return None
 
@@ -1051,6 +1095,18 @@ def validate_finding_claim(
     """
     # Step 0: Check per-run rejected claim tracker
     if rejected_tracker:
+        if rejected_tracker.is_budget_exhausted():
+            raise RejectionBudgetExceededError(
+                f"Rejection budget of {rejected_tracker.rejection_budget} reached "
+                f"({rejected_tracker.rejection_count} claims rejected). "
+                "Further finding submissions are disabled for this run. "
+                "Inspect relevant implementation files, tests, and dependency manifests, or proceed to synthesize your assessment.",
+                affected_file=norm_path,
+                start_line=start_line,
+                end_line=end_line,
+                defect_category=defect_category,
+                rejection_type="RejectionBudgetExceededError",
+            )
         prior_rejection = rejected_tracker.check_repeated_rejection(
             norm_path=norm_path,
             start_line=start_line,
@@ -1058,6 +1114,7 @@ def validate_finding_claim(
             defect_category=defect_category,
             title=title,
             description=description,
+            severity=severity.value if hasattr(severity, "value") else str(severity) if severity else None,
         )
         if prior_rejection:
             raise RepeatedRejectedClaimError(

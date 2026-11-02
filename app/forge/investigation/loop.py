@@ -7,6 +7,8 @@ from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional, Set
 
+import re
+
 from pydantic import BaseModel, Field
 
 from forge.config import redact_secrets, get_settings
@@ -57,6 +59,10 @@ class InvestigationResult(BaseModel):
     run_id: str
     target: str
     status: str = Field(description="completed, max_steps_exceeded, failed, aborted")
+    investigation_quality: str = Field(
+        default="completed",
+        description="completed, completed_with_limitations, insufficient_evidence, failed",
+    )
     steps_executed: int = 0
     total_tool_calls: int = 0
     final_response: Optional[str] = None
@@ -66,6 +72,174 @@ class InvestigationResult(BaseModel):
     inspected_files: List[str] = Field(default_factory=list)
     rejected_claims: List[Dict[str, Any]] = Field(default_factory=list)
     failure_details: Optional[Dict[str, Any]] = None
+    used_fallback_synthesis: bool = False
+
+
+DISALLOWED_APOLOGY_PATTERNS = [
+    r"\bi apologize\b",
+    r"\bmy apologies\b",
+    r"\bapologize for the confusion\b",
+    r"\bapologies for the confusion\b",
+    r"\bassist you further\b",
+    r"\bhow can i assist\b",
+    r"\bhow can i help\b",
+    r"\bplease provide (me with )?(the )?necessary information\b",
+    r"\bplease provide more information\b",
+    r"\bfeel free to ask\b",
+    r"\bas an ai\b",
+    r"\bwhat would you like (me )?to do\b",
+    r"\blet me know if you need\b",
+]
+
+
+def validate_synthesis_quality(text: Optional[str]) -> bool:
+    """Validate whether an LLM assessment meets the minimum quality requirements for an investigation synthesis.
+
+    Rejects conversational apologies, evasive chat fillers, and responses lacking technical substance.
+    """
+    if not text or not text.strip():
+        return False
+
+    cleaned = text.strip()
+    if len(cleaned) < 30:
+        return False
+
+    lower_text = cleaned.lower()
+    for pattern in DISALLOWED_APOLOGY_PATTERNS:
+        if re.search(pattern, lower_text):
+            return False
+
+    # Reject raw unparsed JSON tool calls, tool invocations, or JSON blocks presented as synthesis
+    if cleaned.startswith("{") and any(k in cleaned for k in ('"name"', '"arguments"', '"tool_calls"', '"function"')):
+        return False
+    if "```json" in cleaned and ('"name":' in cleaned or '"arguments":' in cleaned):
+        return False
+    if cleaned.startswith("<tool_call>") or "</tool_call>" in cleaned:
+        return False
+
+    # Check for technical substance or audit concepts
+    technical_indicators = [
+        "inspect", "file", "audit", "finding", "defect", "evidence", "test",
+        "depend", "pyproject", "vulnerab", "syntax", "claim", "rejection",
+        "limitation", "code", "line", "repository", "commit", "function", "module",
+        "no defect", "verified", "passed", "complete", "uncertainty", "analysis",
+        "scope", "package", "architect", "clean", "secure", "security", "error",
+        "issue", "bug", "check", "review"
+    ]
+    return any(term in lower_text for term in technical_indicators)
+
+
+def generate_fallback_synthesis(
+    target: str,
+    commit_sha: Optional[str],
+    inspected_files: List[str],
+    findings: List[Finding],
+    rejected_records: List[Dict[str, Any]],
+    steps_executed: int,
+    max_steps: int,
+    reason: str = "Conversational apology or unstructured response rejected by quality filter",
+) -> str:
+    """Generate deterministic, verifiable fallback synthesis from actual investigation history."""
+    lines = [
+        "[System-Generated Fallback Synthesis]",
+        f"Target Repository: {target}",
+        f"Resolved Commit: {commit_sha or 'unknown'}",
+        f"Investigation Scope: Autonomous security and defect audit executed across {steps_executed} of {max_steps} allowed steps.",
+        "",
+        "### 1. Files & Manifests Inspected",
+    ]
+    if inspected_files:
+        for f in sorted(inspected_files):
+            lines.append(f"- `{f}`")
+    else:
+        lines.append("- No source files or dependency manifests were successfully inspected.")
+    lines.append("")
+
+    lines.append("### 2. Claims Investigated & Verification Outcomes")
+    if rejected_records:
+        lines.append(f"A total of {len(rejected_records)} candidate claim(s) were submitted and rejected by server-side verification:")
+        for r in rejected_records:
+            loc = f" at `{r.get('file', '')}:{r.get('lines', '')}`" if r.get("file") else ""
+            t = r.get("title") or "Candidate Claim"
+            reason_str = r.get("reason") or "Failed verification checks"
+            lines.append(f"- **{t}**{loc}: {reason_str}")
+    else:
+        lines.append("- No candidate finding claims were rejected during this investigation.")
+    lines.append("")
+
+    lines.append("### 3. Verified Findings")
+    if findings:
+        for f in findings:
+            lines.append(f"- **[{f.severity.value.upper()}] {f.title}** (`{f.finding_id}`): {f.description}")
+    else:
+        lines.append("- Zero defects were verified with concrete source evidence.")
+    lines.append("")
+
+    lines.append("### 4. Audit Limitations & Remaining Uncertainties")
+    lines.append(
+        f"- Synthesis generated deterministically by system safety gate ({reason}). "
+        "The model failed to produce a structured technical synthesis meeting investigation quality standards. "
+        "Candidate claims that lacked verifiable evidence were strictly rejected. "
+        "Zero verified defects does not guarantee absence of bugs outside the inspected scope."
+    )
+    lines.append("")
+    lines.append("### 5. Recommended Next Action")
+    lines.append(
+        "- Review rejected claim records in the audit timeline and perform targeted inspection "
+        "on modules with unverified assertions."
+    )
+
+    return "\n".join(lines)
+
+
+def determine_investigation_quality(
+    loop_status: str,
+    total_tool_calls: int,
+    inspected_files: List[str],
+    findings: List[Finding],
+    rejected_records: List[Dict[str, Any]],
+    used_fallback_synthesis: bool,
+    has_valid_synthesis: bool,
+) -> str:
+    """Classify the technical investigation quality of an audit run.
+
+    Quality states:
+    - 'completed': Verified findings with evidence, or comprehensive clean repository inspection with valid synthesis.
+    - 'completed_with_limitations': Execution completed, but limitations exist (fallback synthesis used, turn budget exhausted, or partial inspection).
+    - 'insufficient_evidence': Execution finished, but candidate claims lacked evidence, or zero substantive source files were inspected.
+    - 'failed': System/provider failure, crash, timeout, or zero activity.
+    """
+    if loop_status == "failed" or (total_tool_calls == 0 and not findings):
+        return "failed"
+
+    # If all candidate finding claims were rejected and 0 findings exist
+    if rejected_records and not findings:
+        # If fallback synthesis was needed or only test/rejected files inspected:
+        if used_fallback_synthesis or len(inspected_files) <= 1:
+            return "insufficient_evidence"
+        # If agent inspected substantive code/manifests and provided a valid synthesis explaining the rejection
+        if has_valid_synthesis and len(inspected_files) >= 2:
+            return "completed_with_limitations"
+        return "insufficient_evidence"
+
+    # If no findings and no rejections (clean audit)
+    if not findings and not rejected_records:
+        if has_valid_synthesis and not used_fallback_synthesis and len(inspected_files) >= 2:
+            return "completed" if loop_status == "completed" else "completed_with_limitations"
+        return "insufficient_evidence"
+
+    # If findings exist with evidence
+    if findings:
+        if used_fallback_synthesis or loop_status == "max_steps_exceeded":
+            return "completed_with_limitations"
+        if has_valid_synthesis and loop_status == "completed":
+            return "completed"
+        return "completed_with_limitations"
+
+    if used_fallback_synthesis:
+        return "completed_with_limitations"
+
+    return "completed"
 
 
 def _make_failure_payload(
@@ -105,6 +279,7 @@ class InvestigationLoop:
         max_total_tool_calls: int = 50,
         max_wall_clock_seconds: float = 300.0,
         max_context_chars: int = 25_000,
+        rejection_budget: Optional[int] = None,
     ):
         settings = get_settings()
         self.provider = provider
@@ -117,12 +292,17 @@ class InvestigationLoop:
         self.max_total_tool_calls = max_total_tool_calls
         self.max_wall_clock_seconds = max_wall_clock_seconds
         self.max_context_chars = max_context_chars
+        self.rejection_budget = rejection_budget or getattr(settings, "rejection_budget", 3)
+
+        if hasattr(self.tool_registry, "rejected_tracker") and self.tool_registry.rejected_tracker:
+            self.tool_registry.rejected_tracker.rejection_budget = self.rejection_budget
 
         # Anti-loop state tracking
         self.seen_tool_calls: Set[str] = set()
         self.repeated_tool_count: Dict[str, int] = {}
         self.file_read_counts: Dict[str, int] = {}
         self.inspected_files: Set[str] = set()
+        self.budget_exhaustion_notified: bool = False
 
     def _truncate_history(self, messages: List[ChatMessage]) -> List[ChatMessage]:
         """Keep context within budget, preserving system prompt, initial repository context,
@@ -200,8 +380,13 @@ class InvestigationLoop:
         ]
 
         budget_guidance = (
-            f"\n\n[Turn Budget: Step 1 of {self.max_steps}. "
-            "Inspect the architecture, find defects, record them using 'record_finding', and conclude within budget.]"
+            f"\n\n[Turn Budget: Step 1 of {self.max_steps}.\n"
+            "RECOMMENDED INVESTIGATION STRATEGY:\n"
+            "1. Inspect dependency constraints with 'inspect_dependencies' or examine configuration manifests (e.g. pyproject.toml).\n"
+            "2. Read relevant source and test files using 'read_source_excerpt' and 'find_related_files' to verify code logic.\n"
+            "3. Record findings using 'record_finding' ONLY when backed by verified source code lines. Do NOT guess line numbers or claim defects on uninspected code.\n"
+            "4. If suspected claims are rejected or disproven by source evidence, acknowledge the limitation and proceed to analyze other modules or synthesize.\n"
+            "Note: Do not call 'get_run_history'; focus exclusively on inspecting the target repository source code and dependency manifests.]"
         )
 
         # Inject initial repository map context if available
@@ -226,6 +411,7 @@ class InvestigationLoop:
         failure_category: Optional[str] = None
         is_retryable = False
         current_stage = "initialization"
+        used_fallback_synthesis = False
 
         try:
             while steps_executed < self.max_steps:
@@ -240,13 +426,30 @@ class InvestigationLoop:
                 is_final_step = (steps_executed == self.max_steps)
 
                 # Turn budget notices and tool allocation
+                is_budget_exhausted = bool(
+                    self.tool_registry.rejected_tracker and self.tool_registry.rejected_tracker.is_budget_exhausted()
+                )
+
+                if is_budget_exhausted and not self.budget_exhaustion_notified:
+                    self.budget_exhaustion_notified = True
+                    messages.append(
+                        ChatMessage(
+                            role=MessageRole.USER,
+                            content=(
+                                f"[Investigation Notice: Rejection budget reached ({self.tool_registry.rejected_tracker.rejection_budget} rejected claims). "
+                                "Finding submissions are now disabled for the remainder of this run. "
+                                "Inspect remaining source files, verify dependency declarations, and synthesize your technical assessment.]"
+                            ),
+                        )
+                    )
+
                 if is_final_step and self.max_steps >= 2:
                     current_stage = "synthesis"
                     # Dedicated final synthesis step: no tools provided so model produces a structured textual synthesis
                     request_tools = []
                     inspected_summary = ", ".join(sorted(self.inspected_files)[:10]) or "None"
                     rejected_count = (
-                        len(self.tool_registry.rejected_tracker._records)
+                        self.tool_registry.rejected_tracker.rejection_count
                         if self.tool_registry.rejected_tracker
                         else 0
                     )
@@ -269,20 +472,32 @@ class InvestigationLoop:
                     )
                 elif is_penultimate and steps_executed > 1:
                     current_stage = "llm_generation"
-                    request_tools = tools
+                    if is_budget_exhausted:
+                        request_tools = [t for t in tools if t.name != "record_finding"]
+                        notice_text = (
+                            f"[Turn Budget Warning: Step {steps_executed} of {self.max_steps}. "
+                            "You have 1 turn remaining after this. Inspect remaining source or dependency files. "
+                            "Your final turn will be dedicated to synthesis.]"
+                        )
+                    else:
+                        request_tools = tools
+                        notice_text = (
+                            f"[Turn Budget Warning: Step {steps_executed} of {self.max_steps}. "
+                            "You have 1 turn remaining after this. Record any discovered findings using 'record_finding' now. "
+                            "Your final turn will be dedicated to synthesis.]"
+                        )
                     messages.append(
                         ChatMessage(
                             role=MessageRole.USER,
-                            content=(
-                                f"[Turn Budget Warning: Step {steps_executed} of {self.max_steps}. "
-                                "You have 1 turn remaining after this. Record any discovered findings using 'record_finding' now. "
-                                "Your final turn will be dedicated to synthesis.]"
-                            ),
+                            content=notice_text,
                         )
                     )
                 else:
                     current_stage = "llm_generation"
-                    request_tools = tools
+                    if is_budget_exhausted:
+                        request_tools = [t for t in tools if t.name != "record_finding"]
+                    else:
+                        request_tools = tools
 
                 bounded_messages = self._truncate_history(messages)
 
@@ -297,6 +512,7 @@ class InvestigationLoop:
                     messages=bounded_messages,
                     tools=request_tools,
                     temperature=0.0,
+                    max_tokens=1024,
                 )
 
                 try:
@@ -416,11 +632,74 @@ class InvestigationLoop:
                         self.store.append_event(self.run_id, EventType.RUN_FAILED, failure_details)
                         break
 
-                    # 4. Legitimate final assessment after tools or findings
-                    if response.content and response.content.strip():
-                        final_response_text = response.content.strip()
+                    # 4. Final assessment after tools or findings
+                    candidate_synthesis = (response.content or "").strip()
+                    if candidate_synthesis and validate_synthesis_quality(candidate_synthesis):
+                        final_response_text = candidate_synthesis
                         loop_status = "completed"
                         break
+                    elif candidate_synthesis:
+                        # Candidate synthesis is conversational apology or lacks required technical substance
+                        current_stage = "synthesis_retry"
+                        self.store.append_event(
+                            self.run_id,
+                            EventType.LLM_REQUEST_STARTED,
+                            {"step": steps_executed, "stage": "synthesis_retry"},
+                        )
+                        resolved_sha = self.repo_map.resolved_commit_sha if self.repo_map else None
+                        findings_now = self.store.list_findings(run_id=self.run_id)
+                        inspected_list = sorted(list(self.inspected_files))
+                        retry_prompt = (
+                            "[Synthesis Quality Gate: Your previous response was conversational or lacked required technical structure.\n"
+                            "Please provide a structured final investigation assessment detailing:\n"
+                            f"1. Target repository: {self.target} (Commit: {resolved_sha or 'unknown'})\n"
+                            f"2. Scope and files inspected ({', '.join(inspected_list) or 'None'})\n"
+                            "3. Claims investigated and reasons for any rejections\n"
+                            f"4. Verified findings ({len(findings_now)} accepted findings)\n"
+                            "5. Remaining uncertainties and limitations\n"
+                            "Do NOT output conversational apologies or generic chat phrases.]"
+                        )
+                        retry_messages = list(bounded_messages) + [
+                            ChatMessage(role=MessageRole.ASSISTANT, content=candidate_synthesis),
+                            ChatMessage(role=MessageRole.USER, content=retry_prompt),
+                        ]
+                        retry_succeeded = False
+                        try:
+                            retry_resp = self.provider.generate(
+                                LLMRequest(messages=self._truncate_history(retry_messages), tools=[], temperature=0.0, max_tokens=1024)
+                            )
+                            if retry_resp.content and validate_synthesis_quality(retry_resp.content.strip()):
+                                final_response_text = retry_resp.content.strip()
+                                loop_status = "completed"
+                                retry_succeeded = True
+                                break
+                        except Exception:
+                            pass
+
+                        if not retry_succeeded:
+                            rejected_recs = []
+                            if self.tool_registry.rejected_tracker:
+                                for rec in self.tool_registry.rejected_tracker._records:
+                                    rejected_recs.append({
+                                        "file": rec.norm_path,
+                                        "lines": f"{rec.start_line}-{rec.end_line}",
+                                        "title": rec.raw_title,
+                                        "reason": rec.rejection_reason,
+                                        "rejection_type": rec.rejection_type,
+                                    })
+                            final_response_text = generate_fallback_synthesis(
+                                target=self.target,
+                                commit_sha=resolved_sha,
+                                inspected_files=inspected_list,
+                                findings=findings_now,
+                                rejected_records=rejected_recs,
+                                steps_executed=steps_executed,
+                                max_steps=self.max_steps,
+                                reason="Conversational apology or unstructured response rejected by quality filter",
+                            )
+                            used_fallback_synthesis = True
+                            loop_status = "completed"
+                            break
                     else:
                         if is_final_step:
                             loop_status = "max_steps_exceeded"
@@ -514,6 +793,10 @@ class InvestigationLoop:
                             rf = str(tc.arguments.get("file_path", "")).strip().lstrip("/")
                             if rf:
                                 self.inspected_files.add(rf)
+                        elif tc.name == "inspect_dependencies":
+                            for mf in ["pyproject.toml", "requirements.txt", "setup.py", "setup.cfg"]:
+                                if (self.tool_registry.workspace_path / mf).is_file():
+                                    self.inspected_files.add(mf)
 
                         self.store.append_event(
                             self.run_id,
@@ -533,6 +816,23 @@ class InvestigationLoop:
                             failure_details = _make_failure_payload(failure_category, error_msg, current_stage, steps_executed, is_retryable)
                             self.store.append_event(self.run_id, EventType.RUN_FAILED, failure_details)
                             break
+
+                        # Provide clear rejection feedback into subsequent model turns
+                        if tc.name == "record_finding":
+                            try:
+                                out_json = json.loads(tool_output)
+                                if isinstance(out_json, dict) and out_json.get("status") == "rejected":
+                                    reason = out_json.get("reason") or out_json.get("error", "Claim rejected")
+                                    directive = out_json.get("directive", "")
+                                    directive_text = f"\nDirective: {directive}" if directive else ""
+                                    tool_output += (
+                                        f"\n\n[Investigation Directive: Finding claim was REJECTED: {reason}{directive_text}\n"
+                                        "Do NOT resubmit or rename this claim. Next action: Inspect actual source lines with "
+                                        "'read_source_excerpt', find related implementations with 'find_related_files', "
+                                        "or inspect declared dependencies with 'inspect_dependencies'.]"
+                                    )
+                            except Exception:
+                                pass
 
                         self.store.append_event(
                             self.run_id,
@@ -566,11 +866,32 @@ class InvestigationLoop:
                 failure_details = _make_failure_payload(failure_category, error_msg, current_stage, steps_executed, is_retryable)
                 self.store.append_event(self.run_id, EventType.RUN_FAILED, failure_details)
 
+        rejected_records = []
+        if self.tool_registry.rejected_tracker:
+            for rec in self.tool_registry.rejected_tracker._records:
+                rejected_records.append({
+                    "file": rec.norm_path,
+                    "lines": f"{rec.start_line}-{rec.end_line}",
+                    "title": rec.raw_title,
+                    "reason": rec.rejection_reason,
+                    "rejection_type": rec.rejection_type,
+                })
+
+        resolved_sha = self.repo_map.resolved_commit_sha if self.repo_map else None
+
         if steps_executed >= self.max_steps and not final_response_text and loop_status != "failed":
             loop_status = "max_steps_exceeded"
-            final_response_text = (
-                f"Investigation halted: Reached maximum execution step limit of {self.max_steps} turns."
+            final_response_text = generate_fallback_synthesis(
+                target=self.target,
+                commit_sha=resolved_sha,
+                inspected_files=sorted(list(self.inspected_files)),
+                findings=self.store.list_findings(run_id=self.run_id),
+                rejected_records=rejected_records,
+                steps_executed=steps_executed,
+                max_steps=self.max_steps,
+                reason=f"Reached maximum execution step limit of {self.max_steps} turns",
             )
+            used_fallback_synthesis = True
 
         duration = time.monotonic() - start_time
         findings = self.store.list_findings(run_id=self.run_id)
@@ -588,12 +909,30 @@ class InvestigationLoop:
             error_msg = error_msg or "Investigation failed"
             failure_details = _make_failure_payload(failure_category, error_msg, current_stage, steps_executed, is_retryable)
 
+        has_valid_synthesis = bool(
+            final_response_text and validate_synthesis_quality(final_response_text) and not used_fallback_synthesis
+        )
+
+        investigation_quality = determine_investigation_quality(
+            loop_status=loop_status,
+            total_tool_calls=total_tool_calls,
+            inspected_files=sorted(list(self.inspected_files)),
+            findings=findings,
+            rejected_records=rejected_records,
+            used_fallback_synthesis=used_fallback_synthesis,
+            has_valid_synthesis=has_valid_synthesis,
+        )
+
         # Finish run in store
         run_summary = {
             "steps_executed": steps_executed,
             "total_tool_calls": total_tool_calls,
             "findings_count": len(findings),
             "duration_seconds": round(duration, 2),
+            "investigation_quality": investigation_quality,
+            "inspected_files": sorted(list(self.inspected_files)),
+            "rejected_claims": rejected_records,
+            "used_fallback_synthesis": used_fallback_synthesis,
         }
         if error_msg:
             run_summary["error_message"] = redact_secrets(error_msg)
@@ -608,21 +947,11 @@ class InvestigationLoop:
             summary=run_summary,
         )
 
-        rejected_records = []
-        if self.tool_registry.rejected_tracker:
-            for rec in self.tool_registry.rejected_tracker._records:
-                rejected_records.append({
-                    "file": rec.norm_path,
-                    "lines": f"{rec.start_line}-{rec.end_line}",
-                    "title": rec.raw_title,
-                    "reason": rec.rejection_reason,
-                    "rejection_type": rec.rejection_type,
-                })
-
         return InvestigationResult(
             run_id=self.run_id,
             target=self.target,
             status=loop_status,
+            investigation_quality=investigation_quality,
             steps_executed=steps_executed,
             total_tool_calls=total_tool_calls,
             final_response=final_response_text,
@@ -632,4 +961,5 @@ class InvestigationLoop:
             inspected_files=sorted(list(self.inspected_files)),
             rejected_claims=rejected_records,
             failure_details=failure_details,
+            used_fallback_synthesis=used_fallback_synthesis,
         )

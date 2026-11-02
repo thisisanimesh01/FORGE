@@ -49,7 +49,9 @@ class InvestigationReport(BaseModel):
     schema_version: str = REPORT_SCHEMA_VERSION
     run_id: str
     target: str
+    # Execution status and investigation quality
     status: str
+    investigation_quality: str = "completed"
     started_at: str
     completed_at: Optional[str] = None
     duration_seconds: float = 0.0
@@ -65,5 +67,8 @@ class InvestigationReport(BaseModel):
     findings: List[ReportFinding] = Field(default_factory=list)
     evidence: List[ReportEvidenceItem] = Field(default_factory=list)
     events_timeline: List[ReportTimelineEvent] = Field(default_factory=list)
+    files_inspected: List[str] = Field(default_factory=list)
+    rejected_claims: List[Dict[str, Any]] = Field(default_factory=list)
     failure_details: Optional[Dict[str, Any]] = None
     final_synthesis: Optional[str] = None
+    limitations: Optional[str] = None

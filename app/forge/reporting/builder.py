@@ -194,6 +194,23 @@ class ReportBuilder:
         # Extract failure details and final synthesis
         summary_dict = self.store.get_run_summary_dict(run_id) if hasattr(self.store, "get_run_summary_dict") else {}
         failure_details = summary_dict.get("failure_details")
+        investigation_quality = summary_dict.get("investigation_quality") or ("completed" if run.status == "completed" else "failed")
+        files_inspected = summary_dict.get("inspected_files", [])
+        rejected_claims = summary_dict.get("rejected_claims", [])
+        limitations = summary_dict.get("limitations")
+
+        if not rejected_claims and rejected_events:
+            for rev in rejected_events:
+                rejected_claims.append({
+                    "file": rev.payload.get("file", ""),
+                    "lines": rev.payload.get("lines", ""),
+                    "title": rev.payload.get("title", ""),
+                    "reason": rev.payload.get("message", ""),
+                    "rejection_type": rev.payload.get("error_type", ""),
+                })
+
+        summary_counts["files_inspected_count"] = len(files_inspected)
+
         if not failure_details and run.status == "failed":
             for ev in reversed(raw_events):
                 if ev.event_type == EventType.RUN_FAILED and ("error" in ev.payload or "failure_category" in ev.payload):
@@ -225,6 +242,7 @@ class ReportBuilder:
             run_id=run.run_id,
             target=run.target,
             status=run.status,
+            investigation_quality=investigation_quality,
             started_at=run.started_at.isoformat(),
             completed_at=run.completed_at.isoformat() if run.completed_at else None,
             duration_seconds=round(duration, 2),
@@ -234,8 +252,11 @@ class ReportBuilder:
             findings=findings_list,
             evidence=all_evidence,
             events_timeline=events_timeline,
+            files_inspected=files_inspected,
+            rejected_claims=rejected_claims,
             failure_details=failure_details,
             final_synthesis=final_synthesis,
+            limitations=limitations,
         )
 
 
@@ -255,6 +276,9 @@ def report_to_markdown(report: InvestigationReport) -> str:
         "",
         f"- **Target**: `{report.target}`",
         f"- **Status**: `{report.status.upper()}`",
+        f"- **Execution Status**: `{report.status.upper()}`",
+        f"- **Investigation Quality**: `{report.investigation_quality.upper()}`",
+        f"- **Files Inspected**: {len(report.files_inspected)}",
         f"- **Started**: {report.started_at}",
         f"- **Completed**: {report.completed_at or 'In Progress'}",
         f"- **Duration**: {report.duration_seconds}s",
@@ -272,11 +296,31 @@ def report_to_markdown(report: InvestigationReport) -> str:
     # Summary Statistics
     counts = report.summary_counts
     lines.append("## Executive Summary")
+    lines.append(f"- **Execution Status**: `{report.status.upper()}`")
+    lines.append(f"- **Investigation Quality**: `{report.investigation_quality.upper()}`")
     lines.append(f"- **Total Findings**: {counts.get('total_findings', 0)}")
     lines.append(f"- **Total Evidence Records**: {counts.get('total_evidence', 0)}")
     lines.append(f"- **Total Audit Events**: {counts.get('total_events', 0)}")
+    lines.append(f"- **Files Inspected**: {len(report.files_inspected)}")
     lines.append(f"- **Rejected / Disproven Claims**: {counts.get('rejected_claims_count', 0)}")
     lines.append("")
+
+    # Inspected Files List
+    if report.files_inspected:
+        lines.append("### Inspected Files & Manifests")
+        for fpath in report.files_inspected:
+            lines.append(f"- `{fpath}`")
+        lines.append("")
+
+    # Rejected Claims Section
+    if report.rejected_claims:
+        lines.append("### Rejected & Disproven Claims")
+        for rc in report.rejected_claims:
+            loc = f" at `{rc.get('file', '')}:{rc.get('lines', '')}`" if rc.get("file") else ""
+            t = rc.get("title") or "Untitled Candidate Claim"
+            reason = rc.get("reason", "Validation check failed")
+            lines.append(f"- **{t}**{loc}: {reason}")
+        lines.append("")
 
     # Failure Details if run failed
     if report.failure_details:
@@ -315,7 +359,10 @@ def report_to_markdown(report: InvestigationReport) -> str:
     # Detailed Findings
     lines.append("## Findings & Evidence")
     if not report.findings:
-        lines.append("*No findings recorded for this run.*")
+        if report.investigation_quality == "completed":
+            lines.append("*No findings recorded for this run. Systematic investigation completed: No defects or vulnerabilities were identified after verifying relevant source and dependency declarations.*")
+        else:
+            lines.append("*No findings recorded for this run. Investigation concluded with limitations or insufficient evidence.*")
         lines.append("")
     else:
         for f in report.findings:

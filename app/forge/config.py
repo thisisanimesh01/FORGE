@@ -91,6 +91,11 @@ class ForgeSettings(BaseSettings):
     )
     max_output_bytes: int = Field(default=50_000, description="Maximum allowed output bytes per tool execution")
     max_context_tokens: int = Field(default=8_000, description="Token budget cap for prompt context")
+    rejection_budget: int = Field(
+        default=3,
+        description="Maximum rejected finding submissions before blocking further submissions in an investigation run",
+        validation_alias=AliasChoices("REJECTION_BUDGET", "FORGE_REJECTION_BUDGET"),
+    )
 
     # Docker sandbox options
     docker_image: str = Field(default="python:3.11-slim", description="Base container image for sandbox execution")
