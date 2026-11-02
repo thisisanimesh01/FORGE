@@ -35,6 +35,8 @@ workflow_context_app = typer.Typer(help="Repository context assembly commands.")
 eng_workflow_app.add_typer(workflow_intake_app, name="intake")
 eng_workflow_app.add_typer(workflow_context_app, name="context")
 release_app = typer.Typer(help="Release artifact verification, manifest, and provenance commands.")
+publish_app = typer.Typer(help="Git publication planning and validation commands.")
+repair_app.add_typer(publish_app, name="publish")
 app.add_typer(db_app, name="db")
 app.add_typer(findings_app, name="findings")
 app.add_typer(sandbox_app, name="sandbox")
@@ -46,6 +48,7 @@ app.add_typer(plan_app, name="plan")
 app.add_typer(repair_app, name="repair")
 app.add_typer(eng_workflow_app, name="workflow")
 app.add_typer(release_app, name="release")
+app.add_typer(publish_app, name="publish")
 
 
 
@@ -2377,6 +2380,256 @@ def repair_approval_history(
             typer.secho(f"  [INVALIDATED] {d.invalidation_reason}", fg=typer.colors.RED)
         if d.feedback:
             typer.echo(f"  [FEEDBACK] {d.feedback}")
+
+
+# =============================================================================
+# Git Publication Architecture CLI Commands (Phase 9 M1)
+# =============================================================================
+
+@publish_app.command(name="plan")
+def publish_plan(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to formulate publication plan for"),
+    action: str = typer.Option("export_patch", "--action", "-a", help="Action: export_patch, stage_branch, create_pr"),
+    repo_path: Optional[str] = typer.Option(None, "--repo", "-r", help="Target repository directory (defaults to cwd)"),
+    branch_name: Optional[str] = typer.Option(None, "--branch-name", "-b", help="Custom proposed branch name"),
+    author_name: str = typer.Option("FORGE Autonomous Agent", "--author-name", help="Commit author name"),
+    author_email: str = typer.Option("forge@local.agent", "--author-email", help="Commit author email"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output plan as JSON"),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="File path to save plan JSON"),
+) -> None:
+    """Formulate and validate a Git publication plan for an operator-approved repair."""
+    from forge.publication.failures import PublicationError
+    from forge.publication.models import PublicationAction, PublicationStatus, PublicationRequest
+    from forge.publication.planner import GitPublicationPlanner
+    from forge.publication.storage import PublicationStore
+    from forge.repair.execution.models import RepairActor
+    from forge.repair.execution.storage import RepairExecutionStore
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+    forge_store = ForgeStore(db_path=settings.db_path)
+    pub_store = PublicationStore(db_path=settings.db_path)
+
+    # Normalize action
+    try:
+        pub_action = PublicationAction(action.lower().strip())
+    except ValueError:
+        valid_actions = ", ".join(a.value for a in PublicationAction)
+        typer.secho(f"Invalid publication action '{action}'. Permitted actions: {valid_actions}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    target_dir = Path(repo_path).resolve() if repo_path else Path.cwd().resolve()
+    planner = GitPublicationPlanner(execution_store=exec_store, forge_store=forge_store)
+
+    try:
+        plan = planner.create_publication_plan(
+            repair_id=repair_id,
+            action=pub_action,
+            repository_path=target_dir,
+            custom_branch_name=branch_name,
+            author_name=author_name,
+            author_email=author_email,
+        )
+    except PublicationError as e:
+        typer.secho(f"Publication planning failed: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"Unexpected error creating publication plan: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    # Persist request and plan
+    pub_req = PublicationRequest(
+        publication_id=plan.publication_id,
+        repair_id=repair_id,
+        decision_id=plan.decision_id,
+        action=pub_action,
+        status=PublicationStatus.AUTHORIZED,
+        plan_id=plan.plan_id,
+    )
+    pub_store.save_publication_request(pub_req)
+    pub_store.save_publication_plan(plan)
+
+    # Audit event in ledger
+    pub_store.record_publication_event(
+        repair_id=repair_id,
+        action="publication_plan_created",
+        actor=RepairActor.ORCHESTRATOR,
+        payload={
+            "publication_id": plan.publication_id,
+            "plan_id": plan.plan_id,
+            "action": pub_action.value,
+            "proposed_branch": plan.proposed_branch_name,
+            "base_commit_sha": plan.base_commit_sha,
+            "patch_sha256": plan.patch_sha256,
+        },
+    )
+
+    if output:
+        out_p = Path(output).resolve()
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
+        typer.secho(f"[OK] Publication plan saved to: {out_p}", fg=typer.colors.GREEN)
+
+    if as_json:
+        typer.echo(plan.model_dump_json(indent=2))
+        return
+
+    typer.secho("==================================================", fg=typer.colors.CYAN)
+    typer.secho(f"FORGE Publication Plan — {plan.plan_id}", fg=typer.colors.CYAN, bold=True)
+    typer.secho("==================================================", fg=typer.colors.CYAN)
+    typer.echo(f"Publication ID:    {plan.publication_id}")
+    typer.echo(f"Repair ID:         {plan.repair_id}")
+    typer.echo(f"Finding ID:        {plan.finding_id}")
+    typer.echo(f"Action:            {plan.authorized_action.value}")
+    typer.echo(f"Repository:        {plan.repository_target}")
+    typer.echo(f"Base Commit SHA:   {plan.base_commit_sha[:12]}")
+    typer.echo(f"Proposed Branch:   {plan.proposed_branch_name}")
+    typer.echo(f"Patch SHA-256:     {plan.patch_sha256[:16]}...")
+    typer.echo(f"Policy Version:    {plan.policy_version}")
+    typer.echo(f"Operator Sign-off: {plan.commit_proposal.operator_signoff}")
+    typer.echo("")
+    typer.secho("Proposed Commit Message:", bold=True)
+    typer.echo("-" * 40)
+    typer.echo(plan.commit_proposal.commit_message)
+    typer.echo("-" * 40)
+
+
+@publish_app.command(name="validate")
+def publish_validate(
+    publication_id: str = typer.Argument(..., help="Publication request ID or plan ID to validate"),
+    repo_path: Optional[str] = typer.Option(None, "--repo", "-r", help="Target repository directory (defaults to cwd)"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output validation result as JSON"),
+) -> None:
+    """Validate that a publication request and plan still satisfy authorization, binding, and policy."""
+    from forge.publication.failures import PublicationError
+    from forge.publication.inspector import GitRepositoryInspector
+    from forge.publication.storage import PublicationStore
+    from forge.publication.validator import GitPublicationValidator
+    from forge.repair.execution.storage import RepairExecutionStore
+
+    settings = get_settings()
+    pub_store = PublicationStore(db_path=settings.db_path)
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+
+    pub_req = pub_store.get_publication_request(publication_id)
+    if not pub_req:
+        # Check if plan ID was passed
+        plan = pub_store.get_publication_plan(publication_id)
+        if plan:
+            pub_req = pub_store.get_publication_request(plan.publication_id)
+
+    if not pub_req:
+        typer.secho(f"Publication request '{publication_id}' not found.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    target_dir = Path(repo_path).resolve() if repo_path else Path.cwd().resolve()
+    inspector = GitRepositoryInspector()
+    try:
+        repo_identity = inspector.inspect_repository(target_dir)
+    except Exception as e:
+        typer.secho(f"Repository inspection failed: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    validator = GitPublicationValidator(execution_store=exec_store, inspector=inspector)
+    try:
+        result = validator.validate_publication_request(pub_req, repo_identity=repo_identity)
+    except PublicationError as e:
+        typer.secho(f"Validation FAILED: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"Validation error: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if as_json:
+        typer.echo(result.model_dump_json(indent=2))
+        return
+
+    typer.secho(f"[VALID] Publication request '{pub_req.publication_id}' is fully authorized and policy-compliant.", fg=typer.colors.GREEN)
+    for c in result.checks_passed:
+        typer.echo(f"  [OK] {c}")
+
+
+@publish_app.command(name="show")
+def publish_show(
+    plan_id: str = typer.Argument(..., help="Publication plan ID or publication request ID to display"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output plan as JSON"),
+) -> None:
+    """Display detailed publication plan and metadata."""
+    from forge.publication.storage import PublicationStore
+
+    settings = get_settings()
+    pub_store = PublicationStore(db_path=settings.db_path)
+
+    plan = pub_store.get_publication_plan(plan_id)
+    if not plan:
+        plan = pub_store.get_publication_plan_for_request(plan_id)
+
+    if not plan:
+        typer.secho(f"Publication plan '{plan_id}' not found.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if as_json:
+        typer.echo(plan.model_dump_json(indent=2))
+        return
+
+    typer.secho(f"Publication Plan: {plan.plan_id}", fg=typer.colors.CYAN, bold=True)
+    typer.echo(f"  Publication ID:  {plan.publication_id}")
+    typer.echo(f"  Repair ID:       {plan.repair_id}")
+    typer.echo(f"  Finding ID:      {plan.finding_id}")
+    typer.echo(f"  Action:          {plan.authorized_action.value}")
+    typer.echo(f"  Proposed Branch: {plan.proposed_branch_name}")
+    typer.echo(f"  Base Commit:     {plan.base_commit_sha}")
+    typer.echo(f"  Patch Digest:    {plan.patch_sha256}")
+    typer.echo(f"  Operator:        {plan.commit_proposal.operator_signoff}")
+    typer.echo(f"  Created At:      {plan.created_at.isoformat()}")
+    typer.echo("")
+    typer.echo("Commit Proposal:")
+    typer.echo(f"  Author:    {plan.commit_proposal.author.name} <{plan.commit_proposal.author.email}>")
+    typer.echo(f"  Committer: {plan.commit_proposal.committer.name} <{plan.commit_proposal.committer.email}>")
+    typer.echo(f"  Files:     {', '.join(plan.commit_proposal.touched_files)}")
+    typer.echo("Commit Message:")
+    for line in plan.commit_proposal.commit_message.splitlines():
+        typer.echo(f"    {line}")
+
+
+@publish_app.command(name="list")
+def publish_list(
+    repair_id: Optional[str] = typer.Option(None, "--repair-id", "-r", help="Filter by repair ID"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output plans as JSON"),
+) -> None:
+    """List historical publication requests and plans."""
+    from forge.publication.storage import PublicationStore
+
+    settings = get_settings()
+    pub_store = PublicationStore(db_path=settings.db_path)
+
+    if repair_id:
+        plans = pub_store.list_publication_plans_for_repair(repair_id)
+    else:
+        conn = pub_store._conn()
+        try:
+            cur = conn.execute("SELECT plan_id FROM publication_plans ORDER BY created_at DESC")
+            plan_ids = [r["plan_id"] for r in cur.fetchall()]
+        finally:
+            conn.close()
+        plans = [pub_store.get_publication_plan(pid) for pid in plan_ids if pid]
+
+    if as_json:
+        typer.echo(json.dumps([p.model_dump(mode="json") for p in plans if p], indent=2))
+        return
+
+    if not plans:
+        typer.echo("No publication plans found.")
+        return
+
+    typer.echo(f"{'Plan ID':<20} {'Action':<15} {'Repair ID':<16} {'Branch Name':<30} {'Created At':<22}")
+    typer.echo("-" * 105)
+    for p in plans:
+        if p:
+            typer.echo(
+                f"{p.plan_id:<20} {p.authorized_action.value:<15} {p.repair_id:<16} {p.proposed_branch_name[:28]:<30} {p.created_at.strftime('%Y-%m-%d %H:%M:%S'):<22}"
+            )
 
 
 # =============================================================================

@@ -464,6 +464,41 @@ CREATE TABLE IF NOT EXISTS repair_approval_decisions (
     FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS publication_requests (
+    publication_id TEXT PRIMARY KEY,
+    repair_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL,
+    plan_id TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE,
+    FOREIGN KEY(decision_id) REFERENCES repair_approval_decisions(decision_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS publication_plans (
+    plan_id TEXT PRIMARY KEY,
+    publication_id TEXT NOT NULL,
+    repair_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    finding_id TEXT NOT NULL,
+    repository_target TEXT NOT NULL,
+    base_commit_sha TEXT NOT NULL,
+    proposed_branch_name TEXT NOT NULL,
+    commit_proposal_json TEXT NOT NULL DEFAULT '{}',
+    patch_artifact_id TEXT NOT NULL,
+    patch_sha256 TEXT NOT NULL,
+    authorized_action TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    repository_identity_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(publication_id) REFERENCES publication_requests(publication_id) ON DELETE CASCADE,
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE,
+    FOREIGN KEY(decision_id) REFERENCES repair_approval_decisions(decision_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
@@ -505,6 +540,10 @@ CREATE INDEX IF NOT EXISTS idx_repair_dossiers_repair ON repair_review_dossiers(
 CREATE INDEX IF NOT EXISTS idx_repair_dossiers_patch ON repair_review_dossiers(patch_artifact_id);
 CREATE INDEX IF NOT EXISTS idx_repair_approval_repair ON repair_approval_decisions(repair_id);
 CREATE INDEX IF NOT EXISTS idx_repair_approval_state ON repair_approval_decisions(state);
+CREATE INDEX IF NOT EXISTS idx_pub_requests_repair ON publication_requests(repair_id);
+CREATE INDEX IF NOT EXISTS idx_pub_requests_status ON publication_requests(status);
+CREATE INDEX IF NOT EXISTS idx_pub_plans_pub ON publication_plans(publication_id);
+CREATE INDEX IF NOT EXISTS idx_pub_plans_repair ON publication_plans(repair_id);
 """
 
 

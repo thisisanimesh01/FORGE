@@ -37,7 +37,22 @@ Deterministic Repair Construction Architecture ── [COMPLETED]
 Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (Milestones 1–6 Complete — Supervised Beta Release Gate Reached)
 Phase 7: Evidence-Driven Investigation Engine ── [COMPLETED] (Cross-File Evidence, Contradiction Detection, Investigation Orchestration)
 Phase 8: Controlled Evidence-Grounded Software Repair ── [COMPLETED] (Milestones 1–6 Completed & Verified)
+Phase 9: Safe Git Publication & Upstream Integration ── [IN PROGRESS] (Milestone 1 Completed)
 ```
+
+### Phase 9, Milestone 1: Git Integration Architecture & Publication Policy (Completed)
+- **Objective & Scope**: Design and implement the architectural foundation for safe Git publication of verified, operator-authorized candidate repairs, establishing Git integration contracts, publication policies, repository identity verification, authorization checks, planning models, and SQLite persistence.
+- **Architectural Deliverables**:
+  - *Defensive Git Inspection Engine (`forge.publication.inspector`)*: Implemented `GitRepositoryInspector` querying target repository metadata (canonical path, head commit SHA, current branch, remote URLs, clean working tree status) with hooks disabled (`-c core.hooksPath=/dev/null`), read-only queries, and safe directory configurations.
+  - *Fail-Closed Publication Policies (`forge.publication.policy`)*: Enforced default-deny publication policies strictly forbidding force pushes (`allow_force_push=False`) and history rewrites (`allow_history_rewrite=False`). Protected branch defenses unconditionally reject target branches matching protected patterns (`main`, `master`, `release/*`, `production/*`, `stable/*`). Branch name syntax guards enforce `^[a-zA-Z0-9._/-]+$`, `forge/` prefix, and reject dangerous Git ref characters.
+  - *Outbound Secret Scanning (`forge.publication.policy`)*: Implemented regex-based secret scanning inspecting commit messages, branch names, and publication metadata for exposed credentials (`sk-`, `ghp_`, `AKIA`, private keys), rejecting contaminated publications.
+  - *Independent Publication Precondition Validator (`forge.publication.validator`)*: Implemented `GitPublicationValidator` validating that: (1) target repair exists in `VERIFIED` state, (2) an active, non-expired `APPROVED` decision record exists from Phase 8 M6, (3) the requested publication action matches the authorized action (preventing privilege escalation), (4) exact cryptographic artifact bindings match (`patch_sha256`, `base_commit_sha`, repository identity), (5) target repository working tree is clean (`git status --porcelain`), and (6) all outbound content is free of secrets.
+  - *Deterministic Publication Planner (`forge.publication.planner`)*: Implemented `GitPublicationPlanner` formulating complete, deterministic `PublicationPlan` records with structured commit messages, author/committer attestation, and proposed branch names without executing any mutations on the target repository or creating remote branches.
+  - *Typed SQLite Persistence & Audit Ledger (`forge.storage.database`, `forge.publication.storage`)*: Added `publication_requests` and `publication_plans` tables and indices to SQLite schema. Implemented persistence in `PublicationStore` and recorded sequential, secret-redacted audit events in `repair_execution_events`.
+  - *CLI Commands (`forge.cli`)*: Added `forge repair publish plan`, `forge repair publish validate`, `forge repair publish show`, `forge repair publish list`, and top-level alias `forge publish ...`.
+  - *Dedicated Specification ([`docs/specs/phase-9-m1-git-integration-architecture.md`](docs/specs/phase-9-m1-git-integration-architecture.md))*: Formal architecture specification detailing publication contracts, threat model, invariant enforcement, and SQLite schemas.
+  - *Verification Suite*: 34 unit & security tests in `tests/unit/test_phase9_m1_git_publication.py` passing with zero regressions.
+  - *Scope Boundary*: Planning and validation only; no target repository mutations, no local or remote branch creation, no PR opening, and no code merges. Branch staging is deferred to Milestone 2; PR creation is deferred to Milestone 3.
 
 ### Phase 8, Milestone 6: Operator Review, Approval & Authorization Workflows (Completed)
 - **Objective & Scope**: Build an explicit, operator-in-the-loop review, approval, and authorization workflow for candidate repairs that have completed independent patch validation (M4) and sandbox regression verification (M5), enforcing strict artifact binding, dynamic tamper invalidation, and fail-closed human authorization boundaries.
@@ -696,6 +711,27 @@ forge repair test --scenario ACC01
 
 # Export machine-readable JSON acceptance report with automated secret scrubbing
 forge repair test --format json --output reports/acceptance_report.json
+```
+
+### Safe Git Publication Planning & Validation (Phase 9 Milestone 1)
+```bash
+# Validate publication preconditions for an approved repair (fail-closed check)
+forge repair publish validate rep_12345
+
+# Formulate and persist a deterministic publication plan for an approved repair
+forge repair publish plan rep_12345
+
+# Formulate a publication plan with a custom compliant branch name
+forge repair publish plan rep_12345 --branch forge/fix-login-null-pointer
+
+# Output publication plan as JSON for external tooling integration
+forge repair publish plan rep_12345 --format json
+
+# Display detailed publication request and plan for a repair
+forge repair publish show rep_12345
+
+# List recent publication plans across all repairs
+forge repair publish list
 ```
 
 ### Controlled Software Repair Review & Operator Approval (Phase 8 Milestone 6)

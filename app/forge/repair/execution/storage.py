@@ -1242,6 +1242,13 @@ class RepairExecutionStore(RepairEventStoreProtocol):
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(decision_id) DO UPDATE SET
                         state = excluded.state,
+                        decision = excluded.decision,
+                        authorized_action = excluded.authorized_action,
+                        actor = excluded.actor,
+                        reason = excluded.reason,
+                        feedback = excluded.feedback,
+                        binding_json = excluded.binding_json,
+                        expires_at = excluded.expires_at,
                         invalidation_reason = excluded.invalidation_reason,
                         invalidation_timestamp = excluded.invalidation_timestamp
                     """,
@@ -1255,10 +1262,10 @@ class RepairExecutionStore(RepairEventStoreProtocol):
                         clean_reason,
                         clean_feedback,
                         json.dumps(decision.binding.model_dump(mode="json")),
-                        decision.expires_at.isoformat() if decision.expires_at else None,
-                        decision.created_at.isoformat(),
+                        decision.expires_at.isoformat() if hasattr(decision.expires_at, "isoformat") else (str(decision.expires_at) if decision.expires_at else None),
+                        decision.created_at.isoformat() if hasattr(decision.created_at, "isoformat") else str(decision.created_at),
                         decision.invalidation_reason,
-                        decision.invalidation_timestamp.isoformat() if decision.invalidation_timestamp else None,
+                        decision.invalidation_timestamp.isoformat() if hasattr(decision.invalidation_timestamp, "isoformat") else (str(decision.invalidation_timestamp) if decision.invalidation_timestamp else None),
                     ),
                 )
         finally:
