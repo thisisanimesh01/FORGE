@@ -29,6 +29,7 @@ from forge.llm.provider import (
     LLMUnavailableError,
 )
 from forge.investigation.tools import ToolRegistry
+from forge.investigation.planner import InvestigationPlanner, InvestigationAction
 from forge.repository.architecture import RepositoryMap, build_context_prompt
 from forge.schemas import (
     EventType,
@@ -304,6 +305,16 @@ class InvestigationLoop:
         self.inspected_files: Set[str] = set()
         self.budget_exhaustion_notified: bool = False
 
+        self.workspace_path = getattr(self.tool_registry, "workspace_path", Path("."))
+        self.planner = InvestigationPlanner(
+            workspace_path=self.workspace_path,
+            repo_map=self.repo_map,
+            instruction="",
+            max_utility_calls=1,
+        )
+        self.tool_registry.inspected_files = self.inspected_files
+        self.tool_registry.planner = self.planner
+
     def _truncate_history(self, messages: List[ChatMessage]) -> List[ChatMessage]:
         """Keep context within budget, preserving system prompt, initial repository context,
         and valid assistant/tool call pairs without inserting mid-conversation system roles."""
@@ -374,14 +385,31 @@ class InvestigationLoop:
         start_time = time.monotonic()
         instruction = user_instruction or f"Perform a comprehensive security and defect audit of repository '{self.target}'."
 
+        self.planner = InvestigationPlanner(
+            workspace_path=self.workspace_path,
+            repo_map=self.repo_map,
+            instruction=instruction,
+            max_utility_calls=1,
+        )
+        self.planner.inspected_files = self.inspected_files
+        self.tool_registry.inspected_files = self.inspected_files
+        self.tool_registry.planner = self.planner
+
         # 1. Initialize context
         messages: List[ChatMessage] = [
             ChatMessage(role=MessageRole.SYSTEM, content=SYSTEM_PROMPT),
         ]
 
+        if self.planner.planned_files:
+            planned_list = ", ".join(self.planner.planned_files)
+            plan_notice = f"\nPLANNED INSPECTION TARGETS: {planned_list}\n"
+        else:
+            plan_notice = ""
+
         budget_guidance = (
             f"\n\n[Turn Budget: Step 1 of {self.max_steps}.\n"
             "RECOMMENDED INVESTIGATION STRATEGY:\n"
+            f"{plan_notice}"
             "1. Inspect dependency constraints with 'inspect_dependencies' or examine configuration manifests (e.g. pyproject.toml).\n"
             "2. Read relevant source and test files using 'read_source_excerpt' and 'find_related_files' to verify code logic.\n"
             "3. Record findings using 'record_finding' ONLY when backed by verified source code lines. Do NOT guess line numbers or claim defects on uninspected code.\n"
@@ -499,6 +527,9 @@ class InvestigationLoop:
                     else:
                         request_tools = tools
 
+                if not is_final_step:
+                    request_tools = self.planner.filter_allowed_tools(request_tools)
+
                 bounded_messages = self._truncate_history(messages)
 
                 # Record LLM_REQUEST_STARTED event
@@ -614,10 +645,11 @@ class InvestigationLoop:
                     # 2. Check if this is Turn 1 with zero tools executed and zero findings
                     current_findings = self.store.list_findings(run_id=self.run_id)
                     if steps_executed == 1 and total_tool_calls == 0 and not current_findings and not is_final_step:
+                        steering = self.planner.get_steering_directive(steps_executed, self.max_steps)
                         prompt_msg = (
+                            f"{steering}\n"
                             "No audit tools have been executed yet. To perform the audit, use one of the available tools: "
-                            f"{[t.name for t in tools]}. "
-                            "If you have already concluded your inspection, provide your final structured assessment with clear limitations."
+                            f"{[t.name for t in tools]}."
                         )
                         messages.append(ChatMessage(role=MessageRole.USER, content=prompt_msg))
                         continue
@@ -632,13 +664,54 @@ class InvestigationLoop:
                         self.store.append_event(self.run_id, EventType.RUN_FAILED, failure_details)
                         break
 
-                    # 4. Final assessment after tools or findings
+                    # 4. Check whether candidate synthesis is valid
                     candidate_synthesis = (response.content or "").strip()
-                    if candidate_synthesis and validate_synthesis_quality(candidate_synthesis):
+                    is_valid_synthesis = bool(candidate_synthesis and validate_synthesis_quality(candidate_synthesis))
+
+                    if is_valid_synthesis:
                         final_response_text = candidate_synthesis
                         loop_status = "completed"
                         break
-                    elif candidate_synthesis:
+
+                    # 5. Invalid/conversational synthesis or empty response while turns remain: steer or autonomous fallback
+                    if not is_final_step and not is_penultimate:
+                        was_previously_steered = bool(
+                            messages and messages[-1].role == MessageRole.USER and "Investigation Orchestrator:" in (messages[-1].content or "")
+                        )
+                        if was_previously_steered:
+                            fallback_action = self.planner.autonomous_step_fallback(steps_executed, self.max_steps)
+                            if fallback_action and fallback_action.tool_name:
+                                current_stage = "autonomous_dispatch"
+                                try:
+                                    tool_output = self.tool_registry.execute_tool(fallback_action.tool_name, fallback_action.tool_arguments)
+                                    total_tool_calls += 1
+                                    self.planner.record_tool_call(fallback_action.tool_name, fallback_action.tool_arguments, tool_output)
+                                    messages.append(
+                                        ChatMessage(
+                                            role=MessageRole.TOOL,
+                                            name=fallback_action.tool_name,
+                                            tool_call_id=f"auto_call_{steps_executed}",
+                                            content=tool_output,
+                                        )
+                                    )
+                                    messages.append(
+                                        ChatMessage(
+                                            role=MessageRole.USER,
+                                            content=(
+                                                f"[Orchestrator Notice: Autonomously inspected '{fallback_action.target_file or fallback_action.tool_name}'. "
+                                                "Review the above source excerpt, analyze for defects, and proceed with your investigation or synthesis.]"
+                                            ),
+                                        )
+                                    )
+                                    continue
+                                except Exception:
+                                    pass
+                        steering = self.planner.get_steering_directive(steps_executed, self.max_steps)
+                        messages.append(ChatMessage(role=MessageRole.USER, content=steering))
+                        continue
+
+                    # 6. Final turn synthesis retry / fallback gate
+                    if candidate_synthesis:
                         # Candidate synthesis is conversational apology or lacks required technical substance
                         current_stage = "synthesis_retry"
                         self.store.append_event(
@@ -730,6 +803,15 @@ class InvestigationLoop:
                     if self.repeated_tool_count[tool_key] > 2:
                         tool_output = json.dumps({
                             "warning": "Loop detected: Identical tool call repeated multiple times. Please synthesize findings or investigate an alternative code path.",
+                        })
+                    # Utility quota enforcement
+                    elif self.planner.is_utility_tool(tc.name) and not self.planner.is_utility_call_allowed(tc.name):
+                        tool_output = json.dumps({
+                            "warning": (
+                                f"Utility-call quota exceeded for '{tc.name}'. "
+                                f"'{tc.name}' is a database utility that does not inspect repository source code or dependencies."
+                            ),
+                            "directive": self.planner.get_steering_directive(steps_executed, self.max_steps),
                         })
                     # Phase D: Same-file pagination protection for read_source_excerpt
                     elif tc.name == "read_source_excerpt":
@@ -844,6 +926,8 @@ class InvestigationLoop:
                                 "step": steps_executed,
                             },
                         )
+
+                    self.planner.record_tool_call(tc.name, tc.arguments, tool_output)
 
                     messages.append(
                         ChatMessage(

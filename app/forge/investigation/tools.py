@@ -3,7 +3,7 @@
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from forge.analysis.evidence import (
     create_evidence,
@@ -72,6 +72,8 @@ class ToolRegistry:
         max_output_chars: int = 50_000,
         rejected_tracker: Optional[RejectedClaimTracker] = None,
         rejection_budget: Optional[int] = None,
+        inspected_files: Optional[Set[str]] = None,
+        planner: Optional[Any] = None,
     ):
         self.workspace_path = workspace_path.resolve()
         self.repo_map = repo_map
@@ -80,6 +82,8 @@ class ToolRegistry:
         self.run_id = run_id or "run_default"
         self.sandbox = sandbox or DockerSandbox()
         self.max_output_chars = max_output_chars
+        self.inspected_files = inspected_files
+        self.planner = planner
         if rejected_tracker is not None:
             self.rejected_tracker = rejected_tracker
             if rejection_budget is not None:
@@ -166,7 +170,7 @@ class ToolRegistry:
         self._definitions.append(
             ToolDefinition(
                 name="read_source_excerpt",
-                description="Read lines from a specific source file in the repository within line limits.",
+                description="Read lines from a specific source file in the repository within line limits. Use this to inspect actual implementation code, test assertions, and verify suspected defects.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -265,7 +269,7 @@ class ToolRegistry:
         self._definitions.append(
             ToolDefinition(
                 name="get_run_history",
-                description="Retrieve past audit run records from the local database. (Database utility only: does not inspect target repository source code or dependencies).",
+                description="Database utility: Retrieve past audit run summaries from the local FORGE database. Do NOT use during a code audit unless explicitly reviewing previous audit records; this does not inspect repository source code or dependencies.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -376,7 +380,7 @@ class ToolRegistry:
         self._definitions.append(
             ToolDefinition(
                 name="inspect_dependencies",
-                description="Inspect declared dependencies, constraints, and package configuration across repository manifests (e.g. pyproject.toml, requirements.txt, setup.cfg).",
+                description="Inspect declared dependencies, constraints, and package configuration across repository manifests (e.g. pyproject.toml, requirements.txt, setup.cfg). Use this to verify package versions and version constraints before claiming version incompatibilities.",
                 parameters={
                     "type": "object",
                     "properties": {
@@ -486,6 +490,10 @@ class ToolRegistry:
             for i, line in enumerate(slice_lines)
         ]
 
+        norm_rel = normalize_relative_path(file_path_raw) or file_path_raw.strip().replace("\\", "/").lstrip("/")
+        if self.inspected_files is not None:
+            self.inspected_files.add(norm_rel)
+
         header = f"=== File: {file_path_raw} (Lines {start_line}-{min(end_line, total_lines)} of {total_lines}) ==="
         return header + "\n" + "\n".join(numbered_lines)
 
@@ -589,6 +597,10 @@ class ToolRegistry:
         pkg_filter = args.get("package_name")
         manifest = parse_workspace_dependencies(self.workspace_path)
 
+        if self.inspected_files is not None:
+            for ms in manifest.manifest_sources:
+                self.inspected_files.add(ms)
+
         if pkg_filter:
             norm_pkg = pkg_filter.strip().lower().replace("_", "-")
             constraint = manifest.dependencies.get(norm_pkg)
@@ -619,6 +631,9 @@ class ToolRegistry:
 
         candidate = self.workspace_path / norm_path
         assert_contained_path(candidate, self.workspace_path)
+
+        if self.inspected_files is not None:
+            self.inspected_files.add(norm_path)
 
         related = find_related_workspace_files(self.workspace_path, norm_path)
         return json.dumps({
@@ -699,7 +714,11 @@ class ToolRegistry:
                 "total_findings": r.total_findings,
                 "total_evidence": r.total_evidence,
             })
-        return json.dumps({"total": len(out), "runs": out}, indent=2)
+        return json.dumps({
+            "total": len(out),
+            "runs": out,
+            "notice": "Database utility only: this record does not reflect target repository source inspection. Proceed to inspect repository code using 'read_source_excerpt' or 'inspect_dependencies'.",
+        }, indent=2)
 
     def _handle_run_sandbox_check(self, args: Dict[str, Any]) -> str:
         import uuid
@@ -791,6 +810,44 @@ class ToolRegistry:
 
         # Reject symlinks escaping workspace
         assert_contained_path(resolved_file.resolve(), self.workspace_path)
+
+        # Invariant: Model cannot claim findings on uninspected files when inspection tracking is active
+        if self.inspected_files is not None and norm_path not in self.inspected_files:
+            err_msg = (
+                f"File '{norm_path}' has not been inspected with 'read_source_excerpt'. "
+                "You cannot record findings on uninspected code."
+            )
+            fve = InsufficientEvidenceError(
+                err_msg,
+                affected_file=norm_path,
+                start_line=args.get("start_line", 1),
+                end_line=args.get("end_line", 1),
+                defect_category=args.get("defect_category"),
+                rejection_type="InsufficientEvidenceError",
+            )
+            if self.rejected_tracker:
+                self.rejected_tracker.record_rejected_claim(
+                    norm_path=norm_path,
+                    start_line=args.get("start_line", 1),
+                    end_line=args.get("end_line", 1),
+                    defect_category=args.get("defect_category"),
+                    title=title,
+                    description=description,
+                    rejection_type="InsufficientEvidenceError",
+                    rejection_reason=err_msg,
+                )
+            if self.store and self.run_id:
+                self.store.append_event(
+                    self.run_id,
+                    EventType.FINDING_VALIDATION_FAILED,
+                    {
+                        "error_type": "InsufficientEvidenceError",
+                        "message": err_msg,
+                        "file": norm_path,
+                        "title": title,
+                    },
+                )
+            raise fve
 
         # Step 4-5: Line range validation
         start_line_raw = args.get("start_line", 1)

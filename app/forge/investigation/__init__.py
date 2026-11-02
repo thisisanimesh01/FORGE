@@ -7,6 +7,10 @@ from forge.investigation.tools import (
     MAX_SEARCH_RESULTS,
     MAX_DIR_ENTRIES,
 )
+from forge.investigation.planner import (
+    InvestigationPlanner,
+    InvestigationAction,
+)
 from forge.investigation.loop import (
     InvestigationLoop,
     InvestigationResult,
@@ -19,6 +23,8 @@ __all__ = [
     "MAX_EXCERPT_LINES",
     "MAX_SEARCH_RESULTS",
     "MAX_DIR_ENTRIES",
+    "InvestigationPlanner",
+    "InvestigationAction",
     "InvestigationLoop",
     "InvestigationResult",
     "SYSTEM_PROMPT",

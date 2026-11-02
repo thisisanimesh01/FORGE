@@ -247,3 +247,57 @@ Verified by 17 regression tests in `tests/unit/test_phase7_investigation_intelli
 - **Investigation Quality**: `INSUFFICIENT_EVIDENCE`
 - **Total Findings**: 0 (zero hallucinated defects)
 - **Final Assessment**: `[System-Generated Fallback Synthesis]` properly synthesized the investigation scope, inspected state, and limitations without conversational apologies.
+
+---
+
+## 8. Investigation Orchestration & Tool-Selection Remediation (`run_f22cf284a17b`)
+
+### A. Background & Observed Defect
+In run `run_d7744d583e06`, the agent repeatedly selected zero-argument utility tools (`get_run_history`) instead of inspecting target source files (`files_inspected: 0`). When the model hit a loop warning on step 5 and returned conversational text without tool calls, the loop prematurely terminated because `total_tool_calls > 0`, abandoning 7 remaining steps.
+
+### B. Architectural Remediations Implemented
+1. **Deterministic Investigation Planner (`InvestigationPlanner`)**:
+   - Generically discovers dependency manifests (`pyproject.toml`, `requirements.txt`, `setup.cfg`), core package implementations, and related test suites using symbol indexing and workspace relationship mapping.
+   - Maintains explicit state: `planned_files`, `inspected_files`, `pending_files`, `investigation_objectives`, and `utility_calls_count`.
+   - Schedules strategic investigation phases: manifests -> core implementations -> test suites -> synthesis.
+2. **Utility Call Quotas & Dynamic Tool Pruning**:
+   - Local database utilities (`get_run_history`) are capped (quota: 1 call per investigation).
+   - Once quota is reached, utility tools are dynamically pruned from `request_tools` sent to the provider, preventing models from looping on database utilities.
+3. **Autonomous Steering & Anti-Premature Termination**:
+   - The investigation loop no longer terminates prematurely on tool-free turns when planned files remain uninspected.
+   - Injects deterministic steering directives guiding the model to the next planned inspection target.
+   - Provides autonomous step fallback if the model repeatedly outputs unstructured text without calling tools.
+4. **Uninspected File Finding Protection**:
+   - `record_finding` strictly enforces that candidate finding files must have been previously inspected via `read_source_excerpt`, preventing speculative claims on unexamined files.
+
+### C. Verification Suite
+Verified by 17 regression tests in `tests/unit/test_phase7_investigation_orchestration.py`:
+1. `test_source_tools_present_in_provider_tool_schema`
+2. `test_source_tool_calls_correctly_dispatched`
+3. `test_tool_results_reach_next_model_turn`
+4. `test_repeated_get_run_history_calls_detected`
+5. `test_utility_call_limits_trigger_meaningful_recovery`
+6. `test_planner_schedules_dependency_inspection`
+7. `test_planner_schedules_implementation_inspection`
+8. `test_planner_schedules_relevant_test_inspection`
+9. `test_planner_adapts_when_file_does_not_exist`
+10. `test_already_inspected_files_not_repeatedly_scheduled`
+11. `test_model_invalid_responses_do_not_halt_deterministic_planning`
+12. `test_evidence_is_persisted_after_source_inspection`
+13. `test_model_cannot_claim_uninspected_files`
+14. `test_final_synthesis_uses_actual_investigation_state`
+15. `test_insufficient_evidence_remains_correctly_classified`
+16. `test_historical_run_and_report_compatibility_is_preserved`
+17. `test_existing_phase7_rejection_and_synthesis_tests_remain_passing`
+
+### D. Real-World Live Acceptance Run
+- **Target**: `https://github.com/fastapi/fastapi.git` (commit `45cb2252c737906f37544f5ba6bee0295fb81468`)
+- **Run ID**: `run_f22cf284a17b`
+- **Provider**: Ollama (`qwen2.5-coder:1.5b`)
+- **Steps Executed**: 12 (Tool calls: 9)
+- **Duration**: 56.89s
+- **Files Inspected**: 4 (`pyproject.toml`, `db_connection.py`, `src/auth.py`, `src/utils.py`)
+- **Execution Status**: `COMPLETED`
+- **Investigation Quality**: `COMPLETED`
+- **Total Findings**: 0 (clean audit, zero false positives)
+- **Final Assessment**: Structured technical synthesis grounded in real inspected source lines, manifests, explicit uncertainties, and truthful completion.
