@@ -75,6 +75,10 @@ class GitPublicationPolicy(BaseModel):
         default=True,
         description="Mandates an active, unexpired, untampered Phase 8 Milestone 6 approval."
     )
+    legacy_stage_for_pr_allows_create_pr: bool = Field(
+        default=False,
+        description="Whether legacy Phase 8 M6 STAGE_FOR_PR approvals authorize CREATE_PR. Default is False (fail-closed, requires explicit CREATE_PR approval)."
+    )
     allow_force_push: bool = Field(
         default=False,
         description="MUST ALWAYS BE FALSE. Force pushes are unconditionally forbidden."

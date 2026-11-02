@@ -214,9 +214,9 @@ class ApprovalManager:
         # 5. Strict Preconditions for APPROVE
         if decision == OperatorDecisionType.APPROVE:
             if not authorized_action:
+                valid_acts = ", ".join(a.value for a in AuthorizedAction)
                 raise ApprovalError(
-                    "Approval requires specifying an explicit AuthorizedAction "
-                    "(EXPORT_PATCH, STAGE_FOR_PR, or MANUAL_INTEGRATION)."
+                    f"Approval requires specifying an explicit AuthorizedAction ({valid_acts})."
                 )
 
             # Precondition: M4 Independent Validation must be ACCEPTED

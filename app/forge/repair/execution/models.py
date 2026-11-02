@@ -488,10 +488,12 @@ class OperatorDecisionType(str, Enum):
 
 
 class AuthorizedAction(str, Enum):
-    """Specific downstream publication actions that can be authorized."""
+    """Specific downstream publication actions that can be authorized by operators."""
     EXPORT_PATCH = "export_patch"
     STAGE_FOR_PR = "stage_for_pr"
     MANUAL_INTEGRATION = "manual_integration"
+    STAGE_BRANCH = "stage_branch"
+    CREATE_PR = "create_pr"
 
 
 class ApprovalBinding(BaseModel):

@@ -4,6 +4,12 @@ Exposes domain models, protocols, policies, inspectors, validators, planners,
 and persistent stores for safe Git publication of operator-approved repairs.
 """
 
+from forge.publication.authorization import (
+    ACTION_AUTHORIZATION_MAP,
+    get_permitted_publication_actions,
+    is_action_authorized,
+    validate_action_authorization,
+)
 from forge.publication.failures import (
     ArtifactBindingMismatchError,
     DuplicatePublicationError,
@@ -76,12 +82,16 @@ __all__ = [
     "ArtifactBindingMismatchError",
     "DuplicatePublicationError",
     "SecretDetectedError",
-    # Policy
+    # Policy & Authorization
     "GitPublicationPolicy",
     "is_protected_branch",
     "validate_branch_name",
     "validate_remote_url",
     "scan_for_secrets",
+    "ACTION_AUTHORIZATION_MAP",
+    "get_permitted_publication_actions",
+    "is_action_authorized",
+    "validate_action_authorization",
     # Components
     "GitRepositoryInspector",
     "GitPublicationValidator",

@@ -143,7 +143,33 @@ class PublicationAuditStoreProtocol(Protocol):
 
 ---
 
-## 6. CLI Commands Reference
+## 6. Authorization Compatibility & Action Mapping Model
+
+Phase 8 Milestone 6 and Phase 9 Milestone 1 define related but semantically distinct action concepts:
+- **Phase 8 M6 `AuthorizedAction`**: Represents the scope of authority explicitly granted by a human operator in their signed review decision.
+- **Phase 9 M1 `PublicationAction`**: Represents the concrete downstream publication action requested from and executed by the publication engine.
+
+To ensure fail-closed security, zero privilege escalation, and 100% backward compatibility with historical SQLite database records, `app/forge/publication/authorization.py` implements a formal, non-bypassable authorization matrix:
+
+| Operator `AuthorizedAction` | Permitted `PublicationAction` Set | Strictly Forbidden Actions | Semantic Boundary |
+|---|---|---|---|
+| `EXPORT_PATCH` | `{EXPORT_PATCH}` | `STAGE_BRANCH`, `CREATE_PR` | Exports patch file/diff only; zero Git branch or remote operations. |
+| `MANUAL_INTEGRATION` | `{EXPORT_PATCH}` | `STAGE_BRANCH`, `CREATE_PR` | Manual developer review/application only. Strictly forbidden from autonomous branch staging or PR creation. |
+| `STAGE_FOR_PR` (Legacy M6) | `{EXPORT_PATCH, STAGE_BRANCH}` | `CREATE_PR` (by default) | Prepares local branch and commit proposal for PR. Authorizes local branch staging. Remote PR creation requires explicit `CREATE_PR` authorization or explicit policy opt-in (`legacy_stage_for_pr_allows_create_pr=True`). |
+| `STAGE_BRANCH` (Phase 9) | `{EXPORT_PATCH, STAGE_BRANCH}` | `CREATE_PR` | Explicit local branch and signed commit staging on target repository. Strictly forbids remote publication. |
+| `CREATE_PR` (Phase 9) | `{EXPORT_PATCH, STAGE_BRANCH, CREATE_PR}` | None | Complete publication pipeline: local branch staging and remote pull-request opening. |
+
+### Anti-Escalation & Security Guarantees:
+1. **No Silent Escalation**: `MANUAL_INTEGRATION` and `EXPORT_PATCH` can never authorize `STAGE_BRANCH` or `CREATE_PR`.
+2. **Local Staging vs Remote Publication Boundary**: `STAGE_FOR_PR` and `STAGE_BRANCH` authorize local Git operations (`STAGE_BRANCH`), but cannot push to remotes or open PRs (`CREATE_PR`) without explicit `CREATE_PR` sign-off.
+3. **No Alias Exploitation**: `PublicationAction` accepts only canonical lowercase enum values (`export_patch`, `stage_branch`, `create_pr`). Shortcut aliases (`pr`, `stage`, `manual`) are rejected at the CLI and API boundaries with validation errors.
+4. **Database Tampering Resilience**: If a stored `publication_requests` row is manipulated directly in SQLite, the validator re-queries the authoritative `repair_approval_decisions` record and fails closed.
+5. **Replay Defense**: Operator decisions are cryptographically bound to exact artifact tuples `(repair_id, base_commit_sha, patch_sha256)`. Cross-repair replay attempts fail closed.
+6. **Backward Compatibility**: Existing database records containing `'export_patch'`, `'stage_for_pr'`, or `'manual_integration'` deserialize cleanly with zero schema changes.
+
+---
+
+## 7. CLI Commands Reference
 
 - `forge repair publish plan <repair-id>`: Formulate and persist a deterministic publication plan for an approved repair.
 - `forge repair publish validate <repair-id>`: Independently validate publication preconditions without generating a plan.
@@ -153,7 +179,7 @@ class PublicationAuditStoreProtocol(Protocol):
 
 ---
 
-## 7. Deferred Milestones
+## 8. Deferred Milestones
 
 - **Milestone 2 (Publication Staging)**: Staging candidate repair commits onto isolated local Git branches with hook bypass protection and signature attestation.
 - **Milestone 3 (Pull Request Integration)**: Remote provider integration (GitHub / GitLab / local git bundles) for automated pull-request proposal generation.

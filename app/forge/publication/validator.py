@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from forge.config import redact_secrets
+from forge.publication.authorization import validate_action_authorization
 from forge.publication.failures import (
     ArtifactBindingMismatchError,
     ProtectedBranchViolationError,
@@ -119,37 +120,17 @@ class GitPublicationValidator(GitPublicationValidatorProtocol):
         checks_passed.append(f"Approval decision '{decision_rec.decision_id}' is active and APPROVED.")
 
         # 5. Enforce Action-Specific Authorization
-        # EXPORT_PATCH in approval authorizes ONLY EXPORT_PATCH
-        # STAGE_FOR_PR authorizes STAGE_BRANCH or CREATE_PR
-        # MANUAL_INTEGRATION authorizes EXPORT_PATCH
         auth_action = decision_rec.authorized_action
         if not auth_action:
             raise PublicationAuthorizationError(
                 f"Approval decision '{decision_rec.decision_id}' has no recorded authorized action."
             )
 
-        if request.action == PublicationAction.EXPORT_PATCH:
-            if auth_action not in (
-                AuthorizedAction.EXPORT_PATCH,
-                AuthorizedAction.STAGE_FOR_PR,
-                AuthorizedAction.MANUAL_INTEGRATION,
-            ):
-                raise PublicationActionMismatchError(
-                    f"Action '{request.action.value}' not authorized by operator decision "
-                    f"('{auth_action.value}')."
-                )
-        elif request.action == PublicationAction.STAGE_BRANCH:
-            if auth_action != AuthorizedAction.STAGE_FOR_PR:
-                raise PublicationActionMismatchError(
-                    f"Branch staging ('{request.action.value}') requires explicit 'STAGE_FOR_PR' authorization; "
-                    f"decision has '{auth_action.value}'."
-                )
-        elif request.action == PublicationAction.CREATE_PR:
-            if auth_action != AuthorizedAction.STAGE_FOR_PR:
-                raise PublicationActionMismatchError(
-                    f"Pull request creation ('{request.action.value}') requires explicit 'STAGE_FOR_PR' authorization; "
-                    f"decision has '{auth_action.value}'."
-                )
+        validate_action_authorization(
+            authorized_action=auth_action,
+            requested_action=request.action,
+            policy=self.policy,
+        )
         checks_passed.append(
             f"Requested action '{request.action.value}' matches operator authorization '{auth_action.value}'."
         )
