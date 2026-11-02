@@ -19,9 +19,11 @@ from forge.repair.execution.models import (
     PatchArtifact,
     RepairActor,
     RepairExecutionEvent,
+    RepairExecutionPlan,
     RepairExecutionRecord,
     RepairExecutionState,
     RepairRequest,
+    ValidationResult,
     WorkspaceRecord,
 )
 from forge.repair.execution.state import validate_repair_transition
@@ -227,7 +229,12 @@ class RepairExecutionStore(RepairEventStoreProtocol):
                 ver_status = row["verification_status"]
                 failure_json = row["failure_json"]
 
-                if to_state == RepairExecutionState.PATCH_GENERATED:
+                if to_state == RepairExecutionState.PLANNED:
+                    plan = ctx.get("plan")
+                    if plan and isinstance(plan, RepairExecutionPlan):
+                        self._save_repair_plan_locked(conn, plan)
+
+                elif to_state == RepairExecutionState.PATCH_GENERATED:
                     patch = ctx.get("patch")
                     if patch and isinstance(patch, PatchArtifact):
                         patch_id = patch.artifact_id
@@ -364,6 +371,101 @@ class RepairExecutionStore(RepairEventStoreProtocol):
             conn.close()
 
     # -------------------------------------------------------------------------
+    # Repair Execution Plan Persistence
+    # -------------------------------------------------------------------------
+
+    def save_repair_plan(self, plan: RepairExecutionPlan) -> None:
+        """Persist or insert a RepairExecutionPlan."""
+        conn = self._conn()
+        try:
+            with conn:
+                self._save_repair_plan_locked(conn, plan)
+        finally:
+            conn.close()
+
+    def _save_repair_plan_locked(self, conn: sqlite3.Connection, plan: RepairExecutionPlan) -> None:
+        conn.execute(
+            """
+            INSERT INTO repair_execution_plans (
+                plan_id, repair_id, target_file, root_cause, proposed_change,
+                expected_behavior, verification_command, confidence, rationale, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(plan_id) DO UPDATE SET
+                proposed_change = excluded.proposed_change,
+                expected_behavior = excluded.expected_behavior,
+                verification_command = excluded.verification_command,
+                confidence = excluded.confidence,
+                rationale = excluded.rationale
+            """,
+            (
+                plan.plan_id,
+                plan.repair_id,
+                plan.target_file,
+                plan.root_cause,
+                plan.proposed_change,
+                plan.expected_behavior,
+                plan.verification_command,
+                plan.confidence,
+                plan.rationale,
+                plan.created_at.isoformat(),
+            ),
+        )
+
+    def get_repair_plan(self, plan_id: str) -> Optional[RepairExecutionPlan]:
+        """Fetch a RepairExecutionPlan by plan_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_execution_plans WHERE plan_id = ?",
+                (plan_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+
+            return RepairExecutionPlan(
+                plan_id=row["plan_id"],
+                repair_id=row["repair_id"],
+                target_file=row["target_file"],
+                root_cause=row["root_cause"],
+                proposed_change=row["proposed_change"],
+                expected_behavior=row["expected_behavior"],
+                verification_command=row["verification_command"],
+                confidence=row["confidence"],
+                rationale=row["rationale"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+        finally:
+            conn.close()
+
+    def get_repair_plan_for_repair(self, repair_id: str) -> Optional[RepairExecutionPlan]:
+        """Fetch the most recent RepairExecutionPlan for a repair_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_execution_plans WHERE repair_id = ? ORDER BY created_at DESC LIMIT 1",
+                (repair_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+
+            return RepairExecutionPlan(
+                plan_id=row["plan_id"],
+                repair_id=row["repair_id"],
+                target_file=row["target_file"],
+                root_cause=row["root_cause"],
+                proposed_change=row["proposed_change"],
+                expected_behavior=row["expected_behavior"],
+                verification_command=row["verification_command"],
+                confidence=row["confidence"],
+                rationale=row["rationale"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+            )
+        finally:
+            conn.close()
+
+    # -------------------------------------------------------------------------
     # Audit Event Ledger Persistence
     # -------------------------------------------------------------------------
 
@@ -460,10 +562,12 @@ class RepairExecutionStore(RepairEventStoreProtocol):
         if req.patch_artifact_id:
             patch = self.get_patch_artifact(req.patch_artifact_id)
 
+        plan = self.get_repair_plan_for_repair(repair_id)
         events = self.get_events(repair_id)
 
         return RepairExecutionRecord(
             request=req,
+            plan=plan,
             patch=patch,
             events=events,
             failure=req.failure,

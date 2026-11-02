@@ -7,6 +7,7 @@ commit identity verification, workspace collision, integrity violations, and san
 from typing import Any, Dict, Optional
 
 from forge.repair.execution.policy import (
+    RepairPolicyViolationError,
     ScopeContainmentViolationError,
     TargetRepoImmutabilityViolationError,
 )
@@ -59,3 +60,27 @@ class ResourceLimitViolationError(WorkspaceExecutionError):
 
 class WorkspaceCleanupError(WorkspaceExecutionError):
     """Raised when workspace teardown or directory removal encounters an unrecoverable error."""
+
+
+class RepairRequestValidationError(WorkspaceExecutionError):
+    """Raised when a repair request fails validation (missing finding, mismatched repo/commit, missing evidence)."""
+
+
+class InsufficientEvidenceError(WorkspaceExecutionError):
+    """Raised when finding lacks verified supporting source evidence required for grounded repair."""
+
+
+class StaleBaseRevisionError(WorkspaceExecutionError):
+    """Raised when workspace or target repo commit revision does not match finding base commit."""
+
+
+class PatchGenerationError(WorkspaceExecutionError):
+    """Raised when patch generation fails, times out, or produces malformed output."""
+
+
+class PatchValidationError(WorkspaceExecutionError):
+    """Raised when a candidate patch violates syntax, scope, budget, AST, or semantic invariants."""
+
+
+class PatchApplicationError(WorkspaceExecutionError):
+    """Raised when a candidate patch fails to apply cleanly to the workspace files."""

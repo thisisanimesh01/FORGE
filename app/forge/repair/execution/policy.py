@@ -19,6 +19,11 @@ from forge.config import redact_secrets
 class RepairPolicyViolationError(Exception):
     """Base exception for repair execution policy violations."""
 
+    def __init__(self, message: str, details: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.message = message
+        self.details = details or {}
+
 
 class TargetRepoImmutabilityViolationError(RepairPolicyViolationError):
     """Raised when an operation attempts to mutate or use the target repository directly."""

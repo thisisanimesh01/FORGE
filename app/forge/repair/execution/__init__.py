@@ -5,12 +5,22 @@ strict safety boundaries, component interfaces, isolated workspace management,
 and audit event ledger for evidence-grounded software repair execution.
 """
 
+from forge.repair.execution.applier import SafePatchApplier
+from forge.repair.execution.coordinator import RepairExecutionCoordinator
 from forge.repair.execution.failures import (
     CommitMismatchError,
+    InsufficientEvidenceError,
+    PatchApplicationError,
+    PatchGenerationError,
+    PatchValidationError,
+    RepairRequestValidationError,
     RepositoryAcquisitionError,
     ResourceLimitViolationError,
     SandboxInitializationError,
     SandboxUnavailableError,
+    ScopeContainmentViolationError,
+    StaleBaseRevisionError,
+    TargetRepoImmutabilityViolationError,
     WorkspaceCleanupError,
     WorkspaceCollisionError,
     WorkspaceExecutionError,
@@ -18,6 +28,7 @@ from forge.repair.execution.failures import (
     WorkspaceProvisioningError,
     WorkspaceReuseForbiddenError,
 )
+from forge.repair.execution.generator import RepairPatchGenerator
 from forge.repair.execution.interfaces import (
     PatchValidatorProtocol,
     RepairEventStoreProtocol,
@@ -41,6 +52,7 @@ from forge.repair.execution.models import (
     ValidationResult,
     WorkspaceRecord,
 )
+from forge.repair.execution.planner import RepairExecutionPlanner
 from forge.repair.execution.policy import (
     ArbitraryExecutionForbiddenError,
     BudgetExceededViolationError,
@@ -52,8 +64,6 @@ from forge.repair.execution.policy import (
     ProtectedPathViolationError,
     RepairExecutionPolicy,
     RepairPolicyViolationError,
-    ScopeContainmentViolationError,
-    TargetRepoImmutabilityViolationError,
 )
 from forge.repair.execution.state import (
     ACTOR_TRANSITION_PERMISSIONS,
@@ -70,6 +80,10 @@ from forge.repair.execution.state import (
 from forge.repair.execution.storage import (
     RepairExecutionStore,
     RepairExecutionStoreError,
+)
+from forge.repair.execution.validator import (
+    PatchValidator,
+    RepairRequestValidator,
 )
 from forge.repair.execution.workspace import RepairWorkspace
 
@@ -111,7 +125,7 @@ __all__ = [
     "DEFAULT_ALLOWED_ENV_VARS",
     "PROTECTED_EXACT_FILENAMES",
     "PROTECTED_PATH_PREFIXES",
-    # Workspace & Sandbox Failures
+    # Workspace & Execution Failures
     "WorkspaceExecutionError",
     "WorkspaceProvisioningError",
     "RepositoryAcquisitionError",
@@ -123,6 +137,12 @@ __all__ = [
     "SandboxInitializationError",
     "ResourceLimitViolationError",
     "WorkspaceCleanupError",
+    "RepairRequestValidationError",
+    "InsufficientEvidenceError",
+    "StaleBaseRevisionError",
+    "PatchGenerationError",
+    "PatchValidationError",
+    "PatchApplicationError",
     # Interfaces
     "RepairWorkspaceProtocol",
     "RepairPlannerProtocol",
@@ -135,4 +155,11 @@ __all__ = [
     "RepairWorkspaceManager",
     "RepairExecutionStore",
     "RepairExecutionStoreError",
+    # M3 Candidate Patch Generation Components
+    "RepairRequestValidator",
+    "PatchValidator",
+    "RepairExecutionPlanner",
+    "RepairPatchGenerator",
+    "SafePatchApplier",
+    "RepairExecutionCoordinator",
 ]

@@ -339,6 +339,20 @@ CREATE TABLE IF NOT EXISTS repair_workspaces (
     FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS repair_execution_plans (
+    plan_id TEXT PRIMARY KEY,
+    repair_id TEXT NOT NULL,
+    target_file TEXT NOT NULL,
+    root_cause TEXT NOT NULL,
+    proposed_change TEXT NOT NULL,
+    expected_behavior TEXT NOT NULL,
+    verification_command TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0.8,
+    rationale TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
@@ -369,6 +383,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_repair_exec_events_seq ON repair_execution_
 CREATE INDEX IF NOT EXISTS idx_patch_artifacts_repair ON patch_artifacts(repair_id);
 CREATE INDEX IF NOT EXISTS idx_patch_artifacts_finding ON patch_artifacts(finding_id);
 CREATE INDEX IF NOT EXISTS idx_repair_workspaces_repair ON repair_workspaces(repair_id);
+CREATE INDEX IF NOT EXISTS idx_repair_exec_plans_repair ON repair_execution_plans(repair_id);
 """
 
 

@@ -36,8 +36,22 @@ Candidate Semantic Verification Hardening ── [COMPLETED]
 Deterministic Repair Construction Architecture ── [COMPLETED]
 Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (Milestones 1–6 Complete — Supervised Beta Release Gate Reached)
 Phase 7: Evidence-Driven Investigation Engine ── [COMPLETED] (Cross-File Evidence, Contradiction Detection, Investigation Orchestration)
-Phase 8: Controlled Evidence-Grounded Software Repair ── [IN PROGRESS] (Milestones 1 & 2 Completed)
+Phase 8: Controlled Evidence-Grounded Software Repair ── [IN PROGRESS] (Milestones 1, 2, & 3 Completed)
 ```
+
+### Phase 8, Milestone 3: Evidence-Grounded Candidate Patch Generation (Completed)
+- **Objective & Scope**: Implement controlled, evidence-grounded candidate patch generation using validated findings, persisted source evidence, repair safety policies, isolated scratch workspaces, and multi-layer patch validation.
+- **Architectural Deliverables**:
+  - *Precondition & Provenance Validation (`forge.repair.execution.validator`)*: Implemented `RepairRequestValidator` enforcing 10 precondition checks: finding existence, eligible lifecycle states (`SUSPECTED`, `REPRODUCED`, `ROOT_CAUSED`), commit SHA matching, substantive evidence provenance, workspace path containment, `allowed_files` compliance, protected path blocking, and workspace baseline integrity.
+  - *Evidence-Grounded Planning (`forge.repair.execution.planner`)*: Implemented `RepairExecutionPlanner` formulating typed `RepairExecutionPlan` with verified facts separated from hypotheses, single target file scope, and minimal repair boundaries.
+  - *Candidate Patch Generator (`forge.repair.execution.generator`)*: Implemented `RepairPatchGenerator` invoking local Ollama (`qwen2.5-coder:1.5b`) with zero cloud fallback, strict context budgeting, unified diff formatting, single-file scope defense, and budget caps ($\le 100$ lines, $\le 5$ hunks, $\le 1$ file, $\le 20$ KB). Supports deterministic synthesis for testing.
+  - *Multi-Layer Patch Validator (`forge.repair.execution.validator`)*: Implemented `PatchValidator` validating unified diff headers, hunk marker consistency, exact context matching against isolated workspace files at the base revision, in-memory Python AST syntax validation, and static semantic invariants (`collect_unreachable_statements`, `_check_validation_guards`, `_check_docstring_integrity`).
+  - *Safe In-Workspace Patch Applier (`forge.repair.execution.applier`)*: Implemented `SafePatchApplier` with pre- and post-application target repository immutability verification, in-memory backup, atomic rollback on failure, and workspace integrity diffing.
+  - *Lifecycle Coordinator (`forge.repair.execution.coordinator`)*: Implemented `RepairExecutionCoordinator` orchestrating state progression (`CREATED -> PLANNED -> VALIDATING -> READY -> EXECUTING -> PATCH_GENERATED -> PATCH_VALIDATING`), guarded rollback to `FAILED` on validation errors, and zero premature transitions to `VERIFIED` (verification is reserved for Milestone 5).
+  - *Persistent Storage & Schema Migration (`forge.storage.database`, `forge.repair.execution.storage`)*: Added `repair_execution_plans` table and index to SQLite schema. Integrated plan persistence and retrieval into `RepairExecutionStore`.
+  - *Dedicated Specification ([`docs/specs/phase-8-m3-candidate-patch-generation.md`](docs/specs/phase-8-m3-candidate-patch-generation.md))*: Formal architecture specification detailing patch generation contracts, AST validation rules, semantic invariant enforcement, and safe application.
+  - *Verification Suite*: 23 dedicated unit tests in `tests/unit/test_phase8_m3_patch_generation.py` and 1,214 tests across the full pytest suite passing with zero regressions.
+  - *Scope Boundary*: Patches are applied strictly inside isolated disposable scratch workspaces; automated Git commits, pushes, branches, PRs, merges, and deployments on target repositories remain strictly forbidden. Multi-check candidate patch verification remains deferred to Milestone 5.
 
 ### Phase 8, Milestone 2: Isolated Workspace Management & Sandbox Integration (Completed)
 - **Objective & Scope**: Implement secure, isolated scratch workspace provisioning, exact Git commit identity verification, baseline filesystem integrity auditing, and Docker sandbox integration with fail-closed guarantees for evidence-grounded repair execution.
