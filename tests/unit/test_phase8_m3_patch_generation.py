@@ -385,10 +385,11 @@ def test_patch_generator_with_mock_provider(seeded_environment):
         "+    if rate < 0.0 or rate > 1.0:\n"
         "         raise ValueError('Rate too high')\n"
     )
+    escaped_diff = valid_diff.replace("\n", "\\n")
     fake_json = (
         '{\n'
         '  "target_file": "src/calculator.py",\n'
-        f'  "unified_diff": "{valid_diff.replace(chr(10), "\\n")}",\n'
+        f'  "unified_diff": "{escaped_diff}",\n'
         '  "explanation": "Add negative rate boundary check"\n'
         '}'
     )
@@ -427,10 +428,11 @@ def test_patch_generator_rejects_unauthorized_touched_file(seeded_environment):
         "-# old\n"
         "+# hacked\n"
     )
+    escaped_unauthorized = unauthorized_diff.replace("\n", "\\n")
     fake_json = (
         '{\n'
         '  "target_file": "src/other.py",\n'
-        f'  "unified_diff": "{unauthorized_diff.replace(chr(10), "\\n")}"\n'
+        f'  "unified_diff": "{escaped_unauthorized}"\n'
         '}'
     )
 
