@@ -334,6 +334,15 @@ class ForgeStore:
         finally:
             conn.close()
 
+    def list_evidence_for_run(self, run_id: str) -> List[EvidenceRecord]:
+        """List all evidence attached to a specific run, ordered chronologically."""
+        conn = self._conn()
+        try:
+            cur = conn.execute("SELECT evidence_id FROM evidence WHERE run_id = ? ORDER BY created_at ASC", (run_id,))
+            return [self.get_evidence(r["evidence_id"]) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
     # ---------------------------------------------------------
     # State Machine & Transitions API
     # ---------------------------------------------------------

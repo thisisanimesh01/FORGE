@@ -67,11 +67,33 @@ class ReportBuilder:
 
         # Retrieve findings and evidence
         raw_findings = self.store.list_findings(run_id=run_id)
-        all_evidence = []
+        all_evidence: List[ReportEvidenceItem] = []
         findings_list: List[ReportFinding] = []
 
         findings_by_severity: Dict[str, int] = {}
         findings_by_state: Dict[str, int] = {}
+
+        # 1. Fetch all evidence records persisted for this run
+        run_evidence_records = self.store.list_evidence_for_run(run_id)
+        evidence_map: Dict[str, ReportEvidenceItem] = {}
+        for ev in run_evidence_records:
+            item = ReportEvidenceItem(
+                evidence_id=ev.evidence_id,
+                evidence_type=ev.evidence_type.value,
+                description=redact_secrets(ev.description),
+                file_path=ev.file_path,
+                start_line=ev.start_line,
+                end_line=ev.end_line,
+                provenance=ev.provenance,
+                content_snippet=redact_secrets(ev.content[:500] + ("..." if len(ev.content) > 500 else "")),
+                commit_sha=ev.details.get("commit_sha") if ev.details else None,
+                repository_target=ev.details.get("repository_target") if ev.details else None,
+                operation=ev.details.get("operation") if ev.details else None,
+                content_hash=ev.details.get("content_hash") if ev.details else None,
+                created_at=ev.created_at.isoformat() if ev.created_at else None,
+            )
+            evidence_map[ev.evidence_id] = item
+            all_evidence.append(item)
 
         for f in raw_findings:
             # Track statistics
@@ -84,19 +106,28 @@ class ReportBuilder:
             finding_evidence_items: List[ReportEvidenceItem] = []
             ev_list = self.store.list_evidence_for_finding(f.finding_id)
             for ev in ev_list:
-                item = ReportEvidenceItem(
-                    evidence_id=ev.evidence_id,
-                    evidence_type=ev.evidence_type.value,
-                    description=redact_secrets(ev.description),
-                    file_path=ev.file_path,
-                    start_line=ev.start_line,
-                    end_line=ev.end_line,
-                    provenance=ev.provenance,
-                    content_snippet=redact_secrets(ev.content[:500] + ("..." if len(ev.content) > 500 else "")),
-                )
+                if ev.evidence_id in evidence_map:
+                    item = evidence_map[ev.evidence_id]
+                else:
+                    item = ReportEvidenceItem(
+                        evidence_id=ev.evidence_id,
+                        evidence_type=ev.evidence_type.value,
+                        description=redact_secrets(ev.description),
+                        file_path=ev.file_path,
+                        start_line=ev.start_line,
+                        end_line=ev.end_line,
+                        provenance=ev.provenance,
+                        content_snippet=redact_secrets(ev.content[:500] + ("..." if len(ev.content) > 500 else "")),
+                        commit_sha=ev.details.get("commit_sha") if ev.details else None,
+                        repository_target=ev.details.get("repository_target") if ev.details else None,
+                        operation=ev.details.get("operation") if ev.details else None,
+                        content_hash=ev.details.get("content_hash") if ev.details else None,
+                        created_at=ev.created_at.isoformat() if ev.created_at else None,
+                    )
+                    evidence_map[ev.evidence_id] = item
+                    if item not in all_evidence:
+                        all_evidence.append(item)
                 finding_evidence_items.append(item)
-                if item not in all_evidence:
-                    all_evidence.append(item)
 
             findings_list.append(
                 ReportFinding(
@@ -364,6 +395,26 @@ def report_to_markdown(report: InvestigationReport) -> str:
         else:
             lines.append("*No findings recorded for this run. Investigation concluded with limitations or insufficient evidence.*")
         lines.append("")
+
+        if report.evidence:
+            lines.append("### Verified Investigation Evidence")
+            for ev in report.evidence:
+                loc = f" (`{ev.file_path}:{ev.start_line}-{ev.end_line}`)" if ev.file_path and ev.start_line else (f" (`{ev.file_path}`)" if ev.file_path else "")
+                lines.append(f"- **`{ev.evidence_id}`** [{ev.evidence_type}]{loc}: {ev.description}")
+                provenance_parts = []
+                if ev.operation:
+                    provenance_parts.append(f"Operation: `{ev.operation}`")
+                if ev.commit_sha:
+                    provenance_parts.append(f"Commit: `{ev.commit_sha[:10]}`")
+                if ev.provenance:
+                    provenance_parts.append(f"Provenance: `{ev.provenance}`")
+                if provenance_parts:
+                    lines.append(f"  - {' | '.join(provenance_parts)}")
+                if ev.content_snippet:
+                    lines.append("  ```")
+                    lines.append(f"  {ev.content_snippet.strip()}")
+                    lines.append("  ```")
+            lines.append("")
     else:
         for f in report.findings:
             lines.append(f"### [{f.severity.upper()}] {f.title} (`{f.finding_id}`)")

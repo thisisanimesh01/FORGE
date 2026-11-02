@@ -19,6 +19,11 @@ class ReportEvidenceItem(BaseModel):
     end_line: Optional[int] = None
     provenance: str = "forge:system"
     content_snippet: str = ""
+    commit_sha: Optional[str] = None
+    repository_target: Optional[str] = None
+    operation: Optional[str] = None
+    content_hash: Optional[str] = None
+    created_at: Optional[str] = None
 
 
 class ReportFinding(BaseModel):

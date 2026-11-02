@@ -1,6 +1,7 @@
 """Safe acquisition of remote and local repositories into isolated workspaces."""
 
 import os
+import re
 import shutil
 import subprocess
 import uuid
@@ -63,6 +64,7 @@ def run_git_command(args: list[str], cwd: Optional[Path] = None, timeout_seconds
 def acquire_repository(
     target: str,
     branch: Optional[str] = None,
+    commit_sha: Optional[str] = None,
     custom_workspace: Optional[Path] = None,
     allow_local: bool = True,
 ) -> AcquiredRepository:
@@ -80,13 +82,43 @@ def acquire_repository(
     dest_dir = base_dir / f"repo_{run_token}"
     dest_dir.mkdir(parents=True, exist_ok=False)
 
+    target_commit = (commit_sha or "").strip() or None
+    if not target_commit and branch and re.match(r"^[0-9a-fA-F]{40}$", branch.strip()):
+        target_commit = branch.strip()
+
     if validation.target_type == TargetType.REMOTE_GIT:
+        # If pinned commit is requested, attempt shallow commit fetch
+        if target_commit:
+            run_git_command(["init"], cwd=dest_dir)
+            run_git_command(["config", "core.hooksPath", "/dev/null"], cwd=dest_dir)
+            run_git_command(["remote", "add", "origin", validation.sanitized_target], cwd=dest_dir)
+            fetch_res = run_git_command(
+                ["fetch", "--depth", "1", "origin", target_commit],
+                cwd=dest_dir,
+                timeout_seconds=settings.step_timeout_seconds,
+            )
+            if fetch_res.returncode == 0:
+                checkout_res = run_git_command(["checkout", target_commit], cwd=dest_dir)
+                if checkout_res.returncode == 0:
+                    return AcquiredRepository(
+                        target=target,
+                        workspace_path=dest_dir,
+                        base_workspace=base_dir,
+                        is_temporary=True,
+                        resolved_commit_sha=target_commit,
+                        target_branch=branch or target_commit[:8],
+                        is_local_copy=False,
+                    )
+            # If shallow fetch of specific commit failed, reset directory for fallback clone
+            shutil.rmtree(dest_dir, ignore_errors=True)
+            dest_dir.mkdir(parents=True, exist_ok=False)
+
         clone_args = [
             "clone",
             "--config", "core.hooksPath=/dev/null",
             "--depth", "1",
         ]
-        if branch:
+        if branch and not target_commit:
             clone_args.extend(["--branch", branch])
         clone_args.extend([validation.sanitized_target, str(dest_dir)])
 
@@ -99,9 +131,13 @@ def acquire_repository(
         # Explicitly configure cloned repository to disable hooks in local config as well
         run_git_command(["config", "core.hooksPath", "/dev/null"], cwd=dest_dir)
 
+        # If target commit was requested but shallow fetch was retried via clone:
+        if target_commit:
+            run_git_command(["checkout", target_commit], cwd=dest_dir)
+
         # Extract resolved commit SHA and branch
         commit_res = run_git_command(["rev-parse", "HEAD"], cwd=dest_dir)
-        commit_sha = commit_res.stdout.strip() if commit_res.returncode == 0 else None
+        commit_sha_resolved = commit_res.stdout.strip() if commit_res.returncode == 0 else target_commit
 
         branch_res = run_git_command(["rev-parse", "--abbrev-ref", "HEAD"], cwd=dest_dir)
         resolved_branch = branch_res.stdout.strip() if branch_res.returncode == 0 else branch
@@ -111,7 +147,7 @@ def acquire_repository(
             workspace_path=dest_dir,
             base_workspace=base_dir,
             is_temporary=True,
-            resolved_commit_sha=commit_sha,
+            resolved_commit_sha=commit_sha_resolved,
             target_branch=resolved_branch,
             is_local_copy=False,
         )

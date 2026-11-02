@@ -301,3 +301,66 @@ Verified by 17 regression tests in `tests/unit/test_phase7_investigation_orchest
 - **Investigation Quality**: `COMPLETED`
 - **Total Findings**: 0 (clean audit, zero false positives)
 - **Final Assessment**: Structured technical synthesis grounded in real inspected source lines, manifests, explicit uncertainties, and truthful completion.
+
+---
+
+## 9. Repository-Scoped Evidence Integrity & Quality-Gate Enforcement (`run_0a293dd14f45`)
+
+### A. Background & Observed Defect
+In run `run_f22cf284a17b`, while the orchestration engine successfully scheduled tool calls and completed 12 turns, the model hallucinated findings on paths that did not exist in the target repository (`src/auth.py`, `src/utils.py`). Furthermore:
+1. `record_finding` and `find_related_files` previously added paths to `inspected_files` even if the file did not exist on disk or the read failed, creating a false impression that substantive files were audited.
+2. The audit lacked target commit pinning support (`--commit`) for shallow clones, risking drifting remote targets during audit pilots.
+3. When zero real source files were inspected or zero evidence records were stored, the investigation quality could still be falsely marked `completed`.
+4. Stored `EvidenceRecord` items lacked repository provenance (`commit_sha`, `repository_target`, `operation`, `content_hash`), limiting cryptographic auditability.
+
+### B. Architectural Remediations Implemented
+1. **Target-Scoped Commit Acquisition & CLI Flags**:
+   - Enhanced `acquire_repository` to support `--commit <sha>`, performing shallow target acquisition (`git init`, `git remote add`, `git fetch --depth 1 origin <sha>`, `git checkout <sha>`).
+   - Added `--commit` / `-c` and `--instruction` / `-i` flags to `forge investigate` CLI.
+2. **Deterministic Repository Path & Containment Validation**:
+   - Engineered `validate_repository_path(workspace_path, raw_path, expected_commit_sha)` in `app/forge/analysis/validation.py`.
+   - Strictly enforces workspace containment, rejects traversal (`../`), blocks symlink escapes, and verifies regular file existence on disk, raising `RepositoryPathValidationError`.
+   - Integrated into `read_source_excerpt` and `record_finding`, ensuring non-existent paths are rejected immediately, recorded in `rejected_claims`, and never added to `inspected_files`.
+3. **Repository-Scoped Evidence Provenance**:
+   - Augmented `EvidenceRecord` generation across `read_source_excerpt` and `inspect_dependencies` with target `commit_sha`, `repository_target`, `operation`, and SHA-256 `content_hash`.
+   - Added `ForgeStore.list_evidence_for_run(run_id)` and enhanced `InvestigationReportBuilder` to display verified evidence records in Markdown and JSON reports even when zero findings are reported.
+4. **Strict Investigation Quality Invariants**:
+   - Enforced invariants in `determine_investigation_quality`: if zero substantive source files were inspected or zero evidence records were generated, technical quality is strictly downgraded to `INSUFFICIENT_EVIDENCE`.
+   - Synthesis validation strictly evaluates whether cited files exist in `verified_files`, preventing hallucinated source files from being treated as audited implementations.
+
+### C. Verification Suite
+Verified by 21 regression tests in `tests/unit/test_phase7_evidence_integrity.py`:
+1. `test_validate_repository_path_valid`
+2. `test_validate_repository_path_nonexistent`
+3. `test_validate_repository_path_traversal`
+4. `test_validate_repository_path_absolute_within_workspace`
+5. `test_validate_repository_path_absolute_outside_workspace`
+6. `test_validate_repository_path_directory_rejected`
+7. `test_validate_repository_path_symlink_escape_rejected`
+8. `test_read_source_excerpt_validates_path`
+9. `test_read_source_excerpt_creates_traceable_evidence`
+10. `test_read_source_excerpt_rejects_empty_lines`
+11. `test_inspect_dependencies_creates_evidence`
+12. `test_record_finding_requires_prior_source_inspection`
+13. `test_record_finding_rejects_nonexistent_file`
+14. `test_record_finding_creates_traceable_evidence`
+15. `test_planner_does_not_track_failed_reads`
+16. `test_quality_downgraded_when_no_source_files_inspected`
+17. `test_quality_downgraded_when_no_evidence_recorded`
+18. `test_quality_insufficient_evidence_when_only_manifest_inspected_and_no_findings`
+19. `test_report_renders_evidence_even_with_zero_findings`
+20. `test_report_renders_rejected_claims_with_path_errors`
+21. `test_store_list_evidence_for_run`
+
+### D. Real-World Live Acceptance Run
+- **Target**: `https://github.com/fastapi/fastapi.git` (commit `45cb2252c737906f37544f5ba6bee0295fb81468`)
+- **Run ID**: `run_0a293dd14f45`
+- **Command**: `forge investigate https://github.com/fastapi/fastapi.git --commit 45cb2252c737906f37544f5ba6bee0295fb81468 --provider ollama --model qwen2.5-coder:1.5b --max-steps 12`
+- **Execution Status**: `COMPLETED`
+- **Investigation Quality**: `INSUFFICIENT_EVIDENCE` (truthfully downgraded, zero fabrication)
+- **Steps Executed**: 12 (Tool calls: 9)
+- **Duration**: 80.62s
+- **Files Inspected**: 1 (`pyproject.toml`)
+- **Total Findings**: 0 (zero false positives, zero hallucinated defects)
+- **Rejected Claims**: 3 (`src/auth.py` x2, `src/utils.py` x1 - all caught and rejected by `RepositoryPathValidationError`)
+- **Verified Evidence Records**: 2 (persisted in SQLite with commit `45cb2252c737906f37544f5ba6bee0295fb81468` and rendered in report)

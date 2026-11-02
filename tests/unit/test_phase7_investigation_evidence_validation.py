@@ -493,12 +493,12 @@ def test_final_synthesis_accurately_reporting_accepted_and_rejected_claims(tmp_p
                 },
             )]
         ),
-        # Turn 3: Find related files
+        # Turn 3: Inspect source excerpt
         LLMResponse(
             tool_calls=[ToolCallRequest(
                 call_id="c3",
-                name="find_related_files",
-                arguments={"file_path": "tests/test_datastructures.py"},
+                name="read_source_excerpt",
+                arguments={"file_path": "tests/test_datastructures.py", "start_line": 1, "end_line": 10},
             )]
         ),
         # Turn 4: Final synthesis

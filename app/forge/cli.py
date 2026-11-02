@@ -719,6 +719,8 @@ def inspect(
 def investigate(
     target: str = typer.Argument(..., help="Git HTTPS repository URL or authorized local directory"),
     branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Target git branch to inspect"),
+    commit: Optional[str] = typer.Option(None, "--commit", "-c", help="Target git commit SHA to inspect"),
+    instruction: Optional[str] = typer.Option(None, "--instruction", "-i", help="Specific investigation query or focus"),
     max_steps: Optional[int] = typer.Option(None, "--max-steps", "-s", help="Max agent turns (default 10)"),
     no_llm: bool = typer.Option(False, "--no-llm", help="Force static inspection mode only"),
     provider: Optional[str] = typer.Option(None, "--provider", "-p", help="Override LLM provider (fake, ollama, groq, gemini, deepseek)"),
@@ -746,7 +748,7 @@ def investigate(
 
     typer.echo(f"Validating and acquiring target: {target}")
     try:
-        acquired = acquire_repository(target, branch=branch)
+        acquired = acquire_repository(target, branch=branch, commit_sha=commit)
     except (SecurityError, AcquisitionError) as e:
         typer.secho(f"Acquisition aborted: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
@@ -810,7 +812,7 @@ def investigate(
         )
 
         typer.echo("Starting investigation loop...")
-        result = loop.run()
+        result = loop.run(user_instruction=instruction)
 
         typer.echo(f"\nInvestigation finished with status: {result.status.upper()}")
         typer.echo(f"Investigation Quality: {result.investigation_quality.upper()}")

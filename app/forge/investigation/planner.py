@@ -53,14 +53,20 @@ class InvestigationPlanner:
         repo_map: Optional[RepositoryMap] = None,
         instruction: str = "",
         max_utility_calls: int = 1,
+        store: Optional[Any] = None,
+        target: Optional[str] = None,
     ) -> None:
         self.workspace_path = workspace_path.resolve()
         self.repo_map = repo_map
         self.instruction = instruction or ""
         self.max_utility_calls = max_utility_calls
+        self.store = store
+        self.target = target
 
         self.planned_files: List[str] = []
         self.inspected_files: Set[str] = set()
+        self.inspected_source_files: Set[str] = set()
+        self.inspected_manifests: Set[str] = set()
         self.pending_files: List[str] = []
         self.investigation_objectives: List[str] = []
         self.utility_calls_count: Dict[str, int] = {t: 0 for t in UTILITY_TOOLS}
@@ -85,6 +91,22 @@ class InvestigationPlanner:
             cand = self.workspace_path / norm
             if cand.is_file() and norm not in instruction_files:
                 instruction_files.append(norm)
+
+        # 2b. Check historical suspected findings from store
+        if self.store:
+            try:
+                runs = self.store.list_runs()
+                target_run_ids = {r.run_id for r in runs if not self.target or r.target == self.target}
+                findings = self.store.list_findings()
+                for f in findings:
+                    if f.run_id in target_run_ids and f.affected_files:
+                        for aff in f.affected_files:
+                            norm = aff.replace("\\", "/").strip().lstrip("/")
+                            cand = self.workspace_path / norm
+                            if cand.is_file() and norm not in instruction_files:
+                                instruction_files.append(norm)
+            except Exception:
+                pass
 
         # 3. Search symbol index for words in instruction if symbol index is available
         symbol_files: List[str] = []
@@ -204,17 +226,20 @@ class InvestigationPlanner:
             self.utility_calls_count[tool_name] = self.utility_calls_count.get(tool_name, 0) + 1
 
         if tool_name == "read_source_excerpt":
-            fp = arguments.get("file_path")
-            if fp:
-                self.record_inspection(str(fp))
+            # Only record inspection if tool output succeeded without bounds error or empty slice notice
+            if output and not output.startswith("[File") and not output.startswith('{"error"'):
+                fp = arguments.get("file_path")
+                if fp:
+                    norm = normalize_relative_path(str(fp)) or str(fp).strip().replace("\\", "/").lstrip("/")
+                    self.inspected_source_files.add(norm)
+                    self.record_inspection(norm)
         elif tool_name == "inspect_dependencies":
             for mf in MANIFEST_CANDIDATES:
                 if (self.workspace_path / mf).is_file():
+                    self.inspected_manifests.add(mf)
                     self.record_inspection(mf)
         elif tool_name == "find_related_files":
-            fp = arguments.get("file_path")
-            if fp:
-                self.record_inspection(str(fp))
+            # Discovery does not equal inspection: do NOT call self.record_inspection(fp)
             if output:
                 try:
                     data = json.loads(output)
@@ -233,9 +258,8 @@ class InvestigationPlanner:
                 except Exception:
                     pass
         elif tool_name == "record_finding":
-            aff = arguments.get("affected_file")
-            if aff:
-                self.record_inspection(str(aff))
+            # Finding submission does NOT count as inspecting a file
+            pass
 
     def filter_allowed_tools(self, tools: List[ToolDefinition]) -> List[ToolDefinition]:
         """Filter out utility tools that have exhausted their quota."""

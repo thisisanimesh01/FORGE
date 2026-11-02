@@ -101,6 +101,12 @@ def build_rejection_directive(
             f"A substantially equivalent claim{loc_str} was already rejected earlier in this investigation. "
             f"Do not repeatedly retry claims for this line range. Investigate other files or provide your final synthesis."
         )
+    elif rejection_type == "RepositoryPathValidationError":
+        return (
+            f"Repository path validation failed{loc_str}: {message}. "
+            f"Only files that actually exist within the current repository snapshot may be referenced. "
+            f"Inspect actual repository files using 'read_source_excerpt' before recording findings."
+        )
     elif rejection_type == "RejectionBudgetExceededError":
         return (
             f"Rejection budget exhausted: Maximum allowed rejected claims reached for this investigation. "
@@ -135,6 +141,11 @@ class FindingValidationError(ToolExecutionError):
         self.defect_category = defect_category
         self.rejection_type = rejection_type or self.__class__.__name__
         self.directive = directive
+
+    @property
+    def reason(self) -> str:
+        """Alias message for consistent access as rejection reason."""
+        return self.message
 
     def to_rejection_dict(self) -> Dict[str, Any]:
         """Convert finding rejection into structured, actionable feedback dictionary."""
@@ -213,6 +224,64 @@ class RejectionBudgetExceededError(FindingValidationError):
     """Raised when an investigation exceeds its allowed quota of rejected finding claims."""
     pass
 
+
+class RepositoryPathValidationError(FindingValidationError):
+    """Raised when an affected file does not exist, escapes repository, or is invalid."""
+    pass
+
+
+def validate_repository_path(
+    workspace_path: Path,
+    raw_path: str,
+    expected_commit_sha: Optional[str] = None,
+) -> Tuple[Path, str]:
+    """Validate that a file path exists, is contained within the repository workspace, and is a regular file.
+
+    Returns:
+        Tuple of (resolved_absolute_path, normalized_relative_path)
+    Raises:
+        RepositoryPathValidationError: if path does not exist, is not a regular file, escapes containment, or fails commit verification.
+    """
+    if not raw_path or not str(raw_path).strip():
+        raise RepositoryPathValidationError("File path cannot be empty", affected_file=raw_path)
+
+    clean_str = str(raw_path).strip()
+    try:
+        norm_path = normalize_relative_path(clean_str)
+    except Exception as exc:
+        raise RepositoryPathValidationError(
+            f"Security violation: Invalid repository-relative path or path traversal '{clean_str}': {exc}",
+            affected_file=clean_str,
+        )
+
+    if not norm_path:
+        raise RepositoryPathValidationError("Normalized file path cannot be empty", affected_file=clean_str)
+
+    ws_resolved = workspace_path.resolve()
+    candidate = (ws_resolved / norm_path).resolve()
+
+    # Containment check
+    try:
+        candidate.relative_to(ws_resolved)
+    except (ValueError, RuntimeError):
+        raise RepositoryPathValidationError(
+            f"Security violation: Path traversal, symlink escape, or escape outside workspace detected for '{clean_str}'",
+            affected_file=norm_path,
+        )
+
+    if not candidate.exists():
+        raise RepositoryPathValidationError(
+            f"Affected file not found: '{norm_path}' does not exist in repository workspace",
+            affected_file=norm_path,
+        )
+
+    if not candidate.is_file():
+        raise RepositoryPathValidationError(
+            f"Path '{norm_path}' is not a regular file",
+            affected_file=norm_path,
+        )
+
+    return candidate, norm_path
 
 
 # ---------------------------------------------------------------------------

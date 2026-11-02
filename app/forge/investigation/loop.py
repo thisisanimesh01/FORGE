@@ -92,11 +92,30 @@ DISALLOWED_APOLOGY_PATTERNS = [
     r"\blet me know if you need\b",
 ]
 
+DISALLOWED_SWEEPING_SECURITY_CLAIMS = [
+    r"\brepository is (completely |entirely |wholly )?secure\b",
+    r"\bcodebase is (completely |entirely |wholly )?secure\b",
+    r"\bcompletely secure\b",
+    r"\bentirely secure\b",
+    r"\bguaranteed (to be )?secure\b",
+    r"\bfree from (all |any )?vulnerabilit(y|ies)\b",
+    r"\bno vulnerabilities exist\b",
+    r"\bzero vulnerabilities\b",
+    r"\bentirely bug-free\b",
+    r"\bcompletely bug-free\b",
+    r"\bguarantee absence of bugs\b",
+    r"\bguarantee of security\b",
+]
 
-def validate_synthesis_quality(text: Optional[str]) -> bool:
+
+def validate_synthesis_quality(
+    text: Optional[str],
+    verified_files: Optional[Set[str]] = None,
+) -> bool:
     """Validate whether an LLM assessment meets the minimum quality requirements for an investigation synthesis.
 
-    Rejects conversational apologies, evasive chat fillers, and responses lacking technical substance.
+    Rejects conversational apologies, evasive chat fillers, sweeping security claims,
+    and references to unverified or hallucinated files.
     """
     if not text or not text.strip():
         return False
@@ -110,6 +129,10 @@ def validate_synthesis_quality(text: Optional[str]) -> bool:
         if re.search(pattern, lower_text):
             return False
 
+    for pattern in DISALLOWED_SWEEPING_SECURITY_CLAIMS:
+        if re.search(pattern, lower_text):
+            return False
+
     # Reject raw unparsed JSON tool calls, tool invocations, or JSON blocks presented as synthesis
     if cleaned.startswith("{") and any(k in cleaned for k in ('"name"', '"arguments"', '"tool_calls"', '"function"')):
         return False
@@ -117,6 +140,19 @@ def validate_synthesis_quality(text: Optional[str]) -> bool:
         return False
     if cleaned.startswith("<tool_call>") or "</tool_call>" in cleaned:
         return False
+
+    # Check for unverified repository source file claims
+    if verified_files is not None:
+        file_refs = re.findall(r"\b([a-zA-Z0-9_\-\./\\]+\.py)\b", cleaned)
+        for ref in file_refs:
+            norm_ref = ref.replace("\\", "/").strip().lstrip("./")
+            # If the referenced .py file is not verified in this investigation, reject hallucination
+            if norm_ref not in verified_files:
+                if not any(
+                    vf == norm_ref or vf.endswith("/" + norm_ref) or norm_ref.endswith("/" + vf)
+                    for vf in verified_files
+                ):
+                    return False
 
     # Check for technical substance or audit concepts
     technical_indicators = [
@@ -201,11 +237,13 @@ def determine_investigation_quality(
     rejected_records: List[Dict[str, Any]],
     used_fallback_synthesis: bool,
     has_valid_synthesis: bool,
+    inspected_source_files: Optional[List[str]] = None,
+    total_evidence_count: Optional[int] = None,
 ) -> str:
     """Classify the technical investigation quality of an audit run.
 
     Quality states:
-    - 'completed': Verified findings with evidence, or comprehensive clean repository inspection with valid synthesis.
+    - 'completed': Verified findings with evidence, or comprehensive clean repository inspection with valid synthesis and source evidence.
     - 'completed_with_limitations': Execution completed, but limitations exist (fallback synthesis used, turn budget exhausted, or partial inspection).
     - 'insufficient_evidence': Execution finished, but candidate claims lacked evidence, or zero substantive source files were inspected.
     - 'failed': System/provider failure, crash, timeout, or zero activity.
@@ -213,19 +251,44 @@ def determine_investigation_quality(
     if loop_status == "failed" or (total_tool_calls == 0 and not findings):
         return "failed"
 
+    effective_source_files = (
+        inspected_source_files
+        if inspected_source_files is not None
+        else [f for f in inspected_files if not f.endswith((".toml", ".txt", ".cfg", ".ini", ".json", ".md"))]
+    )
+    effective_evidence_count = (
+        total_evidence_count
+        if total_evidence_count is not None
+        else (len(effective_source_files) if effective_source_files else 0)
+    )
+
+    # Invariant: Zero inspected source files can NEVER be marked 'completed'
+    if not effective_source_files and not findings:
+        return "insufficient_evidence"
+
+    # Invariant: Zero persisted evidence can NEVER be marked 'completed'
+    if effective_evidence_count == 0 and not findings:
+        return "insufficient_evidence"
+
     # If all candidate finding claims were rejected and 0 findings exist
     if rejected_records and not findings:
         # If fallback synthesis was needed or only test/rejected files inspected:
-        if used_fallback_synthesis or len(inspected_files) <= 1:
+        if used_fallback_synthesis or len(inspected_files) <= 1 or not effective_source_files:
             return "insufficient_evidence"
         # If agent inspected substantive code/manifests and provided a valid synthesis explaining the rejection
-        if has_valid_synthesis and len(inspected_files) >= 2:
+        if has_valid_synthesis and len(inspected_files) >= 2 and effective_evidence_count >= 1:
             return "completed_with_limitations"
         return "insufficient_evidence"
 
     # If no findings and no rejections (clean audit)
     if not findings and not rejected_records:
-        if has_valid_synthesis and not used_fallback_synthesis and len(inspected_files) >= 2:
+        if (
+            has_valid_synthesis
+            and not used_fallback_synthesis
+            and len(inspected_files) >= 2
+            and len(effective_source_files) >= 1
+            and effective_evidence_count >= 1
+        ):
             return "completed" if loop_status == "completed" else "completed_with_limitations"
         return "insufficient_evidence"
 
@@ -303,6 +366,8 @@ class InvestigationLoop:
         self.repeated_tool_count: Dict[str, int] = {}
         self.file_read_counts: Dict[str, int] = {}
         self.inspected_files: Set[str] = set()
+        self.inspected_source_files: Set[str] = set()
+        self.inspected_manifests: Set[str] = set()
         self.budget_exhaustion_notified: bool = False
 
         self.workspace_path = getattr(self.tool_registry, "workspace_path", Path("."))
@@ -311,8 +376,12 @@ class InvestigationLoop:
             repo_map=self.repo_map,
             instruction="",
             max_utility_calls=1,
+            store=self.store,
+            target=self.target,
         )
         self.tool_registry.inspected_files = self.inspected_files
+        self.tool_registry.inspected_source_files = self.inspected_source_files
+        self.tool_registry.inspected_manifests = self.inspected_manifests
         self.tool_registry.planner = self.planner
 
     def _truncate_history(self, messages: List[ChatMessage]) -> List[ChatMessage]:
@@ -390,9 +459,15 @@ class InvestigationLoop:
             repo_map=self.repo_map,
             instruction=instruction,
             max_utility_calls=1,
+            store=self.store,
+            target=self.target,
         )
         self.planner.inspected_files = self.inspected_files
+        self.planner.inspected_source_files = self.inspected_source_files
+        self.planner.inspected_manifests = self.inspected_manifests
         self.tool_registry.inspected_files = self.inspected_files
+        self.tool_registry.inspected_source_files = self.inspected_source_files
+        self.tool_registry.inspected_manifests = self.inspected_manifests
         self.tool_registry.planner = self.planner
 
         # 1. Initialize context
@@ -816,8 +891,6 @@ class InvestigationLoop:
                     # Phase D: Same-file pagination protection for read_source_excerpt
                     elif tc.name == "read_source_excerpt":
                         file_path_arg = str(tc.arguments.get("file_path", "")).strip().lstrip("/")
-                        if file_path_arg:
-                            self.inspected_files.add(file_path_arg)
                         self.file_read_counts[file_path_arg] = self.file_read_counts.get(file_path_arg, 0) + 1
                         read_cnt = self.file_read_counts[file_path_arg]
 
@@ -867,19 +940,6 @@ class InvestigationLoop:
                                     "Otherwise, proceed to inspect other modules or synthesize your findings.]"
                                 )
                     else:
-                        if tc.name == "record_finding":
-                            aff_file = str(tc.arguments.get("affected_file", "")).strip().lstrip("/")
-                            if aff_file:
-                                self.inspected_files.add(aff_file)
-                        elif tc.name == "find_related_files":
-                            rf = str(tc.arguments.get("file_path", "")).strip().lstrip("/")
-                            if rf:
-                                self.inspected_files.add(rf)
-                        elif tc.name == "inspect_dependencies":
-                            for mf in ["pyproject.toml", "requirements.txt", "setup.py", "setup.cfg"]:
-                                if (self.tool_registry.workspace_path / mf).is_file():
-                                    self.inspected_files.add(mf)
-
                         self.store.append_event(
                             self.run_id,
                             EventType.TOOL_CALL_REQUESTED,
@@ -993,8 +1053,17 @@ class InvestigationLoop:
             error_msg = error_msg or "Investigation failed"
             failure_details = _make_failure_payload(failure_category, error_msg, current_stage, steps_executed, is_retryable)
 
+        evidence_list = (
+            self.store.list_evidence_for_run(self.run_id)
+            if hasattr(self.store, "list_evidence_for_run")
+            else []
+        )
+        total_evidence_count = len(evidence_list)
+
         has_valid_synthesis = bool(
-            final_response_text and validate_synthesis_quality(final_response_text) and not used_fallback_synthesis
+            final_response_text
+            and validate_synthesis_quality(final_response_text, verified_files=self.inspected_files)
+            and not used_fallback_synthesis
         )
 
         investigation_quality = determine_investigation_quality(
@@ -1005,6 +1074,8 @@ class InvestigationLoop:
             rejected_records=rejected_records,
             used_fallback_synthesis=used_fallback_synthesis,
             has_valid_synthesis=has_valid_synthesis,
+            inspected_source_files=sorted(list(self.inspected_source_files)),
+            total_evidence_count=total_evidence_count,
         )
 
         # Finish run in store

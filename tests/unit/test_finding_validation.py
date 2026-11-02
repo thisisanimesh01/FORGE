@@ -488,9 +488,24 @@ def test_investigation_loop_filters_hamilton_false_positives(tmp_path: Path):
     """
     workspace, store, run_id, tool_reg, _ = _setup_hamilton_env(tmp_path)
 
-    # Simulate model issuing the Hamilton missing colon call
+    # Simulate model inspecting source then issuing the Hamilton missing colon call
     calls = [
-        # Turn 1: Model requests record_finding for line 15 with missing colon
+        # Turn 1: Inspect source code
+        LLMResponse(
+            content="Inspecting graph_types.py lines 10-20.",
+            tool_calls=[
+                ToolCallRequest(
+                    call_id="call_hamilton_read",
+                    name="read_source_excerpt",
+                    arguments={
+                        "file_path": "hamilton/graph_types.py",
+                        "start_line": 10,
+                        "end_line": 20,
+                    },
+                )
+            ],
+        ),
+        # Turn 2: Model requests record_finding for line 15 with missing colon
         LLMResponse(
             content="I found a missing colon in graph_types.py line 15.",
             tool_calls=[
@@ -508,7 +523,7 @@ def test_investigation_loop_filters_hamilton_false_positives(tmp_path: Path):
                 )
             ],
         ),
-        # Turn 2: Model recognizes the rejection feedback and provides final conclusion
+        # Turn 3: Model recognizes the rejection feedback and provides final conclusion
         LLMResponse(
             content="After verifying the AST, the syntax in graph_types.py is valid. No defects found.",
             tool_calls=[],
@@ -522,14 +537,14 @@ def test_investigation_loop_filters_hamilton_false_positives(tmp_path: Path):
         store=store,
         run_id=run_id,
         target=str(workspace),
-        max_steps=3,
+        max_steps=4,
     )
 
     result = loop.run("Inspect repository for syntax and graph defects.")
 
     assert result.status == "completed"
     assert len(result.findings) == 0
-    assert result.steps_executed == 2
+    assert result.steps_executed == 3
 
     # Verify zero findings recorded in database
     findings = store.list_findings(run_id=run_id)

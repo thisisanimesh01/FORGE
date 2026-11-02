@@ -50,6 +50,8 @@ from forge.analysis.validation import (
     RejectedClaimTracker,
     build_rejection_directive,
     validate_finding_claim,
+    RepositoryPathValidationError,
+    validate_repository_path,
 )
 
 
@@ -74,6 +76,8 @@ class ToolRegistry:
         rejection_budget: Optional[int] = None,
         inspected_files: Optional[Set[str]] = None,
         planner: Optional[Any] = None,
+        inspected_source_files: Optional[Set[str]] = None,
+        inspected_manifests: Optional[Set[str]] = None,
     ):
         self.workspace_path = workspace_path.resolve()
         self.repo_map = repo_map
@@ -83,6 +87,12 @@ class ToolRegistry:
         self.sandbox = sandbox or DockerSandbox()
         self.max_output_chars = max_output_chars
         self.inspected_files = inspected_files
+        self.inspected_source_files: Set[str] = (
+            inspected_source_files if inspected_source_files is not None else set()
+        )
+        self.inspected_manifests: Set[str] = (
+            inspected_manifests if inspected_manifests is not None else set()
+        )
         self.planner = planner
         if rejected_tracker is not None:
             self.rejected_tracker = rejected_tracker
@@ -465,14 +475,10 @@ class ToolRegistry:
         if (end_line - start_line + 1) > MAX_EXCERPT_LINES:
             end_line = start_line + MAX_EXCERPT_LINES - 1
 
-        candidate = self.workspace_path / file_path_raw.strip().lstrip("/")
-        resolved_file = assert_contained_path(candidate, self.workspace_path)
-
-        if not resolved_file.exists() or not resolved_file.is_file():
-            raise ToolExecutionError(f"File not found: '{file_path_raw}'")
-
-        # Reject symlinks that point outside workspace
-        assert_contained_path(resolved_file.resolve(), self.workspace_path)
+        try:
+            resolved_file, norm_rel = validate_repository_path(self.workspace_path, file_path_raw)
+        except (RepositoryPathValidationError, SecurityError) as exc:
+            raise ToolExecutionError(str(exc))
 
         try:
             content = resolved_file.read_text(encoding="utf-8", errors="replace")
@@ -485,14 +491,49 @@ class ToolRegistry:
             return f"[File '{file_path_raw}' has {total_lines} lines; requested start_line {start_line} is out of bounds]"
 
         slice_lines = lines[start_line - 1 : min(end_line, total_lines)]
+        slice_text = "\n".join(slice_lines)
+
+        # Reject empty / whitespace-only slices: return notice without recording evidence or inspection
+        if not slice_lines or not slice_text.strip():
+            return (
+                f"[File '{file_path_raw}' lines {start_line}-{min(end_line, total_lines)} "
+                "contains only empty lines or whitespace; no source code was extracted]"
+            )
+
         numbered_lines = [
             f"{start_line + i:4d} | {line}"
             for i, line in enumerate(slice_lines)
         ]
 
-        norm_rel = normalize_relative_path(file_path_raw) or file_path_raw.strip().replace("\\", "/").lstrip("/")
+        # Valid non-empty slice: record inspection
+        self.inspected_source_files.add(norm_rel)
         if self.inspected_files is not None:
             self.inspected_files.add(norm_rel)
+
+        # Persist verifiable evidence record in store
+        if self.store:
+            content_hash = hashlib.sha256(slice_text.encode("utf-8")).hexdigest()
+            ev = create_evidence(
+                run_id=self.run_id,
+                evidence_type=EvidenceType.SOURCE_EXCERPT,
+                description=f"Source excerpt from '{norm_rel}' lines {start_line}-{min(end_line, total_lines)}",
+                content=slice_text,
+                file_path=norm_rel,
+                start_line=start_line,
+                end_line=min(end_line, total_lines),
+                details={
+                    "operation": "read_source_excerpt",
+                    "commit_sha": getattr(self.repo_map, "resolved_commit_sha", None),
+                    "repository_target": getattr(self.repo_map, "target", None),
+                    "content_hash": content_hash,
+                    "total_lines": total_lines,
+                },
+                provenance="forge:investigator:read_source_excerpt",
+            )
+            try:
+                self.store.attach_evidence(ev)
+            except Exception:
+                pass
 
         header = f"=== File: {file_path_raw} (Lines {start_line}-{min(end_line, total_lines)} of {total_lines}) ==="
         return header + "\n" + "\n".join(numbered_lines)
@@ -597,9 +638,35 @@ class ToolRegistry:
         pkg_filter = args.get("package_name")
         manifest = parse_workspace_dependencies(self.workspace_path)
 
-        if self.inspected_files is not None:
-            for ms in manifest.manifest_sources:
+        for ms in manifest.manifest_sources:
+            self.inspected_manifests.add(ms)
+            if self.inspected_files is not None:
                 self.inspected_files.add(ms)
+
+        if self.store and manifest.manifest_sources:
+            manifest_summary = json.dumps({
+                "manifest_sources": manifest.manifest_sources,
+                "dependencies_count": len(manifest.dependencies),
+                "python_requires": manifest.python_requires,
+            })
+            ev = create_evidence(
+                run_id=self.run_id,
+                evidence_type=EvidenceType.STATIC_ANALYSIS,
+                description=f"Dependency manifests inspected: {', '.join(manifest.manifest_sources)}",
+                content=manifest_summary,
+                file_path=manifest.manifest_sources[0] if manifest.manifest_sources else None,
+                details={
+                    "operation": "inspect_dependencies",
+                    "commit_sha": getattr(self.repo_map, "resolved_commit_sha", None),
+                    "repository_target": getattr(self.repo_map, "target", None),
+                    "manifest_sources": manifest.manifest_sources,
+                },
+                provenance="forge:investigator:inspect_dependencies",
+            )
+            try:
+                self.store.attach_evidence(ev)
+            except Exception:
+                pass
 
         if pkg_filter:
             norm_pkg = pkg_filter.strip().lower().replace("_", "-")
@@ -631,9 +698,6 @@ class ToolRegistry:
 
         candidate = self.workspace_path / norm_path
         assert_contained_path(candidate, self.workspace_path)
-
-        if self.inspected_files is not None:
-            self.inspected_files.add(norm_path)
 
         related = find_related_workspace_files(self.workspace_path, norm_path)
         return json.dumps({
@@ -795,24 +859,36 @@ class ToolRegistry:
 
         # Step 1-3: Path normalization & containment check
         try:
-            norm_path = normalize_relative_path(raw_file_str)
-        except EvidenceValidationError as exc:
-            raise ToolExecutionError(f"Invalid affected_file path: {exc}")
-
-        if not norm_path:
-            raise ToolExecutionError("affected_file cannot be empty")
-
-        candidate = self.workspace_path / norm_path
-        resolved_file = assert_contained_path(candidate, self.workspace_path)
-
-        if not resolved_file.exists() or not resolved_file.is_file():
-            raise ToolExecutionError(f"Affected file not found: '{norm_path}'")
-
-        # Reject symlinks escaping workspace
-        assert_contained_path(resolved_file.resolve(), self.workspace_path)
+            resolved_file, norm_path = validate_repository_path(self.workspace_path, raw_file_str)
+        except RepositoryPathValidationError as rpe:
+            if self.rejected_tracker:
+                self.rejected_tracker.record_rejected_claim(
+                    norm_path=raw_file_str,
+                    start_line=args.get("start_line", 1),
+                    end_line=args.get("end_line", 1),
+                    defect_category=args.get("defect_category"),
+                    title=title,
+                    description=description,
+                    rejection_type="RepositoryPathValidationError",
+                    rejection_reason=rpe.reason,
+                )
+            if self.store and self.run_id:
+                self.store.append_event(
+                    self.run_id,
+                    EventType.FINDING_VALIDATION_FAILED,
+                    {
+                        "error_type": "RepositoryPathValidationError",
+                        "message": rpe.reason,
+                        "file": raw_file_str,
+                        "title": title,
+                    },
+                )
+            raise rpe
+        except SecurityError as sec_err:
+            raise ToolExecutionError(f"Security violation: {sec_err}")
 
         # Invariant: Model cannot claim findings on uninspected files when inspection tracking is active
-        if self.inspected_files is not None and norm_path not in self.inspected_files:
+        if self.inspected_files is not None and norm_path not in self.inspected_source_files:
             err_msg = (
                 f"File '{norm_path}' has not been inspected with 'read_source_excerpt'. "
                 "You cannot record findings on uninspected code."
@@ -1106,6 +1182,10 @@ class ToolRegistry:
         details = {
             "content_digest": content_digest,
             "digest_algorithm": "sha256",
+            "content_hash": content_digest,
+            "operation": "record_finding",
+            "commit_sha": getattr(self.repo_map, "resolved_commit_sha", None),
+            "repository_target": getattr(self.repo_map, "target", None),
             "file_path": norm_path,
             "start_line": start_line,
             "end_line": actual_end,
