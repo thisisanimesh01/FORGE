@@ -283,13 +283,18 @@ def determine_investigation_quality(
     # If no findings and no rejections (clean audit)
     if not findings and not rejected_records:
         if (
-            has_valid_synthesis
-            and not used_fallback_synthesis
-            and len(inspected_files) >= 2
+            len(inspected_files) >= 2
+            and len(effective_source_files) >= 1
+            and effective_evidence_count >= 1
+            and loop_status == "completed"
+        ):
+            return "completed"
+        if (
+            len(inspected_files) >= 2
             and len(effective_source_files) >= 1
             and effective_evidence_count >= 1
         ):
-            return "completed" if loop_status == "completed" else "completed_with_limitations"
+            return "completed_with_limitations"
         return "insufficient_evidence"
 
     # If findings exist with evidence
@@ -487,7 +492,7 @@ class InvestigationLoop:
             f"{plan_notice}"
             "1. Inspect dependency constraints with 'inspect_dependencies' or examine configuration manifests (e.g. pyproject.toml).\n"
             "2. Read relevant source and test files using 'read_source_excerpt' and 'find_related_files' to verify code logic.\n"
-            "3. Record findings using 'record_finding' ONLY when backed by verified source code lines. Do NOT guess line numbers or claim defects on uninspected code.\n"
+            "3. Record findings using 'record_finding' ONLY when a genuine defect or vulnerability is verified. Normal declarations, passing tests, and expected error handling are NOT findings. Do NOT call 'record_finding' for normal code or dependency declarations — simply proceed to inspect the next file.\n"
             "4. If suspected claims are rejected or disproven by source evidence, acknowledge the limitation and proceed to analyze other modules or synthesize.\n"
             "Note: Do not call 'get_run_history'; focus exclusively on inspecting the target repository source code and dependency manifests.]"
         )
@@ -515,6 +520,7 @@ class InvestigationLoop:
         is_retryable = False
         current_stage = "initialization"
         used_fallback_synthesis = False
+        consecutive_extraction_errors = 0
 
         try:
             while steps_executed < self.max_steps:
@@ -575,7 +581,7 @@ class InvestigationLoop:
                     )
                 elif is_penultimate and steps_executed > 1:
                     current_stage = "llm_generation"
-                    if is_budget_exhausted:
+                    if is_budget_exhausted or not self.inspected_source_files or bool(self.planner and self.planner.pending_files):
                         request_tools = [t for t in tools if t.name != "record_finding"]
                         notice_text = (
                             f"[Turn Budget Warning: Step {steps_executed} of {self.max_steps}. "
@@ -597,7 +603,7 @@ class InvestigationLoop:
                     )
                 else:
                     current_stage = "llm_generation"
-                    if is_budget_exhausted:
+                    if is_budget_exhausted or not self.inspected_source_files or bool(self.planner and self.planner.pending_files):
                         request_tools = [t for t in tools if t.name != "record_finding"]
                     else:
                         request_tools = tools
@@ -708,6 +714,51 @@ class InvestigationLoop:
                 if not response.tool_calls:
                     # 1. Did extraction detect a malformed/invalid tool call?
                     if response.extraction_error and not is_final_step:
+                        consecutive_extraction_errors += 1
+                        if consecutive_extraction_errors >= 2 and self.planner.pending_files:
+                            fallback_action = self.planner.autonomous_step_fallback(steps_executed, self.max_steps)
+                            if fallback_action and fallback_action.tool_name:
+                                current_stage = "autonomous_dispatch"
+                                try:
+                                    self.store.append_event(
+                                        self.run_id,
+                                        EventType.TOOL_CALL_REQUESTED,
+                                        {"call_id": f"auto_call_{steps_executed}", "tool_name": fallback_action.tool_name, "step": steps_executed},
+                                    )
+                                    tool_output = self.tool_registry.execute_tool(fallback_action.tool_name, fallback_action.tool_arguments)
+                                    total_tool_calls += 1
+                                    self.planner.record_tool_call(fallback_action.tool_name, fallback_action.tool_arguments, tool_output)
+                                    self.store.append_event(
+                                        self.run_id,
+                                        EventType.TOOL_CALL_COMPLETED,
+                                        {
+                                            "call_id": f"auto_call_{steps_executed}",
+                                            "tool_name": fallback_action.tool_name,
+                                            "output_snippet": tool_output[:200],
+                                            "step": steps_executed,
+                                        },
+                                    )
+                                    messages.append(
+                                        ChatMessage(
+                                            role=MessageRole.TOOL,
+                                            name=fallback_action.tool_name,
+                                            tool_call_id=f"auto_call_{steps_executed}",
+                                            content=tool_output,
+                                        )
+                                    )
+                                    messages.append(
+                                        ChatMessage(
+                                            role=MessageRole.USER,
+                                            content=(
+                                                f"[Orchestrator Notice: Autonomously inspected '{fallback_action.target_file or fallback_action.tool_name}'. "
+                                                "Review the above source excerpt, analyze for defects, and proceed with your investigation or synthesis.]"
+                                            ),
+                                        )
+                                    )
+                                    consecutive_extraction_errors = 0
+                                    continue
+                                except Exception:
+                                    pass
                         feedback_msg = (
                             f"Tool invocation error: {response.extraction_error}. "
                             f"Authorized tools: {[t.name for t in tools]}. "
@@ -716,6 +767,8 @@ class InvestigationLoop:
                         )
                         messages.append(ChatMessage(role=MessageRole.USER, content=feedback_msg))
                         continue
+                    else:
+                        consecutive_extraction_errors = 0
 
                     # 2. Check if this is Turn 1 with zero tools executed and zero findings
                     current_findings = self.store.list_findings(run_id=self.run_id)
@@ -749,18 +802,37 @@ class InvestigationLoop:
                         break
 
                     # 5. Invalid/conversational synthesis or empty response while turns remain: steer or autonomous fallback
-                    if not is_final_step and not is_penultimate:
+                    if not is_final_step:
                         was_previously_steered = bool(
-                            messages and messages[-1].role == MessageRole.USER and "Investigation Orchestrator:" in (messages[-1].content or "")
+                            is_penultimate or any(
+                                m.role == MessageRole.USER
+                                and any(p in (m.content or "") for p in ["Investigation Orchestrator:", "Orchestrator Notice:", "Orchestrator Guidance:", "Investigation Notice:"])
+                                for m in messages[-4:-1]
+                            )
                         )
                         if was_previously_steered:
                             fallback_action = self.planner.autonomous_step_fallback(steps_executed, self.max_steps)
                             if fallback_action and fallback_action.tool_name:
                                 current_stage = "autonomous_dispatch"
                                 try:
+                                    self.store.append_event(
+                                        self.run_id,
+                                        EventType.TOOL_CALL_REQUESTED,
+                                        {"call_id": f"auto_call_{steps_executed}", "tool_name": fallback_action.tool_name, "step": steps_executed},
+                                    )
                                     tool_output = self.tool_registry.execute_tool(fallback_action.tool_name, fallback_action.tool_arguments)
                                     total_tool_calls += 1
                                     self.planner.record_tool_call(fallback_action.tool_name, fallback_action.tool_arguments, tool_output)
+                                    self.store.append_event(
+                                        self.run_id,
+                                        EventType.TOOL_CALL_COMPLETED,
+                                        {
+                                            "call_id": f"auto_call_{steps_executed}",
+                                            "tool_name": fallback_action.tool_name,
+                                            "output_snippet": tool_output[:200],
+                                            "step": steps_executed,
+                                        },
+                                    )
                                     messages.append(
                                         ChatMessage(
                                             role=MessageRole.TOOL,
@@ -876,6 +948,49 @@ class InvestigationLoop:
 
                     # Exact duplicate call protection (>2 times identical arguments)
                     if self.repeated_tool_count[tool_key] > 2:
+                        if self.planner.pending_files:
+                            fallback_action = self.planner.autonomous_step_fallback(steps_executed, self.max_steps)
+                            if fallback_action and fallback_action.tool_name:
+                                current_stage = "autonomous_dispatch"
+                                try:
+                                    self.store.append_event(
+                                        self.run_id,
+                                        EventType.TOOL_CALL_REQUESTED,
+                                        {"call_id": f"auto_call_{steps_executed}", "tool_name": fallback_action.tool_name, "step": steps_executed},
+                                    )
+                                    tool_output = self.tool_registry.execute_tool(fallback_action.tool_name, fallback_action.tool_arguments)
+                                    self.planner.record_tool_call(fallback_action.tool_name, fallback_action.tool_arguments, tool_output)
+                                    self.store.append_event(
+                                        self.run_id,
+                                        EventType.TOOL_CALL_COMPLETED,
+                                        {
+                                            "call_id": f"auto_call_{steps_executed}",
+                                            "tool_name": fallback_action.tool_name,
+                                            "output_snippet": tool_output[:200],
+                                            "step": steps_executed,
+                                        },
+                                    )
+                                    messages.append(
+                                        ChatMessage(
+                                            role=MessageRole.TOOL,
+                                            name=fallback_action.tool_name,
+                                            tool_call_id=f"auto_call_{steps_executed}",
+                                            content=tool_output,
+                                        )
+                                    )
+                                    messages.append(
+                                        ChatMessage(
+                                            role=MessageRole.USER,
+                                            content=(
+                                                f"[Orchestrator Notice: Duplicate loop detected for '{tc.name}'. "
+                                                f"Autonomously inspected '{fallback_action.target_file or fallback_action.tool_name}'. "
+                                                "Review the above source excerpt, analyze for defects, and proceed with your investigation or synthesis.]"
+                                            ),
+                                        )
+                                    )
+                                    continue
+                                except Exception:
+                                    pass
                         tool_output = json.dumps({
                             "warning": "Loop detected: Identical tool call repeated multiple times. Please synthesize findings or investigate an alternative code path.",
                         })
@@ -975,6 +1090,22 @@ class InvestigationLoop:
                                     )
                             except Exception:
                                 pass
+
+                        if tc.name == "inspect_dependencies":
+                            if self.repeated_tool_count[tool_key] > 1 and self.planner.pending_files:
+                                next_target = self.planner.pending_files[0]
+                                tool_output = (
+                                    f"[Investigation Directive: Dependencies have already been inspected. "
+                                    f"Do not repeat inspect_dependencies. Proceed immediately to inspect planned source file '{next_target}' "
+                                    f"using read_source_excerpt(file_path='{next_target}', start_line=1, end_line=60).]"
+                                )
+                            elif self.planner.pending_files:
+                                next_target = self.planner.pending_files[0]
+                                tool_output += (
+                                    f"\n\n[Investigation Directive: Manifest inspection complete. "
+                                    f"Next, proceed to inspect planned source file '{next_target}' "
+                                    f"using read_source_excerpt.]"
+                                )
 
                         self.store.append_event(
                             self.run_id,

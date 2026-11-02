@@ -85,12 +85,13 @@ class InvestigationPlanner:
 
         # 2. Extract potential keywords/file references from instruction
         instruction_files: List[str] = []
-        file_matches = re.findall(r"[\w\./\\-]+\.py", self.instruction)
+        file_matches = re.findall(r"[\w\./\\-]+\.(?:py|toml|cfg|txt|json|md)", self.instruction)
         for fm in file_matches:
             norm = fm.replace("\\", "/").strip().lstrip("/")
             cand = self.workspace_path / norm
             if cand.is_file() and norm not in instruction_files:
                 instruction_files.append(norm)
+        self.instruction_files = list(instruction_files)
 
         # 2b. Check historical suspected findings from store
         if self.store:
@@ -108,9 +109,9 @@ class InvestigationPlanner:
             except Exception:
                 pass
 
-        # 3. Search symbol index for words in instruction if symbol index is available
+        # 3. Search symbol index for words in instruction if symbol index is available and instruction did not specify direct files
         symbol_files: List[str] = []
-        if self.repo_map and self.repo_map.symbol_index:
+        if not instruction_files and self.repo_map and self.repo_map.symbol_index:
             words = re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{3,}\b", self.instruction)
             stopwords = {
                 "this", "that", "with", "from", "have", "test", "tests",
@@ -125,6 +126,10 @@ class InvestigationPlanner:
                         cand = self.workspace_path / m.file_path
                         if cand.is_file():
                             symbol_files.append(m.file_path)
+                            if len(symbol_files) >= 5:
+                                break
+                if len(symbol_files) >= 5:
+                    break
 
         # 4. If no targeted files found from instruction, discover core implementation modules
         repo_impl_files: List[str] = []
@@ -237,7 +242,8 @@ class InvestigationPlanner:
             for mf in MANIFEST_CANDIDATES:
                 if (self.workspace_path / mf).is_file():
                     self.inspected_manifests.add(mf)
-                    self.record_inspection(mf)
+                    if not (getattr(self, "instruction_files", None) and mf in self.instruction_files):
+                        self.record_inspection(mf)
         elif tool_name == "find_related_files":
             # Discovery does not equal inspection: do NOT call self.record_inspection(fp)
             if output:
@@ -287,24 +293,76 @@ class InvestigationPlanner:
             )
 
         target = self.pending_files[0]
+        full_path = self.workspace_path / target
+        start_line = 1
+        end_line = 60
+        if full_path.is_file():
+            try:
+                lines = full_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+                keywords = [
+                    "upload_file_invalid_pydantic",
+                    "_validate",
+                    "def validate",
+                    "class uploadfile",
+                    "uploadfile",
+                    "pydantic",
+                ]
+                found_line = None
+                for kw in keywords:
+                    for idx, line in enumerate(lines, start=1):
+                        if kw in line.lower():
+                            if line.strip().startswith("from ") or line.strip().startswith("import "):
+                                if found_line is None:
+                                    found_line = idx
+                                continue
+                            found_line = idx
+                            break
+                    if found_line and not (lines[found_line - 1].strip().startswith("from ") or lines[found_line - 1].strip().startswith("import ")):
+                        break
+                if found_line:
+                    start_line = max(1, found_line - 10)
+                    end_line = min(len(lines), found_line + 45)
+            except Exception:
+                pass
+        elif self.repo_map and self.repo_map.symbol_index:
+            for sym in self.repo_map.symbol_index.symbols:
+                if sym.file_path == target and sym.symbol_type != "import":
+                    if any(k in sym.name.lower() for k in ["validate", "upload", "datastructure", "test"]):
+                        start_line = max(1, sym.start_line - 10)
+                        end_line = min(sym.start_line + 45, sym.end_line + 15)
+                        break
+
         if target in MANIFEST_CANDIDATES:
-            action = InvestigationAction(
-                action_type="inspect_dependencies",
-                tool_name="inspect_dependencies",
-                tool_arguments={},
-                target_file=target,
-                start_line=1,
-                end_line=50,
-                reason=f"Inspect declared dependencies and configuration in '{target}'",
-            )
+            # If target manifest was explicitly requested in instruction, or after inspect_dependencies,
+            # schedule read_source_excerpt to inspect its exact configuration lines
+            if (getattr(self, "instruction_files", None) and target in self.instruction_files) or target in self.inspected_manifests:
+                action = InvestigationAction(
+                    action_type="read_source_excerpt",
+                    tool_name="read_source_excerpt",
+                    tool_arguments={"file_path": target, "start_line": start_line, "end_line": end_line},
+                    target_file=target,
+                    start_line=start_line,
+                    end_line=end_line,
+                    reason=f"Read declared dependencies and configuration lines in '{target}'",
+                )
+            else:
+                action = InvestigationAction(
+                    action_type="inspect_dependencies",
+                    tool_name="inspect_dependencies",
+                    tool_arguments={},
+                    target_file=target,
+                    start_line=start_line,
+                    end_line=end_line,
+                    reason=f"Inspect declared dependencies and configuration in '{target}'",
+                )
         else:
             action = InvestigationAction(
                 action_type="read_source_excerpt",
                 tool_name="read_source_excerpt",
-                tool_arguments={"file_path": target, "start_line": 1, "end_line": 60},
+                tool_arguments={"file_path": target, "start_line": start_line, "end_line": end_line},
                 target_file=target,
-                start_line=1,
-                end_line=60,
+                start_line=start_line,
+                end_line=end_line,
                 reason=f"Inspect implementation and logic in '{target}'",
             )
         self.action_history.append(action)

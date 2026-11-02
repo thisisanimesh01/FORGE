@@ -836,6 +836,14 @@ class ToolRegistry:
         if not description:
             raise ToolExecutionError("description is required")
 
+        lower_title = title.lower().strip()
+        lower_desc = description.lower().strip()
+        if any(lower_title == pat for pat in ["manifest inspection", "dependency inspection", "file inspection", "code inspection", "inspection", "source inspection"]) or ("inspection" in lower_title and not any(kw in lower_desc for kw in ["defect", "bug", "vulnerab", "error", "flaw", "issue"])):
+            raise ToolExecutionError(
+                "Inspection activities and observations are not defect findings. "
+                "'record_finding' is reserved exclusively for verified defects, security vulnerabilities, or code bugs."
+            )
+
         sev_str = str(args.get("severity", "medium")).lower().strip()
         try:
             severity = FindingSeverity(sev_str)

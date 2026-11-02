@@ -53,6 +53,7 @@ from forge.llm.models import (
     ToolCallRequest,
 )
 from forge.llm.provider import LLMProvider
+from forge.schemas import EventType
 from forge.reporting.builder import ReportBuilder, report_to_markdown
 from forge.schemas import (
     EvidenceType,
@@ -623,3 +624,45 @@ def test_existing_phase7_rejection_and_synthesis_tests_remain_passing(tmp_path: 
     assert validate_synthesis_quality("I apologize for the confusion.") is False
     assert validate_synthesis_quality('{"name": "record_finding"}') is False
     assert validate_synthesis_quality("Audited the repository codebase across 5 files; verified 0 defects.") is True
+
+
+# ---------------------------------------------------------------------------
+# Test 18: Autonomous step fallback dispatches tool when model stalls
+# ---------------------------------------------------------------------------
+
+def test_autonomous_step_fallback_dispatches_tool_when_model_stalls(tmp_path: Path):
+    """18. When model repeatedly outputs conversational text without tools after steering,
+    orchestrator autonomously dispatches the next planned tool call and records audit events."""
+    workspace, store, run_id, tool_reg = _setup_workspace(tmp_path)
+
+    provider = ScriptedLLMProvider([
+        # Step 1: Model calls inspect_dependencies
+        LLMResponse(
+            content="Checking dependencies.",
+            tool_calls=[ToolCallRequest(call_id="call_1", name="inspect_dependencies", arguments={})],
+        ),
+        # Step 2: Model stalls with apology (triggers steering)
+        LLMResponse(content="I apologize for the confusion."),
+        # Step 3: Model stalls again after steering (triggers autonomous fallback dispatch)
+        LLMResponse(content="Sorry again, what should I do?"),
+        # Step 4: Synthesis
+        LLMResponse(content="Audited pyproject.toml and source files; verified zero defects across inspected scope."),
+    ])
+
+    loop = InvestigationLoop(
+        provider=provider,
+        tool_registry=tool_reg,
+        store=store,
+        run_id=run_id,
+        target=str(workspace),
+        max_steps=5,
+    )
+    result = loop.run()
+
+    assert result.status == "completed"
+    assert result.total_tool_calls >= 1
+    events = store.list_run_events(run_id)
+    event_types = [e.event_type for e in events]
+    assert EventType.TOOL_CALL_REQUESTED in event_types
+    assert EventType.TOOL_CALL_COMPLETED in event_types
+    assert len(loop.inspected_files) >= 1
