@@ -155,17 +155,18 @@ To ensure fail-closed security, zero privilege escalation, and 100% backward com
 |---|---|---|---|
 | `EXPORT_PATCH` | `{EXPORT_PATCH}` | `STAGE_BRANCH`, `CREATE_PR` | Exports patch file/diff only; zero Git branch or remote operations. |
 | `MANUAL_INTEGRATION` | `{EXPORT_PATCH}` | `STAGE_BRANCH`, `CREATE_PR` | Manual developer review/application only. Strictly forbidden from autonomous branch staging or PR creation. |
-| `STAGE_FOR_PR` (Legacy M6) | `{EXPORT_PATCH, STAGE_BRANCH}` | `CREATE_PR` (by default) | Prepares local branch and commit proposal for PR. Authorizes local branch staging. Remote PR creation requires explicit `CREATE_PR` authorization or explicit policy opt-in (`legacy_stage_for_pr_allows_create_pr=True`). |
+| `STAGE_FOR_PR` (Legacy M6) | `{EXPORT_PATCH, STAGE_BRANCH}` | `CREATE_PR` | Prepares local branch and commit proposal for PR. Authorizes local branch staging only. Historical STAGE_FOR_PR approvals can never authorize remote pull request publication without exception. Remote PR creation unconditionally requires a fresh explicit `CREATE_PR` approval. |
 | `STAGE_BRANCH` (Phase 9) | `{EXPORT_PATCH, STAGE_BRANCH}` | `CREATE_PR` | Explicit local branch and signed commit staging on target repository. Strictly forbids remote publication. |
-| `CREATE_PR` (Phase 9) | `{EXPORT_PATCH, STAGE_BRANCH, CREATE_PR}` | None | Complete publication pipeline: local branch staging and remote pull-request opening. |
+| `CREATE_PR` (Phase 9) | `{EXPORT_PATCH, STAGE_BRANCH, CREATE_PR}` | None | Complete publication pipeline: authorizes remote pull-request opening and necessary prerequisite local operations (`STAGE_BRANCH`, `EXPORT_PATCH`) within its workflow, recorded separately in the audit ledger. |
 
 ### Anti-Escalation & Security Guarantees:
 1. **No Silent Escalation**: `MANUAL_INTEGRATION` and `EXPORT_PATCH` can never authorize `STAGE_BRANCH` or `CREATE_PR`.
-2. **Local Staging vs Remote Publication Boundary**: `STAGE_FOR_PR` and `STAGE_BRANCH` authorize local Git operations (`STAGE_BRANCH`), but cannot push to remotes or open PRs (`CREATE_PR`) without explicit `CREATE_PR` sign-off.
-3. **No Alias Exploitation**: `PublicationAction` accepts only canonical lowercase enum values (`export_patch`, `stage_branch`, `create_pr`). Shortcut aliases (`pr`, `stage`, `manual`) are rejected at the CLI and API boundaries with validation errors.
-4. **Database Tampering Resilience**: If a stored `publication_requests` row is manipulated directly in SQLite, the validator re-queries the authoritative `repair_approval_decisions` record and fails closed.
-5. **Replay Defense**: Operator decisions are cryptographically bound to exact artifact tuples `(repair_id, base_commit_sha, patch_sha256)`. Cross-repair replay attempts fail closed.
-6. **Backward Compatibility**: Existing database records containing `'export_patch'`, `'stage_for_pr'`, or `'manual_integration'` deserialize cleanly with zero schema changes.
+2. **Local Staging vs Remote Publication Boundary**: Historical `STAGE_FOR_PR` and Phase 9 `STAGE_BRANCH` authorize local Git operations (`STAGE_BRANCH`), but can never push to remotes or open PRs (`CREATE_PR`). Remote PR creation strictly requires a fresh explicit `CREATE_PR` operator sign-off with zero policy opt-in exceptions.
+3. **Prerequisite Operations & Separate Audit**: A `CREATE_PR` approval authorizes prerequisite local operations within its workflow, with each operation individually recorded in the sequential audit ledger.
+4. **No Alias Exploitation**: `PublicationAction` accepts only canonical lowercase enum values (`export_patch`, `stage_branch`, `create_pr`). Shortcut aliases (`pr`, `stage`, `manual`) are rejected at the CLI and API boundaries with validation errors.
+5. **Database Tampering Resilience**: If a stored `publication_requests` row is manipulated directly in SQLite, the validator re-queries the authoritative `repair_approval_decisions` record and fails closed.
+6. **Replay Defense**: Operator decisions are cryptographically bound to exact artifact tuples `(repair_id, base_commit_sha, patch_sha256)`. Cross-repair replay attempts fail closed.
+7. **Backward Compatibility**: Existing database records containing `'export_patch'`, `'stage_for_pr'`, or `'manual_integration'` deserialize cleanly with zero schema changes.
 
 ---
 

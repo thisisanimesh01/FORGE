@@ -338,13 +338,18 @@ def test_legacy_stage_for_pr_authorizes_stage_branch_and_export_patch():
     assert not is_action_authorized(AuthorizedAction.STAGE_FOR_PR, PublicationAction.CREATE_PR)
 
 
-def test_legacy_stage_for_pr_with_policy_opt_in():
-    """STAGE_FOR_PR authorizes CREATE_PR only when policy explicitly opts in."""
-    policy_default = GitPublicationPolicy(legacy_stage_for_pr_allows_create_pr=False)
-    assert not is_action_authorized(AuthorizedAction.STAGE_FOR_PR, PublicationAction.CREATE_PR, policy_default)
+def test_legacy_stage_for_pr_unconditionally_denies_create_pr():
+    """STAGE_FOR_PR unconditionally denies CREATE_PR under all policy configurations."""
+    # Under standard default policy
+    assert not is_action_authorized(AuthorizedAction.STAGE_FOR_PR, PublicationAction.CREATE_PR)
 
-    policy_opt_in = GitPublicationPolicy(legacy_stage_for_pr_allows_create_pr=True)
-    assert is_action_authorized(AuthorizedAction.STAGE_FOR_PR, PublicationAction.CREATE_PR, policy_opt_in)
+    # Under customized policy: STAGE_FOR_PR still strictly denies CREATE_PR
+    custom_policy = GitPublicationPolicy(require_clean_working_tree=False)
+    assert not is_action_authorized(AuthorizedAction.STAGE_FOR_PR, PublicationAction.CREATE_PR, custom_policy)
+
+    # Confirm legacy_stage_for_pr_allows_create_pr parameter is removed and rejected
+    with pytest.raises(Exception):
+        GitPublicationPolicy(legacy_stage_for_pr_allows_create_pr=True)
 
 
 def test_stage_branch_strictly_authorizes_stage_branch_and_export_patch():
@@ -482,29 +487,28 @@ def test_existing_m6_stage_for_pr_approval_validation(test_env):
         decision_id=sfp_dec.decision_id,
         action=PublicationAction.CREATE_PR,
     )
-    with pytest.raises(PublicationActionMismatchError, match="requires explicit 'create_pr' operator authorization; decision has 'stage_for_pr'"):
+    with pytest.raises(PublicationActionMismatchError, match="requires a fresh explicit 'create_pr' operator approval; decision has legacy 'stage_for_pr'"):
         validator.validate_publication_request(pub_req_pr, repo_identity)
 
 
-def test_stage_for_pr_permits_create_pr_with_policy_opt_in(test_env):
-    """When policy opt-in legacy_stage_for_pr_allows_create_pr=True, STAGE_FOR_PR permits CREATE_PR."""
+def test_stage_for_pr_unconditionally_rejects_create_pr(test_env):
+    """STAGE_FOR_PR strictly rejects CREATE_PR publication requests without exception."""
     env = test_env
     sfp_dec = env["decision"].model_copy(update={"authorized_action": AuthorizedAction.STAGE_FOR_PR})
     env["exec_store"].save_approval_decision(sfp_dec)
 
-    policy = GitPublicationPolicy(legacy_stage_for_pr_allows_create_pr=True)
-    validator = GitPublicationValidator(execution_store=env["exec_store"], policy=policy)
+    validator = GitPublicationValidator(execution_store=env["exec_store"])
     inspector = GitRepositoryInspector()
     repo_identity = inspector.inspect_repository(env["target_repo"])
 
     pub_req_pr = PublicationRequest(
-        publication_id="pub_pr_sfp_optin",
+        publication_id="pub_pr_sfp_denied",
         repair_id=env["request"].repair_id,
         decision_id=sfp_dec.decision_id,
         action=PublicationAction.CREATE_PR,
     )
-    res = validator.validate_publication_request(pub_req_pr, repo_identity)
-    assert res.is_valid is True
+    with pytest.raises(PublicationActionMismatchError, match="requires a fresh explicit 'create_pr' operator approval; decision has legacy 'stage_for_pr'"):
+        validator.validate_publication_request(pub_req_pr, repo_identity)
 
 
 # =============================================================================
@@ -527,7 +531,7 @@ def test_phase9_stage_branch_cannot_authorize_create_pr(test_env):
         decision_id=stg_dec.decision_id,
         action=PublicationAction.CREATE_PR,
     )
-    with pytest.raises(PublicationActionMismatchError, match="requires explicit 'create_pr' operator authorization; decision has 'stage_branch'"):
+    with pytest.raises(PublicationActionMismatchError, match="requires a fresh explicit 'create_pr' operator approval; decision has 'stage_branch'"):
         validator.validate_publication_request(pub_req_pr, repo_identity)
 
 
@@ -550,6 +554,85 @@ def test_phase9_create_pr_authorizes_all_actions(test_env):
         )
         res = validator.validate_publication_request(pub_req, repo_identity)
         assert res.is_valid is True
+
+
+def test_create_pr_prerequisite_operations_and_audit_ledger(test_env):
+    """CREATE_PR workflow permits prerequisite local operations, each recorded separately in audit ledger."""
+    env = test_env
+    pr_dec = env["decision"].model_copy(update={"authorized_action": AuthorizedAction.CREATE_PR})
+    env["exec_store"].save_approval_decision(pr_dec)
+
+    validator = GitPublicationValidator(execution_store=env["exec_store"])
+    inspector = GitRepositoryInspector()
+    repo_identity = inspector.inspect_repository(env["target_repo"])
+    pub_store = env["pub_store"]
+    repair_id = env["request"].repair_id
+
+    # 1. Prerequisite step 1: Export patch
+    req_export = PublicationRequest(
+        publication_id="pub_workflow_01",
+        repair_id=repair_id,
+        decision_id=pr_dec.decision_id,
+        action=PublicationAction.EXPORT_PATCH,
+    )
+    assert validator.validate_publication_request(req_export, repo_identity).is_valid is True
+    pub_store.save_publication_request(req_export)
+    pub_store.record_publication_event(
+        repair_id=repair_id,
+        action="export_patch",
+        actor=RepairActor.OPERATOR,
+        payload={"step": 1, "description": "Prerequisite patch export"},
+    )
+
+    # 2. Prerequisite step 2: Stage local branch
+    req_stage = PublicationRequest(
+        publication_id="pub_workflow_02",
+        repair_id=repair_id,
+        decision_id=pr_dec.decision_id,
+        action=PublicationAction.STAGE_BRANCH,
+    )
+    assert validator.validate_publication_request(req_stage, repo_identity).is_valid is True
+    pub_store.save_publication_request(req_stage)
+    pub_store.record_publication_event(
+        repair_id=repair_id,
+        action="stage_branch",
+        actor=RepairActor.OPERATOR,
+        payload={"step": 2, "description": "Prerequisite branch staging"},
+    )
+
+    # 3. Final publication step: Create PR
+    req_pr = PublicationRequest(
+        publication_id="pub_workflow_03",
+        repair_id=repair_id,
+        decision_id=pr_dec.decision_id,
+        action=PublicationAction.CREATE_PR,
+    )
+    assert validator.validate_publication_request(req_pr, repo_identity).is_valid is True
+    pub_store.save_publication_request(req_pr)
+    pub_store.record_publication_event(
+        repair_id=repair_id,
+        action="create_pr",
+        actor=RepairActor.OPERATOR,
+        payload={"step": 3, "description": "Remote pull-request proposal"},
+    )
+
+    # 4. Verify separate audit ledger entries
+    conn = sqlite3.connect(env["db_path"])
+    cur = conn.execute(
+        "SELECT sequence, actor, payload_json FROM repair_execution_events WHERE repair_id = ? ORDER BY sequence ASC",
+        (repair_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    actions = [json.loads(r[2])["action"] for r in rows if "action" in json.loads(r[2])]
+    assert "export_patch" in actions
+    assert "stage_branch" in actions
+    assert "create_pr" in actions
+
+    sequences = [r[0] for r in rows]
+    assert sequences == sorted(sequences)
+    assert len(set(sequences)) == len(sequences)
 
 
 # =============================================================================

@@ -58,24 +58,18 @@ def get_permitted_publication_actions(
 ) -> Set[PublicationAction]:
     """Return the set of permitted PublicationAction values for a given AuthorizedAction.
 
-    If policy has legacy_stage_for_pr_allows_create_pr enabled, STAGE_FOR_PR will also permit CREATE_PR.
+    Guarantees:
+    - Historical STAGE_FOR_PR approvals authorize local branch staging (STAGE_BRANCH)
+      and patch export (EXPORT_PATCH) only.
+    - Historical STAGE_FOR_PR approvals can NEVER authorize remote PR creation (CREATE_PR).
+    - Remote PR publication unconditionally requires a fresh explicit CREATE_PR approval.
     """
     if authorized_action not in ACTION_AUTHORIZATION_MAP:
         raise PublicationAuthorizationError(
             f"Unrecognized or unsupported authorized action: '{authorized_action}'"
         )
 
-    permitted = set(ACTION_AUTHORIZATION_MAP[authorized_action])
-
-    # Explicit policy opt-in for legacy STAGE_FOR_PR -> CREATE_PR
-    if (
-        authorized_action == AuthorizedAction.STAGE_FOR_PR
-        and policy is not None
-        and policy.legacy_stage_for_pr_allows_create_pr
-    ):
-        permitted.add(PublicationAction.CREATE_PR)
-
-    return permitted
+    return set(ACTION_AUTHORIZATION_MAP[authorized_action])
 
 
 def is_action_authorized(
@@ -103,17 +97,24 @@ def validate_action_authorization(
             raise PublicationActionMismatchError(
                 "Publication action 'create_pr' cannot be authorized by 'manual_integration'. "
                 "Manual integration is strictly restricted to patch export for developer review. "
-                "Remote pull request creation requires explicit 'create_pr' operator authorization."
+                "Remote pull request creation requires a fresh explicit 'create_pr' operator approval."
             )
         elif authorized_action == AuthorizedAction.EXPORT_PATCH:
             raise PublicationActionMismatchError(
                 "Publication action 'create_pr' requires explicit pull request creation authorization; "
-                "decision has 'export_patch' (which permits patch export only)."
+                "decision has 'export_patch' (which permits patch export only). "
+                "Remote pull request creation requires a fresh explicit 'create_pr' operator approval."
             )
-        elif authorized_action in (AuthorizedAction.STAGE_FOR_PR, AuthorizedAction.STAGE_BRANCH):
+        elif authorized_action == AuthorizedAction.STAGE_FOR_PR:
             raise PublicationActionMismatchError(
-                f"Publication action 'create_pr' requires explicit 'create_pr' operator authorization; "
-                f"decision has '{authorized_action.value}' (which authorizes local branch staging only). "
+                "Publication action 'create_pr' requires a fresh explicit 'create_pr' operator approval; "
+                "decision has legacy 'stage_for_pr' (which authorizes local branch staging only). "
+                "Historical STAGE_FOR_PR approvals can never authorize remote pull request publication."
+            )
+        elif authorized_action == AuthorizedAction.STAGE_BRANCH:
+            raise PublicationActionMismatchError(
+                "Publication action 'create_pr' requires a fresh explicit 'create_pr' operator approval; "
+                "decision has 'stage_branch' (which authorizes local branch staging only). "
                 "Remote publication to origin is refused without explicit 'create_pr' sign-off."
             )
 

@@ -6,7 +6,7 @@ Defines the default-deny Git publication policy and invariant enforcement rules.
 import fnmatch
 import re
 from typing import List, Optional, Set
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from forge.config import redact_secrets
 from forge.publication.failures import (
@@ -30,6 +30,8 @@ SECRET_PATTERNS = [
 
 class GitPublicationPolicy(BaseModel):
     """Enforceable Git publication policy enforcing default-deny behavior and fail-closed safety."""
+
+    model_config = ConfigDict(extra="forbid")
 
     allowed_actions: Set[PublicationAction] = Field(
         default_factory=lambda: {
@@ -74,10 +76,6 @@ class GitPublicationPolicy(BaseModel):
     require_m6_approval: bool = Field(
         default=True,
         description="Mandates an active, unexpired, untampered Phase 8 Milestone 6 approval."
-    )
-    legacy_stage_for_pr_allows_create_pr: bool = Field(
-        default=False,
-        description="Whether legacy Phase 8 M6 STAGE_FOR_PR approvals authorize CREATE_PR. Default is False (fail-closed, requires explicit CREATE_PR approval)."
     )
     allow_force_push: bool = Field(
         default=False,
