@@ -24,8 +24,15 @@ from forge.repair.execution.models import (
     RepairExecutionRecord,
     RepairExecutionState,
     RepairRequest,
+    SelectedTest,
+    TestComparisonResult,
+    TestExecutionRecord,
+    TestSelectionCategory,
     ValidationOutcome,
     ValidationResult,
+    VerificationOutcome,
+    VerificationPlan,
+    VerificationRunRecord,
     WorkspaceRecord,
 )
 from forge.repair.execution.state import validate_repair_transition
@@ -554,6 +561,10 @@ class RepairExecutionStore(RepairEventStoreProtocol):
         finally:
             conn.close()
 
+    def get_events_for_repair(self, repair_id: str) -> List[RepairExecutionEvent]:
+        """Fetch all sequential audit events for a repair execution (alias for get_events)."""
+        return self.get_events(repair_id)
+
     def get_full_execution_record(self, repair_id: str) -> Optional[RepairExecutionRecord]:
         """Assemble full snapshot of a repair execution."""
         req = self.get_repair_request(repair_id)
@@ -836,5 +847,259 @@ class RepairExecutionStore(RepairEventStoreProtocol):
                 (repair_id,),
             )
             return [self._row_to_validation_result(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    # -------------------------------------------------------------------------
+    # Verification Runs & Test Executions Persistence
+    # -------------------------------------------------------------------------
+
+    def save_test_execution(self, record: TestExecutionRecord) -> None:
+        """Persist an individual TestExecutionRecord."""
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO repair_test_executions (
+                        execution_id, verification_id, repair_id, workspace_id,
+                        target_type, test_name, command_json, selection_rationale,
+                        exit_code, status, passed, timed_out, duration_ms,
+                        stdout_excerpt, stderr_excerpt, tests_collected,
+                        tests_executed, tests_passed, tests_failed,
+                        tests_skipped, tests_errored, failure_message,
+                        started_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(execution_id) DO UPDATE SET
+                        status = excluded.status,
+                        passed = excluded.passed,
+                        timed_out = excluded.timed_out,
+                        duration_ms = excluded.duration_ms,
+                        stdout_excerpt = excluded.stdout_excerpt,
+                        stderr_excerpt = excluded.stderr_excerpt,
+                        tests_collected = excluded.tests_collected,
+                        tests_executed = excluded.tests_executed,
+                        tests_passed = excluded.tests_passed,
+                        tests_failed = excluded.tests_failed,
+                        tests_skipped = excluded.tests_skipped,
+                        tests_errored = excluded.tests_errored,
+                        failure_message = excluded.failure_message,
+                        completed_at = excluded.completed_at
+                    """,
+                    (
+                        record.execution_id,
+                        record.verification_id,
+                        record.repair_id,
+                        record.workspace_id,
+                        record.target_type,
+                        record.test_name,
+                        json.dumps(record.command),
+                        record.selection_rationale,
+                        record.exit_code,
+                        record.status,
+                        1 if record.passed else 0,
+                        1 if record.timed_out else 0,
+                        record.duration_ms,
+                        record.stdout_excerpt,
+                        record.stderr_excerpt,
+                        record.tests_collected,
+                        record.tests_executed,
+                        record.tests_passed,
+                        record.tests_failed,
+                        record.tests_skipped,
+                        record.tests_errored,
+                        record.failure_message,
+                        record.started_at.isoformat(),
+                        record.completed_at.isoformat(),
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def _row_to_test_execution(self, row: sqlite3.Row) -> TestExecutionRecord:
+        return TestExecutionRecord(
+            execution_id=row["execution_id"],
+            verification_id=row["verification_id"],
+            repair_id=row["repair_id"],
+            workspace_id=row["workspace_id"],
+            target_type=row["target_type"],
+            test_name=row["test_name"],
+            command=json.loads(row["command_json"]),
+            selection_rationale=row["selection_rationale"] or "",
+            exit_code=row["exit_code"],
+            status=row["status"],
+            passed=bool(row["passed"]),
+            timed_out=bool(row["timed_out"]),
+            duration_ms=row["duration_ms"],
+            stdout_excerpt=row["stdout_excerpt"] or "",
+            stderr_excerpt=row["stderr_excerpt"] or "",
+            tests_collected=row["tests_collected"],
+            tests_executed=row["tests_executed"],
+            tests_passed=row["tests_passed"],
+            tests_failed=row["tests_failed"],
+            tests_skipped=row["tests_skipped"],
+            tests_errored=row["tests_errored"],
+            failure_message=row["failure_message"],
+            started_at=datetime.fromisoformat(row["started_at"]),
+            completed_at=datetime.fromisoformat(row["completed_at"]),
+        )
+
+    def list_test_executions(
+        self, verification_id: str, target_type: Optional[str] = None
+    ) -> List[TestExecutionRecord]:
+        """List TestExecutionRecords for a verification_id, optionally filtered by target_type."""
+        conn = self._conn()
+        try:
+            if target_type:
+                cur = conn.execute(
+                    "SELECT * FROM repair_test_executions WHERE verification_id = ? AND target_type = ? ORDER BY started_at ASC",
+                    (verification_id, target_type),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM repair_test_executions WHERE verification_id = ? ORDER BY started_at ASC",
+                    (verification_id,),
+                )
+            return [self._row_to_test_execution(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def save_verification_run(self, run: VerificationRunRecord) -> None:
+        """Persist a complete VerificationRunRecord and all child test executions."""
+        conn = self._conn()
+        try:
+            with conn:
+                fail_cat = run.failure_category.value if run.failure_category else None
+                conn.execute(
+                    """
+                    INSERT INTO repair_verification_runs (
+                        verification_id, repair_id, patch_artifact_id, validation_id,
+                        repository_target, base_commit_sha, workspace_id,
+                        baseline_workspace_id, patch_sha256, plan_json,
+                        baseline_summary_json, patched_summary_json,
+                        regression_analysis_json, overall_outcome, failure_category,
+                        failure_message, evidence_ids_json, logs_excerpt,
+                        started_at, completed_at, duration_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(verification_id) DO UPDATE SET
+                        overall_outcome = excluded.overall_outcome,
+                        failure_category = excluded.failure_category,
+                        failure_message = excluded.failure_message,
+                        evidence_ids_json = excluded.evidence_ids_json,
+                        logs_excerpt = excluded.logs_excerpt,
+                        completed_at = excluded.completed_at,
+                        duration_ms = excluded.duration_ms
+                    """,
+                    (
+                        run.verification_id,
+                        run.repair_id,
+                        run.patch_artifact_id,
+                        run.validation_id,
+                        run.repository_target,
+                        run.base_commit_sha,
+                        run.workspace_id,
+                        run.baseline_workspace_id,
+                        run.patch_sha256,
+                        run.plan.model_dump_json(),
+                        json.dumps([e.model_dump(mode="json") for e in run.baseline_executions]),
+                        json.dumps([e.model_dump(mode="json") for e in run.patched_executions]),
+                        run.regression_analysis.model_dump_json(),
+                        run.overall_outcome.value,
+                        fail_cat,
+                        run.failure_message,
+                        json.dumps(run.evidence_ids),
+                        run.logs_excerpt,
+                        run.started_at.isoformat(),
+                        run.completed_at.isoformat(),
+                        run.duration_ms,
+                    ),
+                )
+
+            # Persist individual test executions
+            for exec_rec in run.baseline_executions:
+                if exec_rec.verification_id != run.verification_id:
+                    exec_rec = exec_rec.model_copy(update={"verification_id": run.verification_id})
+                self.save_test_execution(exec_rec)
+            for exec_rec in run.patched_executions:
+                if exec_rec.verification_id != run.verification_id:
+                    exec_rec = exec_rec.model_copy(update={"verification_id": run.verification_id})
+                self.save_test_execution(exec_rec)
+        finally:
+            conn.close()
+
+    def _row_to_verification_run(self, row: sqlite3.Row) -> VerificationRunRecord:
+        from forge.repair.execution.models import RegressionAnalysisRecord
+
+        v_id = row["verification_id"]
+        base_execs = self.list_test_executions(v_id, target_type="baseline")
+        patched_execs = self.list_test_executions(v_id, target_type="patched")
+
+        fail_cat = FailureCategory(row["failure_category"]) if row["failure_category"] else None
+        plan_dict = json.loads(row["plan_json"])
+        reg_dict = json.loads(row["regression_analysis_json"])
+
+        return VerificationRunRecord(
+            verification_id=row["verification_id"],
+            repair_id=row["repair_id"],
+            patch_artifact_id=row["patch_artifact_id"],
+            validation_id=row["validation_id"],
+            repository_target=row["repository_target"],
+            base_commit_sha=row["base_commit_sha"],
+            workspace_id=row["workspace_id"],
+            baseline_workspace_id=row["baseline_workspace_id"],
+            patch_sha256=row["patch_sha256"],
+            plan=VerificationPlan.model_validate(plan_dict),
+            baseline_executions=base_execs,
+            patched_executions=patched_execs,
+            regression_analysis=RegressionAnalysisRecord.model_validate(reg_dict),
+            overall_outcome=VerificationOutcome(row["overall_outcome"]),
+            failure_category=fail_cat,
+            failure_message=row["failure_message"],
+            evidence_ids=json.loads(row["evidence_ids_json"]),
+            logs_excerpt=row["logs_excerpt"] or "",
+            started_at=datetime.fromisoformat(row["started_at"]),
+            completed_at=datetime.fromisoformat(row["completed_at"]),
+            duration_ms=row["duration_ms"],
+        )
+
+    def get_verification_run(self, verification_id: str) -> Optional[VerificationRunRecord]:
+        """Fetch a VerificationRunRecord by verification_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_verification_runs WHERE verification_id = ?",
+                (verification_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_verification_run(row)
+        finally:
+            conn.close()
+
+    def get_latest_verification_run_for_repair(self, repair_id: str) -> Optional[VerificationRunRecord]:
+        """Fetch the latest VerificationRunRecord for a repair_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_verification_runs WHERE repair_id = ? ORDER BY completed_at DESC LIMIT 1",
+                (repair_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_verification_run(row)
+        finally:
+            conn.close()
+
+    def list_verification_runs_for_repair(self, repair_id: str) -> List[VerificationRunRecord]:
+        """List all VerificationRunRecords for a repair_id ordered by completed_at DESC."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_verification_runs WHERE repair_id = ? ORDER BY completed_at DESC",
+                (repair_id,),
+            )
+            return [self._row_to_verification_run(r) for r in cur.fetchall()]
         finally:
             conn.close()

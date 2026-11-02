@@ -381,6 +381,60 @@ CREATE TABLE IF NOT EXISTS repair_validation_results (
     FOREIGN KEY(patch_artifact_id) REFERENCES patch_artifacts(artifact_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS repair_verification_runs (
+    verification_id TEXT PRIMARY KEY,
+    repair_id TEXT NOT NULL,
+    patch_artifact_id TEXT NOT NULL,
+    validation_id TEXT NOT NULL,
+    repository_target TEXT NOT NULL,
+    base_commit_sha TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    baseline_workspace_id TEXT,
+    patch_sha256 TEXT NOT NULL,
+    plan_json TEXT NOT NULL DEFAULT '{}',
+    baseline_summary_json TEXT NOT NULL DEFAULT '{}',
+    patched_summary_json TEXT NOT NULL DEFAULT '{}',
+    regression_analysis_json TEXT NOT NULL DEFAULT '{}',
+    overall_outcome TEXT NOT NULL,
+    failure_category TEXT,
+    failure_message TEXT,
+    evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+    logs_excerpt TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    duration_ms REAL NOT NULL DEFAULT 0.0,
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE,
+    FOREIGN KEY(patch_artifact_id) REFERENCES patch_artifacts(artifact_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS repair_test_executions (
+    execution_id TEXT PRIMARY KEY,
+    verification_id TEXT NOT NULL,
+    repair_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    test_name TEXT NOT NULL,
+    command_json TEXT NOT NULL DEFAULT '[]',
+    selection_rationale TEXT NOT NULL DEFAULT '',
+    exit_code INTEGER,
+    status TEXT NOT NULL,
+    passed INTEGER NOT NULL DEFAULT 0,
+    timed_out INTEGER NOT NULL DEFAULT 0,
+    duration_ms REAL NOT NULL DEFAULT 0.0,
+    stdout_excerpt TEXT NOT NULL DEFAULT '',
+    stderr_excerpt TEXT NOT NULL DEFAULT '',
+    tests_collected INTEGER NOT NULL DEFAULT 0,
+    tests_executed INTEGER NOT NULL DEFAULT 0,
+    tests_passed INTEGER NOT NULL DEFAULT 0,
+    tests_failed INTEGER NOT NULL DEFAULT 0,
+    tests_skipped INTEGER NOT NULL DEFAULT 0,
+    tests_errored INTEGER NOT NULL DEFAULT 0,
+    failure_message TEXT,
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    FOREIGN KEY(verification_id) REFERENCES repair_verification_runs(verification_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
@@ -414,6 +468,10 @@ CREATE INDEX IF NOT EXISTS idx_repair_workspaces_repair ON repair_workspaces(rep
 CREATE INDEX IF NOT EXISTS idx_repair_exec_plans_repair ON repair_execution_plans(repair_id);
 CREATE INDEX IF NOT EXISTS idx_repair_val_results_repair ON repair_validation_results(repair_id);
 CREATE INDEX IF NOT EXISTS idx_repair_val_results_patch ON repair_validation_results(patch_artifact_id);
+CREATE INDEX IF NOT EXISTS idx_repair_verif_runs_repair ON repair_verification_runs(repair_id);
+CREATE INDEX IF NOT EXISTS idx_repair_verif_runs_patch ON repair_verification_runs(patch_artifact_id);
+CREATE INDEX IF NOT EXISTS idx_repair_test_exec_verif ON repair_test_executions(verification_id);
+CREATE INDEX IF NOT EXISTS idx_repair_test_exec_repair ON repair_test_executions(repair_id);
 """
 
 

@@ -25,6 +25,8 @@ from forge.repair.execution.failures import (
     ScopeContainmentViolationError,
     StaleBaseRevisionError,
     TargetRepoImmutabilityViolationError,
+    VerificationExecutionError,
+    VerificationPreconditionError,
     WorkspaceCleanupError,
     WorkspaceCollisionError,
     WorkspaceExecutionError,
@@ -43,11 +45,13 @@ from forge.repair.execution.interfaces import (
 )
 from forge.repair.execution.manager import RepairWorkspaceManager
 from forge.repair.execution.models import (
+    ComparisonStatus,
     ExecutionTestResult,
     FailureCategory,
     FailureClassification,
     IndependentValidationResult,
     PatchArtifact,
+    RegressionAnalysisRecord,
     RepairActor,
     RepairExecutionEvent,
     RepairExecutionPlan,
@@ -55,8 +59,15 @@ from forge.repair.execution.models import (
     RepairExecutionRequest,
     RepairExecutionState,
     RepairRequest,
+    SelectedTest,
+    TestComparisonResult,
+    TestExecutionRecord,
+    TestSelectionCategory,
     ValidationOutcome,
     ValidationResult,
+    VerificationOutcome,
+    VerificationPlan,
+    VerificationRunRecord,
     WorkspaceRecord,
 )
 from forge.repair.execution.planner import RepairExecutionPlanner
@@ -92,6 +103,16 @@ from forge.repair.execution.validator import (
     IndependentPatchValidator,
     PatchValidator,
     RepairRequestValidator,
+)
+from forge.repair.execution.verifier import (
+    BaselineComparator,
+    RepairVerifier,
+    TestExecutor,
+    TestSelector,
+    VerificationEvidenceCollector,
+    VerificationPlanner,
+    VerificationReportBuilder,
+    parse_test_runner_output,
 )
 from forge.repair.execution.workspace import RepairWorkspace
 
@@ -158,6 +179,18 @@ __all__ = [
     "PatchSemanticInvariantError",
     "PatchAdversarialDefectError",
     "PatchApplicationError",
+    "VerificationPreconditionError",
+    "VerificationExecutionError",
+    # Verification Models
+    "VerificationOutcome",
+    "TestSelectionCategory",
+    "SelectedTest",
+    "VerificationPlan",
+    "TestExecutionRecord",
+    "ComparisonStatus",
+    "TestComparisonResult",
+    "RegressionAnalysisRecord",
+    "VerificationRunRecord",
     # Interfaces
     "RepairWorkspaceProtocol",
     "RepairPlannerProtocol",
@@ -178,4 +211,13 @@ __all__ = [
     "RepairPatchGenerator",
     "SafePatchApplier",
     "RepairExecutionCoordinator",
+    # M5 Verification Components
+    "RepairVerifier",
+    "VerificationPlanner",
+    "TestSelector",
+    "TestExecutor",
+    "BaselineComparator",
+    "VerificationEvidenceCollector",
+    "VerificationReportBuilder",
+    "parse_test_runner_output",
 ]

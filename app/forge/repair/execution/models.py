@@ -68,6 +68,36 @@ class ValidationOutcome(str, Enum):
     ERROR = "ERROR"
 
 
+class VerificationOutcome(str, Enum):
+    """Explicit outcomes for sandbox repair verification."""
+    VERIFIED = "VERIFIED"
+    FAILED = "FAILED"
+    INCONCLUSIVE = "INCONCLUSIVE"
+    BLOCKED = "BLOCKED"
+    ERROR = "ERROR"
+
+
+class TestSelectionCategory(str, Enum):
+    """Categorization of test commands selected for repair verification."""
+    __test__ = False
+
+    REPRODUCTION = "reproduction"
+    MODULE = "module"
+    UNIT = "unit"
+    INTEGRATION = "integration"
+    REGRESSION = "regression"
+
+
+class ComparisonStatus(str, Enum):
+    """Outcome of comparing baseline vs patched execution for a specific test."""
+    FIXED = "fixed"
+    STABLE_PASS = "stable_pass"
+    PRE_EXISTING_FAILURE = "pre_existing_failure"
+    NEW_REGRESSION = "new_regression"
+    NEW_ERROR = "new_error"
+    INCONCLUSIVE = "inconclusive"
+
+
 # =============================================================================
 # Value and Entity Models
 # =============================================================================
@@ -315,6 +345,116 @@ class WorkspaceRecord(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Metadata such as baseline hash count, sandbox mode")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Creation timestamp")
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Last update timestamp")
+
+
+class SelectedTest(BaseModel):
+    """Specific test command selected for sandbox verification execution."""
+    model_config = ConfigDict(frozen=True)
+
+    test_id: str = Field(description="Deterministic identifier for the selected test")
+    test_name: str = Field(description="Human-readable identifier or path of the test")
+    category: TestSelectionCategory = Field(description="Selection category (reproduction, module, unit, etc.)")
+    command: List[str] = Field(description="Vetted executable command line array")
+    relative_cwd: str = Field(default=".", description="Working directory relative to workspace root")
+    target_file: Optional[str] = Field(default=None, description="Primary source or test file targeted")
+    rationale: str = Field(description="Audit explanation for why this test was selected")
+    expected_to_fail_on_baseline: bool = Field(default=False, description="True if this test reproduces the reported defect")
+
+
+class VerificationPlan(BaseModel):
+    """Structured plan defining tests to execute for patch verification."""
+    model_config = ConfigDict(frozen=True)
+
+    plan_id: str = Field(description="Unique verification plan identifier")
+    repair_id: str = Field(description="Associated repair request identifier")
+    patch_artifact_id: str = Field(description="Target patch artifact identifier")
+    selected_tests: List[SelectedTest] = Field(default_factory=list, description="Ordered list of tests to run")
+    timeout_seconds: float = Field(default=60.0, ge=1.0, description="Total timeout cap for verification")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Plan creation timestamp")
+
+
+class TestExecutionRecord(BaseModel):
+    """Structured record of an individual test command execution inside the sandbox."""
+    __test__ = False
+    model_config = ConfigDict(frozen=True)
+
+    execution_id: str = Field(description="Unique test execution identifier")
+    verification_id: str = Field(description="Associated verification run identifier")
+    repair_id: str = Field(description="Associated repair request identifier")
+    workspace_id: str = Field(description="Workspace identifier where test executed")
+    target_type: str = Field(description="Target environment: 'baseline' or 'patched'")
+    test_name: str = Field(description="Test name or command identifier")
+    command: List[str] = Field(description="Exact command executed")
+    selection_rationale: str = Field(default="", description="Why this test was run")
+    exit_code: Optional[int] = Field(default=None, description="Process exit code")
+    status: str = Field(default="passed", description="Execution status: passed, failed, timeout, inconclusive, error")
+    passed: bool = Field(default=False, description="Whether test passed completely with observed assertions")
+    timed_out: bool = Field(default=False, description="Whether execution timed out")
+    duration_ms: float = Field(default=0.0, ge=0.0, description="Duration in milliseconds")
+    stdout_excerpt: str = Field(default="", description="Sanitized and bounded standard output")
+    stderr_excerpt: str = Field(default="", description="Sanitized and bounded standard error")
+    tests_collected: int = Field(default=0, ge=0, description="Number of tests collected by runner")
+    tests_executed: int = Field(default=0, ge=0, description="Number of tests executed by runner")
+    tests_passed: int = Field(default=0, ge=0, description="Number of tests passed")
+    tests_failed: int = Field(default=0, ge=0, description="Number of tests failed")
+    tests_skipped: int = Field(default=0, ge=0, description="Number of tests skipped")
+    tests_errored: int = Field(default=0, ge=0, description="Number of tests that encountered errors")
+    failure_message: Optional[str] = Field(default=None, description="Failure diagnostic or error message")
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Start timestamp")
+    completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Completion timestamp")
+
+
+class TestComparisonResult(BaseModel):
+    """Comparative outcome between baseline and patched execution for a specific test."""
+    __test__ = False
+    model_config = ConfigDict(frozen=True)
+
+    test_name: str = Field(description="Name or command of test compared")
+    status: ComparisonStatus = Field(description="Outcome status (fixed, stable_pass, new_regression, etc.)")
+    baseline_passed: Optional[bool] = Field(default=None, description="Baseline pass status")
+    patched_passed: Optional[bool] = Field(default=None, description="Patched pass status")
+    details: str = Field(default="", description="Diagnostic details or explanation")
+
+
+class RegressionAnalysisRecord(BaseModel):
+    """Detailed regression analysis comparing baseline and patched test suites."""
+    model_config = ConfigDict(frozen=True)
+
+    regression_detected: bool = Field(default=False, description="True if newly introduced failures or errors detected")
+    defect_resolved: bool = Field(default=False, description="True if defect reproduction test is confirmed fixed")
+    comparisons: List[TestComparisonResult] = Field(default_factory=list, description="Itemized test comparisons")
+    new_failures_count: int = Field(default=0, ge=0, description="Number of newly failing tests")
+    fixed_tests_count: int = Field(default=0, ge=0, description="Number of tests that changed from fail to pass")
+    stable_tests_count: int = Field(default=0, ge=0, description="Number of tests passing on both")
+    pre_existing_failures_count: int = Field(default=0, ge=0, description="Number of tests failing on both")
+    summary: str = Field(default="", description="High-level regression analysis summary")
+
+
+class VerificationRunRecord(BaseModel):
+    """Complete, immutable audit record of a sandbox patch verification run."""
+    model_config = ConfigDict(frozen=True)
+
+    verification_id: str = Field(description="Unique verification run identifier (verif_...)")
+    repair_id: str = Field(description="Associated repair request identifier")
+    patch_artifact_id: str = Field(description="Target patch artifact identifier")
+    validation_id: str = Field(description="Associated M4 validation identifier")
+    repository_target: str = Field(description="Target repository identifier or URL")
+    base_commit_sha: str = Field(description="Pinned repository base commit revision")
+    workspace_id: str = Field(description="Patched workspace identifier")
+    baseline_workspace_id: Optional[str] = Field(default=None, description="Baseline workspace identifier if used")
+    patch_sha256: str = Field(description="SHA-256 digest of exact verified patch bytes")
+    plan: VerificationPlan = Field(description="Verification plan with selected tests")
+    baseline_executions: List[TestExecutionRecord] = Field(default_factory=list, description="Baseline execution records")
+    patched_executions: List[TestExecutionRecord] = Field(default_factory=list, description="Patched execution records")
+    regression_analysis: RegressionAnalysisRecord = Field(description="Comparative regression analysis")
+    overall_outcome: VerificationOutcome = Field(default=VerificationOutcome.FAILED, description="Final verification outcome")
+    failure_category: Optional[FailureCategory] = Field(default=None, description="Failure category if not verified")
+    failure_message: Optional[str] = Field(default=None, description="Detailed failure diagnostic message")
+    evidence_ids: List[str] = Field(default_factory=list, description="Evidence records created during verification")
+    logs_excerpt: str = Field(default="", description="Sanitized excerpt of execution logs")
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Verification start timestamp")
+    completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Verification completion timestamp")
+    duration_ms: float = Field(default=0.0, ge=0.0, description="Total verification duration in milliseconds")
 
 
 # Compatibility alias

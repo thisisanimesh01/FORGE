@@ -39,11 +39,14 @@ from forge.repair.execution.models import (
     RepairExecutionState,
     RepairRequest,
     ValidationResult,
+    VerificationOutcome,
+    VerificationRunRecord,
 )
 from forge.repair.execution.planner import RepairExecutionPlanner
 from forge.repair.execution.policy import RepairExecutionPolicy
 from forge.repair.execution.storage import RepairExecutionStore
 from forge.repair.execution.validator import PatchValidator, RepairRequestValidator
+from forge.repair.execution.verifier import RepairVerifier
 from forge.schemas import EvidenceRecord, Finding
 from forge.storage.store import ForgeStore
 
@@ -59,6 +62,7 @@ class RepairExecutionCoordinator:
         generator: Optional[RepairPatchGenerator] = None,
         patch_validator: Optional[PatchValidator] = None,
         applier: Optional[SafePatchApplier] = None,
+        verifier: Optional[RepairVerifier] = None,
         db_path: Optional[Path] = None,
     ):
         self.exec_store = execution_store or RepairExecutionStore(db_path=db_path)
@@ -68,6 +72,11 @@ class RepairExecutionCoordinator:
         self.generator = generator or RepairPatchGenerator()
         self.patch_validator = patch_validator or PatchValidator()
         self.applier = applier or SafePatchApplier()
+        self.verifier = verifier or RepairVerifier(
+            execution_store=self.exec_store,
+            forge_store=self.forge_store,
+            db_path=db_path,
+        )
 
     def execute_candidate_generation(
         self,
@@ -338,3 +347,79 @@ class RepairExecutionCoordinator:
         # Reload updated request
         final_req = self.exec_store.get_repair_request(request.repair_id) or req
         return final_req, patch, patch_val_result
+
+    def execute_repair_verification(
+        self,
+        request: RepairRequest,
+        patch: PatchArtifact,
+        workspace: Any,
+        policy: Optional[RepairExecutionPolicy] = None,
+        validation_result: Optional[IndependentValidationResult] = None,
+        baseline_workspace: Optional[Any] = None,
+        timeout_seconds: float = 60.0,
+    ) -> Tuple[RepairRequest, VerificationRunRecord]:
+        """Execute sandbox verification and regression testing for an independently validated candidate patch.
+
+        Transitions:
+        PATCH_VALIDATING -> VERIFIED (if verification passes completely without regression)
+        or
+        PATCH_VALIDATING -> FAILED (if verification fails, introduces regressions, or times out)
+
+        Returns:
+            Tuple of (updated_request, verification_run_record)
+        """
+        active_policy = policy or RepairExecutionPolicy()
+
+        # Fetch finding and evidence
+        finding = self.forge_store.get_finding(request.finding_id)
+        evidence_records = self.forge_store.list_evidence_for_finding(request.finding_id)
+        repair_plan = self.exec_store.get_repair_plan_for_repair(request.repair_id)
+
+        # Run verification via RepairVerifier
+        run_record = self.verifier.verify_repair(
+            request=request,
+            patch=patch,
+            workspace=workspace,
+            policy=active_policy,
+            validation_result=validation_result,
+            finding=finding,
+            evidence_records=evidence_records,
+            repair_plan=repair_plan,
+            baseline_workspace=baseline_workspace,
+            timeout_seconds=timeout_seconds,
+        )
+
+        # State transition based on outcome
+        if run_record.overall_outcome == VerificationOutcome.VERIFIED:
+            req = self.exec_store.transition_repair_state(
+                repair_id=request.repair_id,
+                to_state=RepairExecutionState.VERIFIED,
+                actor=RepairActor.VERIFIER,
+                context={
+                    "verification_passed": True,
+                    "verification_id": run_record.verification_id,
+                    "reason": "All verification tests passed with 0 regressions",
+                },
+            )
+        else:
+            # Failed, Blocked, or Inconclusive
+            fail_cat = run_record.failure_category or FailureCategory.TEST_FAILED
+            fail_msg = run_record.failure_message or f"Verification outcome: {run_record.overall_outcome.value}"
+            fail_cls = FailureClassification(
+                category=fail_cat,
+                message=fail_msg,
+                details={"verification_id": run_record.verification_id, "outcome": run_record.overall_outcome.value},
+            )
+
+            # Transition to FAILED state if not already terminal
+            current_req = self.exec_store.get_repair_request(request.repair_id) or request
+            if current_req.state == RepairExecutionState.PATCH_VALIDATING:
+                req = self.exec_store.transition_repair_state(
+                    repair_id=request.repair_id,
+                    to_state=RepairExecutionState.FAILED,
+                    actor=RepairActor.VERIFIER,
+                    context={"failure": fail_cls, "error_message": fail_msg},
+                )
+
+        updated_req = self.exec_store.get_repair_request(request.repair_id) or request
+        return updated_req, run_record

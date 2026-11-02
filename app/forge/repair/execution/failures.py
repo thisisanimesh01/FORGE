@@ -7,6 +7,7 @@ commit identity verification, workspace collision, integrity violations, and san
 from typing import Any, Dict, Optional
 
 from forge.repair.execution.policy import (
+    ArbitraryExecutionForbiddenError,
     RepairPolicyViolationError,
     ScopeContainmentViolationError,
     TargetRepoImmutabilityViolationError,
@@ -100,3 +101,11 @@ class PatchAdversarialDefectError(PatchValidationError):
 
 class PatchApplicationError(WorkspaceExecutionError):
     """Raised when a candidate patch fails to apply cleanly to the workspace files."""
+
+
+class VerificationPreconditionError(WorkspaceExecutionError):
+    """Raised when repair verification preconditions fail (unvalidated patch, hash mismatch, etc.)."""
+
+
+class VerificationExecutionError(WorkspaceExecutionError):
+    """Raised when test execution or verification analysis fails unrecoverably."""
