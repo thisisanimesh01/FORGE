@@ -277,6 +277,53 @@ CREATE TABLE IF NOT EXISTS multi_check_verifications (
     FOREIGN KEY(workflow_id) REFERENCES engineering_workflows(workflow_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS repair_executions (
+    repair_id TEXT PRIMARY KEY,
+    finding_id TEXT NOT NULL,
+    run_id TEXT,
+    target_repo TEXT NOT NULL,
+    base_commit_sha TEXT NOT NULL,
+    state TEXT NOT NULL,
+    evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+    allowed_files_json TEXT NOT NULL DEFAULT '[]',
+    workspace_id TEXT,
+    patch_artifact_id TEXT,
+    validation_status TEXT,
+    verification_status TEXT,
+    failure_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(finding_id) REFERENCES findings(finding_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS repair_execution_events (
+    event_id TEXT PRIMARY KEY,
+    repair_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    timestamp TEXT NOT NULL,
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS patch_artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    repair_id TEXT NOT NULL,
+    finding_id TEXT NOT NULL,
+    base_commit_sha TEXT NOT NULL,
+    target_file TEXT NOT NULL,
+    diff_content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    lines_added INTEGER NOT NULL DEFAULT 0,
+    lines_deleted INTEGER NOT NULL DEFAULT 0,
+    hunks_count INTEGER NOT NULL DEFAULT 0,
+    affected_paths_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
@@ -300,6 +347,12 @@ CREATE INDEX IF NOT EXISTS idx_eng_workflow_events_seq ON engineering_workflow_e
 CREATE UNIQUE INDEX IF NOT EXISTS uq_eng_workflow_events_seq ON engineering_workflow_events(workflow_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_multi_check_wf ON multi_check_verifications(workflow_id);
 CREATE INDEX IF NOT EXISTS idx_multi_check_plan ON multi_check_verifications(repair_plan_id);
+CREATE INDEX IF NOT EXISTS idx_repair_executions_finding ON repair_executions(finding_id);
+CREATE INDEX IF NOT EXISTS idx_repair_executions_state ON repair_executions(state);
+CREATE INDEX IF NOT EXISTS idx_repair_exec_events_seq ON repair_execution_events(repair_id, sequence);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_repair_exec_events_seq ON repair_execution_events(repair_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_patch_artifacts_repair ON patch_artifacts(repair_id);
+CREATE INDEX IF NOT EXISTS idx_patch_artifacts_finding ON patch_artifacts(finding_id);
 """
 
 

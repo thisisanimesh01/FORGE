@@ -88,6 +88,8 @@ from forge.repair.acceptance import (
     render_acceptance_markdown,
     run_acceptance_suite,
 )
+from forge.repair import execution
+
 
 __all__ = [
     "ALLOWED_WORKFLOW_TRANSITIONS",
@@ -147,6 +149,7 @@ __all__ = [
     "construct_patch_from_edit_anchor",
     "construct_unified_diff_from_search_replace",
     "evaluate_repair_outcome",
+    "execution",
     "is_test_path",
     "parse_and_validate_unified_diff",
     "prepare_disposable_workspace",

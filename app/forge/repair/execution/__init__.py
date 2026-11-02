@@ -1,0 +1,109 @@
+"""FORGE Phase 8 Repair Execution Architecture Package.
+
+Provides the foundational architecture, domain models, guarded state machine,
+strict safety boundaries, component interfaces, and audit event ledger for
+evidence-grounded software repair execution.
+"""
+
+from forge.repair.execution.models import (
+    ExecutionTestResult,
+    FailureCategory,
+    FailureClassification,
+    PatchArtifact,
+    RepairActor,
+    RepairExecutionEvent,
+    RepairExecutionPlan,
+    RepairExecutionRecord,
+    RepairExecutionState,
+    RepairRequest,
+    ValidationResult,
+)
+from forge.repair.execution.state import (
+    ACTOR_TRANSITION_PERMISSIONS,
+    ALLOWED_REPAIR_TRANSITIONS,
+    IllegalStateModificationError,
+    InvalidRepairTransitionError,
+    RepairExecutionStateError,
+    RepairExecutionStateMachine,
+    RESUMABLE_STATES,
+    TERMINAL_STATES,
+    UnauthorizedTransitionActorError,
+    validate_repair_transition,
+)
+from forge.repair.execution.policy import (
+    ArbitraryExecutionForbiddenError,
+    BudgetExceededViolationError,
+    DEFAULT_ALLOWED_COMMAND_PREFIXES,
+    DEFAULT_ALLOWED_ENV_VARS,
+    NetworkAccessForbiddenError,
+    PROTECTED_EXACT_FILENAMES,
+    PROTECTED_PATH_PREFIXES,
+    ProtectedPathViolationError,
+    RepairExecutionPolicy,
+    RepairPolicyViolationError,
+    ScopeContainmentViolationError,
+    TargetRepoImmutabilityViolationError,
+)
+from forge.repair.execution.interfaces import (
+    PatchValidatorProtocol,
+    RepairEventStoreProtocol,
+    RepairExecutorProtocol,
+    RepairPlannerProtocol,
+    RepairVerifierProtocol,
+    RepairWorkspaceProtocol,
+)
+from forge.repair.execution.workspace import RepairWorkspace
+from forge.repair.execution.storage import (
+    RepairExecutionStore,
+    RepairExecutionStoreError,
+)
+
+__all__ = [
+    # Enums & Models
+    "RepairExecutionState",
+    "RepairActor",
+    "FailureCategory",
+    "FailureClassification",
+    "ExecutionTestResult",
+    "ValidationResult",
+    "PatchArtifact",
+    "RepairExecutionPlan",
+    "RepairRequest",
+    "RepairExecutionEvent",
+    "RepairExecutionRecord",
+    # State Machine & Transitions
+    "ALLOWED_REPAIR_TRANSITIONS",
+    "ACTOR_TRANSITION_PERMISSIONS",
+    "TERMINAL_STATES",
+    "RESUMABLE_STATES",
+    "validate_repair_transition",
+    "RepairExecutionStateMachine",
+    "RepairExecutionStateError",
+    "InvalidRepairTransitionError",
+    "UnauthorizedTransitionActorError",
+    "IllegalStateModificationError",
+    # Safety Policies & Boundaries
+    "RepairExecutionPolicy",
+    "RepairPolicyViolationError",
+    "TargetRepoImmutabilityViolationError",
+    "ScopeContainmentViolationError",
+    "ArbitraryExecutionForbiddenError",
+    "NetworkAccessForbiddenError",
+    "BudgetExceededViolationError",
+    "ProtectedPathViolationError",
+    "DEFAULT_ALLOWED_COMMAND_PREFIXES",
+    "DEFAULT_ALLOWED_ENV_VARS",
+    "PROTECTED_EXACT_FILENAMES",
+    "PROTECTED_PATH_PREFIXES",
+    # Interfaces
+    "RepairWorkspaceProtocol",
+    "RepairPlannerProtocol",
+    "PatchValidatorProtocol",
+    "RepairExecutorProtocol",
+    "RepairVerifierProtocol",
+    "RepairEventStoreProtocol",
+    # Workspace & Storage Implementations
+    "RepairWorkspace",
+    "RepairExecutionStore",
+    "RepairExecutionStoreError",
+]

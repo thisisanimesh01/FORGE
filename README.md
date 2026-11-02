@@ -36,7 +36,21 @@ Candidate Semantic Verification Hardening ── [COMPLETED]
 Deterministic Repair Construction Architecture ── [COMPLETED]
 Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (Milestones 1–6 Complete — Supervised Beta Release Gate Reached)
 Phase 7: Evidence-Driven Investigation Engine ── [COMPLETED] (Cross-File Evidence, Contradiction Detection, Investigation Orchestration)
+Phase 8: Controlled Evidence-Grounded Software Repair ── [IN PROGRESS] (Milestone 1 Architecture Completed)
 ```
+
+### Phase 8, Milestone 1: Repair Execution Architecture (Completed)
+- **Objective & Scope**: Establish the typed domain models, guarded state machine, strict safety boundaries, component protocols, and SQLite audit event ledgers for controlled, evidence-grounded software repair execution.
+- **Architectural Deliverables**:
+  - *Repair Execution Domain Models (`forge.repair.execution.models`)*: Formulated explicit models for `RepairRequest`, `RepairExecutionState`, `RepairActor`, `FailureCategory`, `FailureClassification`, `PatchArtifact` (with SHA-256 content hash, line counts, and hunk metrics), `ValidationResult`, `ExecutionTestResult`, and `RepairExecutionPlan`.
+  - *Guarded Lifecycle State Machine (`forge.repair.execution.state`)*: Implemented `RepairExecutionStateMachine` enforcing strict transition gating across 11 explicit states (`CREATED` -> `PLANNED` -> `VALIDATING` -> `READY` -> `EXECUTING` -> `PATCH_GENERATED` -> `PATCH_VALIDATING` -> `VERIFIED` / `FAILED` / `REJECTED` / `CANCELLED`), role-based actor authorization matrix, immutable terminal states, and zero-fabrication verification invariants.
+  - *Strict Safety Policies & Boundary Enforcement (`forge.repair.execution.policy`)*: Enforced mandatory safety policies: target repository immutability (`target_repo_read_only=True`), isolated workspace execution, command binary whitelisting (`pytest`, `python`, `unittest`, `flake8`, `ruff`, `mypy`), shell injection defense (blocking `;`, `|`, `&`, `$`, backticks, redirection, newlines), environment variable sanitization with secret redaction, path traversal rejection, protected path blocking (`ProtectedPathPolicy`), and patch resource budgets ($\le 100$ lines, $\le 5$ hunks, $\le 1$ file, $\le 20$ KB).
+  - *Component Protocols (`forge.repair.execution.interfaces`)*: Defined runtime-checkable protocols for `RepairPlannerProtocol`, `RepairExecutorProtocol`, `RepairWorkspaceProtocol`, `PatchValidatorProtocol`, `RepairVerifierProtocol`, and `RepairEventStoreProtocol`.
+  - *Isolated Scratch Workspace (`forge.repair.execution.workspace`)*: Engineered `RepairWorkspace` implementing strict directory isolation, target repository immutability verification, workspace path containment checks, and symlink escape defenses.
+  - *SQLite Persistence & Audit Event Ledger (`forge.repair.execution.storage`)*: Added `repair_executions`, `repair_execution_events`, and `patch_artifacts` database tables in SQLite (`database.py`) and implemented `RepairExecutionStore` recording sequential, secret-redacted audit events on every lifecycle state change.
+  - *Dedicated Specification ([`docs/specs/phase-8-m1-repair-execution-architecture.md`](docs/specs/phase-8-m1-repair-execution-architecture.md))*: Complete architectural design, state transition diagrams, actor authorization matrices, safety policies, and storage schemas.
+  - *Verification Suite*: 16 targeted unit tests in `tests/unit/test_phase8_m1_repair_execution_architecture.py` and 1,166 tests across the full pytest suite passing with zero regressions.
+  - *Scope Boundary*: Actual candidate patch generation is deferred to Milestone 3; automated commits, pushes, and PRs are strictly forbidden.
 
 ### Phase 7: Evidence-Driven Investigation Engine (Completed)
 - **Objective & Scope**: Harden the autonomous investigation engine against false positives, test assertion misinterpretations, and unverified vulnerability claims exposed during live repository pilots (specifically reproducing and resolving the FastAPI pilot failure case `run_8120cd03f318` on commit `45cb2252c737906f37544f5ba6bee0295fb81468`).
