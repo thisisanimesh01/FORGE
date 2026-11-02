@@ -16,6 +16,7 @@ from forge.repair.execution.interfaces import RepairEventStoreProtocol
 from forge.repair.execution.models import (
     FailureCategory,
     FailureClassification,
+    IndependentValidationResult,
     PatchArtifact,
     RepairActor,
     RepairExecutionEvent,
@@ -23,6 +24,7 @@ from forge.repair.execution.models import (
     RepairExecutionRecord,
     RepairExecutionState,
     RepairRequest,
+    ValidationOutcome,
     ValidationResult,
     WorkspaceRecord,
 )
@@ -562,6 +564,14 @@ class RepairExecutionStore(RepairEventStoreProtocol):
         if req.patch_artifact_id:
             patch = self.get_patch_artifact(req.patch_artifact_id)
 
+        validation = None
+        if patch:
+            validation = self.get_validation_result_for_patch(patch.artifact_id)
+        if not validation:
+            val_list = self.list_validation_results_for_repair(repair_id)
+            if val_list:
+                validation = val_list[0]
+
         plan = self.get_repair_plan_for_repair(repair_id)
         events = self.get_events(repair_id)
 
@@ -569,6 +579,7 @@ class RepairExecutionStore(RepairEventStoreProtocol):
             request=req,
             plan=plan,
             patch=patch,
+            validation=validation,
             events=events,
             failure=req.failure,
         )
@@ -700,5 +711,130 @@ class RepairExecutionStore(RepairEventStoreProtocol):
 
                 sql = f"UPDATE repair_workspaces SET {', '.join(set_clauses)} WHERE workspace_id = ?"
                 conn.execute(sql, tuple(values))
+        finally:
+            conn.close()
+
+    # -------------------------------------------------------------------------
+    # Independent Validation Result Persistence
+    # -------------------------------------------------------------------------
+
+    def save_validation_result(self, result: IndependentValidationResult) -> None:
+        """Persist an independent patch validation result."""
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO repair_validation_results (
+                        validation_id, patch_artifact_id, repair_id, finding_id,
+                        repository_target, base_commit_sha, workspace_id, patch_sha256,
+                        validated_file_paths_json, validated_hunk_count, lines_added,
+                        lines_deleted, patch_bytes, scope_result_json, integrity_result_json,
+                        semantic_result_json, overall_status, rejection_reasons_json,
+                        policy_version, is_valid, violations_json, checks_passed_json,
+                        validated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(validation_id) DO UPDATE SET
+                        overall_status = excluded.overall_status,
+                        is_valid = excluded.is_valid,
+                        violations_json = excluded.violations_json,
+                        checks_passed_json = excluded.checks_passed_json,
+                        rejection_reasons_json = excluded.rejection_reasons_json
+                    """,
+                    (
+                        result.validation_id,
+                        result.patch_artifact_id,
+                        result.repair_id,
+                        result.finding_id,
+                        result.repository_target,
+                        result.base_commit_sha,
+                        result.workspace_id,
+                        result.patch_sha256,
+                        json.dumps(result.validated_file_paths),
+                        result.validated_hunk_count,
+                        result.lines_added,
+                        result.lines_deleted,
+                        result.patch_bytes,
+                        json.dumps(result.scope_result),
+                        json.dumps(result.integrity_result),
+                        json.dumps(result.semantic_result),
+                        result.overall_status.value if isinstance(result.overall_status, ValidationOutcome) else str(result.overall_status),
+                        json.dumps(result.rejection_reasons),
+                        result.policy_version,
+                        1 if result.is_valid else 0,
+                        json.dumps(result.violations),
+                        json.dumps(result.checks_passed),
+                        result.validated_at.isoformat(),
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def _row_to_validation_result(self, row: sqlite3.Row) -> IndependentValidationResult:
+        return IndependentValidationResult(
+            validation_id=row["validation_id"],
+            patch_artifact_id=row["patch_artifact_id"],
+            repair_id=row["repair_id"],
+            finding_id=row["finding_id"],
+            repository_target=row["repository_target"],
+            base_commit_sha=row["base_commit_sha"],
+            workspace_id=row["workspace_id"],
+            patch_sha256=row["patch_sha256"],
+            validated_file_paths=json.loads(row["validated_file_paths_json"]),
+            validated_hunk_count=row["validated_hunk_count"],
+            lines_added=row["lines_added"],
+            lines_deleted=row["lines_deleted"],
+            patch_bytes=row["patch_bytes"],
+            scope_result=json.loads(row["scope_result_json"]),
+            integrity_result=json.loads(row["integrity_result_json"]),
+            semantic_result=json.loads(row["semantic_result_json"]),
+            overall_status=ValidationOutcome(row["overall_status"]),
+            rejection_reasons=json.loads(row["rejection_reasons_json"]),
+            policy_version=row["policy_version"],
+            is_valid=bool(row["is_valid"]),
+            violations=json.loads(row["violations_json"]),
+            checks_passed=json.loads(row["checks_passed_json"]),
+            validated_at=datetime.fromisoformat(row["validated_at"]),
+        )
+
+    def get_validation_result(self, validation_id: str) -> Optional[IndependentValidationResult]:
+        """Fetch an IndependentValidationResult by validation_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_validation_results WHERE validation_id = ?",
+                (validation_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_validation_result(row)
+        finally:
+            conn.close()
+
+    def get_validation_result_for_patch(self, patch_artifact_id: str) -> Optional[IndependentValidationResult]:
+        """Fetch the latest IndependentValidationResult for a patch_artifact_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_validation_results WHERE patch_artifact_id = ? ORDER BY validated_at DESC LIMIT 1",
+                (patch_artifact_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_validation_result(row)
+        finally:
+            conn.close()
+
+    def list_validation_results_for_repair(self, repair_id: str) -> List[IndependentValidationResult]:
+        """List all IndependentValidationResults for a repair_id ordered by validated_at DESC."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_validation_results WHERE repair_id = ? ORDER BY validated_at DESC",
+                (repair_id,),
+            )
+            return [self._row_to_validation_result(r) for r in cur.fetchall()]
         finally:
             conn.close()

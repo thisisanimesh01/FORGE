@@ -8,15 +8,21 @@ Implements strict validation for RepairRequests and candidate PatchArtifacts:
 """
 
 import ast
+import dataclasses
 from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
+from uuid import uuid4
 
 from forge.repair.execution.failures import (
     CommitMismatchError,
     InsufficientEvidenceError,
+    PatchAdversarialDefectError,
+    PatchIntegrityError,
+    PatchScopeViolationError,
+    PatchSemanticInvariantError,
     PatchValidationError,
     RepairRequestValidationError,
     ScopeContainmentViolationError,
@@ -25,8 +31,10 @@ from forge.repair.execution.failures import (
 )
 from forge.repair.execution.interfaces import PatchValidatorProtocol, RepairWorkspaceProtocol
 from forge.repair.execution.models import (
+    IndependentValidationResult,
     PatchArtifact,
     RepairRequest,
+    ValidationOutcome,
     ValidationResult,
 )
 from forge.repair.execution.policy import RepairExecutionPolicy
@@ -183,6 +191,15 @@ class RepairRequestValidator:
         return finding, evidence_records
 
 
+SECRET_PATTERNS: List[re.Pattern] = [
+    re.compile(r"sk-[a-zA-Z0-9]{20,}"),
+    re.compile(r"ghp_[a-zA-Z0-9]{20,}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"-----BEGIN\s+[A-Z\s]+PRIVATE\s+KEY-----"),
+    re.compile(r"(?:api[_-]?key|secret|password|access[_-]?token)\s*=\s*['\"][a-zA-Z0-9_\-]{8,}['\"]", re.IGNORECASE),
+]
+
+
 class PatchValidator(PatchValidatorProtocol):
     """Validates candidate patch artifacts against boundaries, budgets, syntax, and semantic invariants."""
 
@@ -192,12 +209,12 @@ class PatchValidator(PatchValidatorProtocol):
         request: RepairRequest,
         policy: RepairExecutionPolicy,
         workspace: RepairWorkspaceProtocol,
-    ) -> ValidationResult:
+    ) -> IndependentValidationResult:
         """Verify that candidate patch respects scope, budget, hunk consistency, and syntax rules."""
         violations: List[str] = []
         checks_passed: List[str] = []
 
-        # 1. Content Hash Verification
+        # 1. Content Hash & Cryptographic Chain of Custody Verification
         diff_bytes = patch.diff_content.encode("utf-8")
         computed_digest = hashlib.sha256(diff_bytes).hexdigest()
         if computed_digest != patch.content_hash:
@@ -208,9 +225,75 @@ class PatchValidator(PatchValidatorProtocol):
         else:
             checks_passed.append("content_hash_verified")
 
-        # 2. Diff Syntax & Headers
+        expected_artifact_id = f"patch_{patch.content_hash[:12]}"
+        if not patch.artifact_id.startswith("patch_") or patch.artifact_id != expected_artifact_id:
+            violations.append(
+                f"Artifact identity mismatch: declared '{patch.artifact_id}' does not match expected '{expected_artifact_id}'"
+            )
+        else:
+            checks_passed.append("artifact_identity_verified")
+
+        if patch.repair_id != request.repair_id:
+            violations.append(
+                f"Cross-repair reuse / artifact substitution: patch repair_id '{patch.repair_id}' does not match request '{request.repair_id}'"
+            )
+        else:
+            checks_passed.append("repair_association_verified")
+
+        if patch.finding_id != request.finding_id:
+            violations.append(
+                f"Finding association mismatch: patch finding_id '{patch.finding_id}' does not match request '{request.finding_id}'"
+            )
+        else:
+            checks_passed.append("finding_association_verified")
+
+        clean_patch_commit = patch.base_commit_sha.strip().lower()
+        clean_req_commit = request.base_commit_sha.strip().lower()
+        clean_ws_commit = workspace.base_commit_sha.strip().lower()
+
+        if clean_patch_commit != clean_req_commit:
+            violations.append(
+                f"Base commit mismatch: patch base_commit_sha '{clean_patch_commit}' does not match request '{clean_req_commit}'"
+            )
+        elif clean_patch_commit != clean_ws_commit:
+            violations.append(
+                f"Workspace commit mismatch: patch base_commit_sha '{clean_patch_commit}' does not match workspace '{clean_ws_commit}'"
+            )
+        else:
+            checks_passed.append("base_commit_verified")
+
+        if request.workspace_id and request.workspace_id != workspace.workspace_id:
+            violations.append(
+                f"Workspace identity mismatch: request specifies '{request.workspace_id}', but workspace is '{workspace.workspace_id}'"
+            )
+        else:
+            checks_passed.append("workspace_identity_verified")
+
+        # 2. Diff Syntax, Adversarial Input, and Hunk Integrity
         raw_diff = patch.diff_content
-        file_header_pattern = re.compile(r"^---\s+[a/]*(.*?)\n\+\+\+\s+[b/]*(.*?)$", re.MULTILINE)
+
+        if "\x00" in raw_diff:
+            violations.append("Patch diff contains forbidden null bytes (injection risk)")
+
+        for ch in raw_diff:
+            if ord(ch) < 32 and ch not in ("\n", "\r", "\t"):
+                violations.append(f"Patch diff contains forbidden control character (ASCII {ord(ch)})")
+                break
+
+        if re.search(r"^(new|old|deleted)\s+file\s+mode\s+\d+", raw_diff, re.MULTILINE):
+            violations.append("File mode modification forbidden in patch")
+
+        if re.search(r"^(rename\s+(from|to)|similarity\s+index)", raw_diff, re.MULTILINE):
+            violations.append("File rename/copy operations forbidden in patch")
+
+        for line in raw_diff.splitlines():
+            if line.startswith("+") and not line.startswith("+++"):
+                for sp in SECRET_PATTERNS:
+                    if sp.search(line):
+                        violations.append("Secret or credential detected in patch additions")
+                        break
+
+        file_header_pattern = re.compile(r"^---\s+(\S+)\s*\n\+\+\+\s+(\S+)", re.MULTILINE)
         headers = list(file_header_pattern.finditer(raw_diff))
         if not headers:
             violations.append("Malformed diff: missing file headers ('--- a/...' and '+++ b/...')")
@@ -227,6 +310,35 @@ class PatchValidator(PatchValidatorProtocol):
         else:
             checks_passed.append("hunk_headers_present")
 
+        # Hunk offsets, duplicate, and overlapping checks
+        hunk_spans: List[Tuple[int, int]] = []
+        duplicate_hunk = False
+        overlapping_hunk = False
+        for m in hunks:
+            old_start = int(m.group(1))
+            old_count = int(m.group(2)) if m.group(2) is not None else 1
+            new_start = int(m.group(3))
+            new_count = int(m.group(4)) if m.group(4) is not None else 1
+
+            if old_start <= 0 or new_start <= 0:
+                violations.append(
+                    f"Malformed hunk: invalid non-positive line offset (old_start={old_start}, new_start={new_start})"
+                )
+                break
+
+            span = (old_start, old_start + max(old_count - 1, 0))
+            for s_start, s_end in hunk_spans:
+                if s_start == span[0] and s_end == span[1]:
+                    duplicate_hunk = True
+                elif not (span[1] < s_start or span[0] > s_end):
+                    overlapping_hunk = True
+            hunk_spans.append(span)
+
+        if duplicate_hunk:
+            violations.append("Duplicate hunk detected in patch")
+        if overlapping_hunk:
+            violations.append("Overlapping hunks detected in patch")
+
         # 3. Path Normalization, Scope Containment, and Binary Patches
         touched_files: Set[str] = set()
         for h in headers:
@@ -237,7 +349,7 @@ class PatchValidator(PatchValidatorProtocol):
                 clean_f = raw_f
                 if clean_f.startswith("a/") or clean_f.startswith("b/"):
                     clean_f = clean_f[2:]
-                if clean_f and clean_f != "/dev/null":
+                if clean_f and clean_f not in ("/dev/null", "dev/null"):
                     touched_files.add(Path(clean_f).as_posix())
 
         if "GIT binary patch" in raw_diff or "Binary files" in raw_diff:
@@ -247,9 +359,9 @@ class PatchValidator(PatchValidatorProtocol):
         for h in headers:
             old_f = h.group(1).strip()
             new_f = h.group(2).strip()
-            if old_f in ("/dev/null", "a//dev/null"):
+            if old_f in ("/dev/null", "a//dev/null", "dev/null") or old_f.endswith("/dev/null"):
                 violations.append(f"Unexpected file creation forbidden in '{new_f}'")
-            if new_f in ("/dev/null", "b//dev/null"):
+            if new_f in ("/dev/null", "b//dev/null", "dev/null") or new_f.endswith("/dev/null"):
                 violations.append(f"Unexpected file deletion forbidden in '{old_f}'")
 
         # Check single file scope
@@ -311,6 +423,7 @@ class PatchValidator(PatchValidatorProtocol):
             violations.append("Patch candidate contains no additions or deletions (no-op diff)")
 
         # 5. Hunk Line Markers and Context Matching against Workspace
+        sem_res_dump: Dict[str, Any] = {}
         if not violations and touched_files:
             target_rel = list(touched_files)[0]
             target_disk = workspace.workspace_path / target_rel
@@ -319,6 +432,16 @@ class PatchValidator(PatchValidatorProtocol):
             else:
                 orig_text = target_disk.read_text(encoding="utf-8", errors="replace")
                 orig_lines = orig_text.splitlines(keepends=True)
+
+                # Baseline manifest drift check
+                baseline_manifest = getattr(workspace, "baseline_manifest", None)
+                if isinstance(baseline_manifest, dict) and target_rel in baseline_manifest:
+                    current_file_sha = hashlib.sha256(orig_text.encode("utf-8")).hexdigest()
+                    if current_file_sha != baseline_manifest[target_rel]:
+                        violations.append(
+                            f"Workspace baseline drift detected: file '{target_rel}' hash "
+                            f"{current_file_sha[:12]} does not match baseline {baseline_manifest[target_rel][:12]}"
+                        )
 
                 # Parse and match hunks
                 hunk_body_pattern = re.compile(
@@ -336,7 +459,7 @@ class PatchValidator(PatchValidatorProtocol):
                 # Sort descending for in-memory splicing check
                 hunk_blocks.sort(key=lambda x: x[0], reverse=True)
                 current_lines = list(orig_lines)
-                context_matched = True
+                context_matched = len(violations) == 0
 
                 for old_start, old_len, new_start, new_len, hunk_body in hunk_blocks:
                     body_lines = hunk_body.splitlines()
@@ -413,6 +536,7 @@ class PatchValidator(PatchValidatorProtocol):
                             patched_source=patched_text,
                             file_path=target_rel,
                         )
+                        sem_res_dump = dataclasses.asdict(sem_res)
                         if not sem_res.is_valid:
                             for v in sem_res.violations:
                                 violations.append(f"Semantic invariant violation: {v}")
@@ -420,9 +544,75 @@ class PatchValidator(PatchValidatorProtocol):
                             checks_passed.append("semantic_invariants_preserved")
 
         is_valid = len(violations) == 0
-        return ValidationResult(
+        if is_valid:
+            outcome = ValidationOutcome.ACCEPTED
+        elif any("does not exist in workspace" in v or "inconclusive" in v.lower() for v in violations):
+            outcome = ValidationOutcome.INCONCLUSIVE
+        else:
+            outcome = ValidationOutcome.REJECTED
+
+        scope_result = {
+            "touched_files": sorted(list(touched_files)),
+            "allowed_files": request.allowed_files,
+            "max_files_allowed": policy.max_files_modified,
+            "within_scope": not any(
+                "scope" in v.lower() or "traversal" in v.lower() or "absolute" in v.lower() or "modifies" in v.lower()
+                for v in violations
+            ),
+        }
+        integrity_result = {
+            "patch_sha256": computed_digest,
+            "artifact_hash_match": computed_digest == patch.content_hash,
+            "base_commit_match": request.base_commit_sha == patch.base_commit_sha,
+            "workspace_id_match": workspace.workspace_id == request.workspace_id,
+            "baseline_drift_detected": any("baseline" in v.lower() or "drift" in v.lower() for v in violations),
+        }
+        semantic_result = sem_res_dump
+
+        return IndependentValidationResult(
+            validation_id=f"val_indep_{uuid4().hex[:12]}",
+            patch_artifact_id=patch.artifact_id,
+            repair_id=request.repair_id,
+            finding_id=request.finding_id,
+            repository_target=getattr(request, "repository_target", getattr(request, "target_repo", "")),
+            base_commit_sha=request.base_commit_sha,
+            workspace_id=workspace.workspace_id,
+            patch_sha256=computed_digest,
+            validated_file_paths=sorted(list(touched_files)),
+            validated_hunk_count=len(hunks),
+            lines_added=added_lines,
+            lines_deleted=deleted_lines,
+            patch_bytes=len(diff_bytes),
+            scope_result=scope_result,
+            integrity_result=integrity_result,
+            semantic_result=semantic_result,
+            overall_status=outcome,
+            rejection_reasons=list(violations),
+            policy_version="1.0",
             is_valid=is_valid,
             violations=violations,
             checks_passed=checks_passed,
             validated_at=datetime.now(timezone.utc),
         )
+
+
+class IndependentPatchValidator(PatchValidator):
+    """Independent patch validator enforcing defense-in-depth security invariants."""
+
+    def validate_independent(
+        self,
+        patch: PatchArtifact,
+        request: RepairRequest,
+        workspace: RepairWorkspaceProtocol,
+        policy: RepairExecutionPolicy,
+    ) -> IndependentValidationResult:
+        """Validate patch independently, returning an IndependentValidationResult."""
+        res = self.validate_patch(
+            patch=patch,
+            request=request,
+            workspace=workspace,
+            policy=policy,
+        )
+        if isinstance(res, IndependentValidationResult):
+            return res
+        raise PatchIntegrityError(f"Validator did not return IndependentValidationResult: {type(res)}")

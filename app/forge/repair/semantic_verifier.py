@@ -49,6 +49,14 @@ class SemanticAnalysisResult:
     unreachable_statements: List[UnreachableStatementInfo] = field(default_factory=list)
     bypassed_guards: List[BypassedGuardInfo] = field(default_factory=list)
     docstring_displaced: bool = False
+    weakened_auth: List[str] = field(default_factory=list)
+    removed_exception_handling: List[str] = field(default_factory=list)
+    signature_changes: List[str] = field(default_factory=list)
+    removed_annotations: List[str] = field(default_factory=list)
+    public_api_changes: List[str] = field(default_factory=list)
+    dangerous_imports: List[str] = field(default_factory=list)
+    dynamic_execution_calls: List[str] = field(default_factory=list)
+    file_level_side_effects: List[str] = field(default_factory=list)
     details: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -212,6 +220,189 @@ def _get_function_map(tree: ast.AST) -> Dict[str, Union[ast.FunctionDef, ast.Asy
     return func_map
 
 
+DANGEROUS_MODULES: Set[str] = {
+    "subprocess",
+    "pty",
+    "ctypes",
+    "socket",
+    "pickle",
+    "shutil",
+    "importlib",
+}
+
+
+def _extract_imported_modules(tree: ast.AST) -> Set[str]:
+    """Extract top-level imported module names from an AST."""
+    modules: Set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                modules.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                modules.add(node.module.split(".")[0])
+    return modules
+
+
+def _extract_dynamic_calls(tree: ast.AST) -> List[str]:
+    """Identify dangerous dynamic execution calls in an AST."""
+    calls: List[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in ("eval", "exec", "compile", "__import__"):
+                calls.append(node.func.id)
+            elif isinstance(node.func, ast.Attribute) and node.func.attr in ("system", "popen"):
+                if isinstance(node.func.value, ast.Name) and node.func.value.id == "os":
+                    calls.append(f"os.{node.func.attr}")
+    return calls
+
+
+def _check_signature_and_annotations(
+    orig_func: Union[ast.FunctionDef, ast.AsyncFunctionDef],
+    patched_func: Union[ast.FunctionDef, ast.AsyncFunctionDef],
+    fname_prefix: str,
+) -> Tuple[List[str], List[str]]:
+    """Check for breaking public function signature alterations and removed type annotations."""
+    sig_violations: List[str] = []
+    ann_violations: List[str] = []
+
+    # Check only public functions
+    if not orig_func.name.startswith("_"):
+        orig_args = [a.arg for a in orig_func.args.args]
+        patched_args = [a.arg for a in patched_func.args.args]
+        removed = set(orig_args) - set(patched_args)
+        if removed:
+            sig_violations.append(
+                f"{fname_prefix}Public function '{orig_func.name}' signature altered: parameter(s) {sorted(removed)} removed."
+            )
+
+        if orig_func.returns is not None and patched_func.returns is None:
+            ann_violations.append(
+                f"{fname_prefix}Return type annotation removed from function '{orig_func.name}'."
+            )
+
+        patched_arg_map = {a.arg: a for a in patched_func.args.args}
+        for oa in orig_func.args.args:
+            if oa.annotation is not None:
+                pa = patched_arg_map.get(oa.arg)
+                if pa is not None and pa.annotation is None:
+                    ann_violations.append(
+                        f"{fname_prefix}Type annotation removed from parameter '{oa.arg}' in function '{orig_func.name}'."
+                    )
+
+    return sig_violations, ann_violations
+
+
+def _check_weakened_auth(
+    orig_func: Union[ast.FunctionDef, ast.AsyncFunctionDef],
+    patched_func: Union[ast.FunctionDef, ast.AsyncFunctionDef],
+    fname_prefix: str,
+) -> List[str]:
+    """Detect if conditional validation/auth logic was replaced by a constant True or 1."""
+    violations: List[str] = []
+    for node in ast.walk(patched_func):
+        if isinstance(node, ast.If):
+            if isinstance(node.test, ast.Constant) and node.test.value in (True, 1):
+                violations.append(
+                    f"{fname_prefix}Weakened conditional logic in function '{orig_func.name}': conditional check was replaced with constant True."
+                )
+                break
+    return violations
+
+
+def _check_removed_exception_handling(
+    orig_func: Union[ast.FunctionDef, ast.AsyncFunctionDef],
+    patched_func: Union[ast.FunctionDef, ast.AsyncFunctionDef],
+    fname_prefix: str,
+) -> List[str]:
+    """Check if try/except blocks were stripped or exception handlers silenced with pass."""
+    violations: List[str] = []
+    orig_tries = [n for n in ast.walk(orig_func) if isinstance(n, ast.Try)]
+    patched_tries = [n for n in ast.walk(patched_func) if isinstance(n, ast.Try)]
+
+    if orig_tries and not patched_tries:
+        violations.append(
+            f"{fname_prefix}Exception handling stripped in function '{orig_func.name}': try/except block was removed."
+        )
+
+    for pt in patched_tries:
+        for handler in pt.handlers:
+            if len(handler.body) == 1:
+                stmt = handler.body[0]
+                if isinstance(stmt, ast.Pass) or (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant) and stmt.value.value is Ellipsis):
+                    violations.append(
+                        f"{fname_prefix}Silenced exception handler in function '{orig_func.name}': except handler body is empty/pass."
+                    )
+                    break
+    return violations
+
+
+def _check_public_api_changes(
+    orig_tree: ast.AST,
+    patched_tree: ast.AST,
+    fname_prefix: str,
+) -> List[str]:
+    """Check for unexpected deletion of public classes or functions."""
+    violations: List[str] = []
+    orig_classes = {
+        n.name for n in ast.walk(orig_tree)
+        if isinstance(n, ast.ClassDef) and not n.name.startswith("_")
+    }
+    patched_classes = {
+        n.name for n in ast.walk(patched_tree)
+        if isinstance(n, ast.ClassDef)
+    }
+    deleted_classes = orig_classes - patched_classes
+    if deleted_classes:
+        violations.append(
+            f"{fname_prefix}Public class(es) deleted: {sorted(deleted_classes)}."
+        )
+
+    orig_funcs = {
+        s.name for s in getattr(orig_tree, "body", [])
+        if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)) and not s.name.startswith("_")
+    }
+    patched_funcs = {
+        s.name for s in getattr(patched_tree, "body", [])
+        if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    deleted_funcs = orig_funcs - patched_funcs
+    if deleted_funcs:
+        violations.append(
+            f"{fname_prefix}Top-level public function(s) deleted: {sorted(deleted_funcs)}."
+        )
+
+    return violations
+
+
+def _check_module_level_side_effects(
+    orig_tree: ast.AST,
+    patched_tree: ast.AST,
+    fname_prefix: str,
+) -> List[str]:
+    """Detect new module-level function calls executed upon file import."""
+    violations: List[str] = []
+    orig_calls: Set[str] = set()
+    for s in getattr(orig_tree, "body", []):
+        if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call):
+            try:
+                orig_calls.add(ast.unparse(s).strip())
+            except Exception:
+                pass
+
+    for s in getattr(patched_tree, "body", []):
+        if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call):
+            try:
+                c_str = ast.unparse(s).strip()
+                if c_str not in orig_calls:
+                    violations.append(
+                        f"{fname_prefix}Unexpected module-level execution side-effect introduced: '{c_str}'."
+                    )
+            except Exception:
+                pass
+    return violations
+
+
 def analyze_python_ast_semantics(
     original_source: str,
     patched_source: str,
@@ -273,6 +464,14 @@ def analyze_python_ast_semantics(
     patched_funcs = _get_function_map(patched_tree)
     bypassed_guards: List[BypassedGuardInfo] = []
     docstring_displaced = False
+    weakened_auth: List[str] = []
+    removed_exception_handling: List[str] = []
+    signature_changes: List[str] = []
+    removed_annotations: List[str] = []
+    public_api_changes: List[str] = []
+    dangerous_imports: List[str] = []
+    dynamic_execution_calls: List[str] = []
+    file_level_side_effects: List[str] = []
 
     for func_name, orig_func in orig_funcs.items():
         if func_name not in patched_funcs:
@@ -379,6 +578,50 @@ def analyze_python_ast_semantics(
                             f"'{og.test_str}' (originally line {og.lineno}) was removed without equivalent safeguard."
                         )
 
+        # 2c. Signature alterations & removed type annotations
+        sig_v, ann_v = _check_signature_and_annotations(orig_func, patched_func, fname_prefix)
+        violations.extend(sig_v)
+        violations.extend(ann_v)
+        signature_changes.extend(sig_v)
+        removed_annotations.extend(ann_v)
+
+        # 2d. Weakened authorization/conditional checks
+        auth_v = _check_weakened_auth(orig_func, patched_func, fname_prefix)
+        violations.extend(auth_v)
+        weakened_auth.extend(auth_v)
+
+        # 2e. Removed exception handling or silenced handlers
+        ex_v = _check_removed_exception_handling(orig_func, patched_func, fname_prefix)
+        violations.extend(ex_v)
+        removed_exception_handling.extend(ex_v)
+
+    # 3. Public API changes (deleted classes or top-level functions)
+    pub_v = _check_public_api_changes(orig_tree, patched_tree, fname_prefix)
+    violations.extend(pub_v)
+    public_api_changes.extend(pub_v)
+
+    # 4. Dangerous new imports
+    orig_mods = _extract_imported_modules(orig_tree)
+    patched_mods = _extract_imported_modules(patched_tree)
+    for dm in sorted(DANGEROUS_MODULES.intersection(patched_mods - orig_mods)):
+        msg = f"{fname_prefix}Unexpected dangerous import introduced: '{dm}'."
+        violations.append(msg)
+        dangerous_imports.append(msg)
+
+    # 5. Dynamic execution calls
+    orig_dyn = _extract_dynamic_calls(orig_tree)
+    patched_dyn = _extract_dynamic_calls(patched_tree)
+    new_dyn = [c for c in patched_dyn if c not in orig_dyn]
+    for c in new_dyn:
+        msg = f"{fname_prefix}Suspicious dynamic execution call introduced: '{c}'."
+        violations.append(msg)
+        dynamic_execution_calls.append(msg)
+
+    # 6. Module-level side effects
+    side_v = _check_module_level_side_effects(orig_tree, patched_tree, fname_prefix)
+    violations.extend(side_v)
+    file_level_side_effects.extend(side_v)
+
     is_valid = len(violations) == 0
     return SemanticAnalysisResult(
         is_valid=is_valid,
@@ -386,9 +629,25 @@ def analyze_python_ast_semantics(
         unreachable_statements=new_unreachable,
         bypassed_guards=bypassed_guards,
         docstring_displaced=docstring_displaced,
+        weakened_auth=weakened_auth,
+        removed_exception_handling=removed_exception_handling,
+        signature_changes=signature_changes,
+        removed_annotations=removed_annotations,
+        public_api_changes=public_api_changes,
+        dangerous_imports=dangerous_imports,
+        dynamic_execution_calls=dynamic_execution_calls,
+        file_level_side_effects=file_level_side_effects,
         details={
             "new_unreachable_count": len(new_unreachable),
             "bypassed_guards_count": len(bypassed_guards),
             "docstring_displaced": docstring_displaced,
+            "weakened_auth_count": len(weakened_auth),
+            "removed_exception_handling_count": len(removed_exception_handling),
+            "signature_changes_count": len(signature_changes),
+            "removed_annotations_count": len(removed_annotations),
+            "public_api_changes_count": len(public_api_changes),
+            "dangerous_imports_count": len(dangerous_imports),
+            "dynamic_execution_calls_count": len(dynamic_execution_calls),
+            "file_level_side_effects_count": len(file_level_side_effects),
         },
     )

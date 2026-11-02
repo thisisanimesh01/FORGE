@@ -353,6 +353,34 @@ CREATE TABLE IF NOT EXISTS repair_execution_plans (
     FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS repair_validation_results (
+    validation_id TEXT PRIMARY KEY,
+    patch_artifact_id TEXT NOT NULL,
+    repair_id TEXT NOT NULL,
+    finding_id TEXT NOT NULL,
+    repository_target TEXT NOT NULL,
+    base_commit_sha TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    patch_sha256 TEXT NOT NULL,
+    validated_file_paths_json TEXT NOT NULL DEFAULT '[]',
+    validated_hunk_count INTEGER NOT NULL DEFAULT 0,
+    lines_added INTEGER NOT NULL DEFAULT 0,
+    lines_deleted INTEGER NOT NULL DEFAULT 0,
+    patch_bytes INTEGER NOT NULL DEFAULT 0,
+    scope_result_json TEXT NOT NULL DEFAULT '{}',
+    integrity_result_json TEXT NOT NULL DEFAULT '{}',
+    semantic_result_json TEXT NOT NULL DEFAULT '{}',
+    overall_status TEXT NOT NULL,
+    rejection_reasons_json TEXT NOT NULL DEFAULT '[]',
+    policy_version TEXT NOT NULL DEFAULT '1.0',
+    is_valid INTEGER NOT NULL DEFAULT 0,
+    violations_json TEXT NOT NULL DEFAULT '[]',
+    checks_passed_json TEXT NOT NULL DEFAULT '[]',
+    validated_at TEXT NOT NULL,
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE,
+    FOREIGN KEY(patch_artifact_id) REFERENCES patch_artifacts(artifact_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
@@ -384,6 +412,8 @@ CREATE INDEX IF NOT EXISTS idx_patch_artifacts_repair ON patch_artifacts(repair_
 CREATE INDEX IF NOT EXISTS idx_patch_artifacts_finding ON patch_artifacts(finding_id);
 CREATE INDEX IF NOT EXISTS idx_repair_workspaces_repair ON repair_workspaces(repair_id);
 CREATE INDEX IF NOT EXISTS idx_repair_exec_plans_repair ON repair_execution_plans(repair_id);
+CREATE INDEX IF NOT EXISTS idx_repair_val_results_repair ON repair_validation_results(repair_id);
+CREATE INDEX IF NOT EXISTS idx_repair_val_results_patch ON repair_validation_results(patch_artifact_id);
 """
 
 

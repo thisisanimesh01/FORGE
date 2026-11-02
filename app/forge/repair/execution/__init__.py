@@ -10,8 +10,12 @@ from forge.repair.execution.coordinator import RepairExecutionCoordinator
 from forge.repair.execution.failures import (
     CommitMismatchError,
     InsufficientEvidenceError,
+    PatchAdversarialDefectError,
     PatchApplicationError,
     PatchGenerationError,
+    PatchIntegrityError,
+    PatchScopeViolationError,
+    PatchSemanticInvariantError,
     PatchValidationError,
     RepairRequestValidationError,
     RepositoryAcquisitionError,
@@ -42,13 +46,16 @@ from forge.repair.execution.models import (
     ExecutionTestResult,
     FailureCategory,
     FailureClassification,
+    IndependentValidationResult,
     PatchArtifact,
     RepairActor,
     RepairExecutionEvent,
     RepairExecutionPlan,
     RepairExecutionRecord,
+    RepairExecutionRequest,
     RepairExecutionState,
     RepairRequest,
+    ValidationOutcome,
     ValidationResult,
     WorkspaceRecord,
 )
@@ -82,6 +89,7 @@ from forge.repair.execution.storage import (
     RepairExecutionStoreError,
 )
 from forge.repair.execution.validator import (
+    IndependentPatchValidator,
     PatchValidator,
     RepairRequestValidator,
 )
@@ -95,9 +103,12 @@ __all__ = [
     "FailureClassification",
     "ExecutionTestResult",
     "ValidationResult",
+    "IndependentValidationResult",
+    "ValidationOutcome",
     "PatchArtifact",
     "RepairExecutionPlan",
     "RepairRequest",
+    "RepairExecutionRequest",
     "RepairExecutionEvent",
     "RepairExecutionRecord",
     "WorkspaceRecord",
@@ -142,6 +153,10 @@ __all__ = [
     "StaleBaseRevisionError",
     "PatchGenerationError",
     "PatchValidationError",
+    "PatchIntegrityError",
+    "PatchScopeViolationError",
+    "PatchSemanticInvariantError",
+    "PatchAdversarialDefectError",
     "PatchApplicationError",
     # Interfaces
     "RepairWorkspaceProtocol",
@@ -155,9 +170,10 @@ __all__ = [
     "RepairWorkspaceManager",
     "RepairExecutionStore",
     "RepairExecutionStoreError",
-    # M3 Candidate Patch Generation Components
+    # M3 & M4 Candidate Patch Generation & Validation Components
     "RepairRequestValidator",
     "PatchValidator",
+    "IndependentPatchValidator",
     "RepairExecutionPlanner",
     "RepairPatchGenerator",
     "SafePatchApplier",

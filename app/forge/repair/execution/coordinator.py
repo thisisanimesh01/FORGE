@@ -8,12 +8,17 @@ diff validation, safe workspace application, and guarded state transitions.
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import uuid
 
 from forge.repair.execution.applier import SafePatchApplier
 from forge.repair.execution.failures import (
     InsufficientEvidenceError,
+    PatchAdversarialDefectError,
     PatchApplicationError,
     PatchGenerationError,
+    PatchIntegrityError,
+    PatchScopeViolationError,
+    PatchSemanticInvariantError,
     PatchValidationError,
     RepairPolicyViolationError,
     RepairRequestValidationError,
@@ -26,6 +31,7 @@ from forge.repair.execution.interfaces import RepairWorkspaceProtocol
 from forge.repair.execution.models import (
     FailureCategory,
     FailureClassification,
+    IndependentValidationResult,
     PatchArtifact,
     RepairActor,
     RepairExecutionEvent,
@@ -219,9 +225,29 @@ class RepairExecutionCoordinator:
                 workspace=workspace,
             )
 
+            if isinstance(patch_val_result, IndependentValidationResult):
+                self.exec_store.save_validation_result(patch_val_result)
+
             if not patch_val_result.is_valid:
+                v_str = " ".join(patch_val_result.violations).lower()
+                if any(k in v_str for k in ("content hash", "artifact identity", "base commit", "workspace identity", "cross-repair", "baseline", "drift")):
+                    fail_cat = FailureCategory.INTEGRITY_ERROR
+                    exc_cls = PatchIntegrityError
+                elif any(k in v_str for k in ("null byte", "control character", "secret", "duplicate hunk", "overlapping hunk", "file mode", "rename", "binary patches")):
+                    fail_cat = FailureCategory.ADVERSARIAL_DEFECT
+                    exc_cls = PatchAdversarialDefectError
+                elif any(k in v_str for k in ("semantic invariant", "auth", "syntax", "exception handling", "dangerous", "unreachable", "guard")):
+                    fail_cat = FailureCategory.SEMANTIC_VIOLATION
+                    exc_cls = PatchSemanticInvariantError
+                elif any(k in v_str for k in ("scope", "traversal", "absolute", "protected", "modifies")):
+                    fail_cat = FailureCategory.SCOPE_VIOLATION
+                    exc_cls = PatchScopeViolationError
+                else:
+                    fail_cat = FailureCategory.SYNTAX_ERROR
+                    exc_cls = PatchValidationError
+
                 fail = FailureClassification(
-                    category=FailureCategory.SYNTAX_ERROR,
+                    category=fail_cat,
                     message=f"Patch validation failed: {patch_val_result.violations}",
                     details={"violations": patch_val_result.violations},
                 )
@@ -231,10 +257,30 @@ class RepairExecutionCoordinator:
                     actor=RepairActor.ORCHESTRATOR,
                     context={"failure": fail, "error_message": str(patch_val_result.violations)},
                 )
-                raise PatchValidationError(
+                raise exc_cls(
                     f"Candidate patch validation failed: {patch_val_result.violations}",
                     details={"violations": patch_val_result.violations},
                 )
+
+            # Record independent validation audit event
+            val_id = getattr(patch_val_result, "validation_id", f"val_{patch.artifact_id[:8]}")
+            self.exec_store.record_event(
+                RepairExecutionEvent(
+                    event_id=f"ree_{uuid.uuid4().hex[:12]}",
+                    repair_id=request.repair_id,
+                    sequence=1,
+                    from_state=RepairExecutionState.PATCH_VALIDATING,
+                    to_state=RepairExecutionState.PATCH_VALIDATING,
+                    actor=RepairActor.VALIDATOR,
+                    payload={
+                        "action": "patch_independently_validated",
+                        "validation_id": val_id,
+                        "patch_id": patch.artifact_id,
+                        "overall_status": getattr(patch_val_result, "overall_status", "ACCEPTED"),
+                        "checks_passed": patch_val_result.checks_passed,
+                    },
+                )
+            )
 
         except Exception as p_val_err:
             if not isinstance(p_val_err, PatchValidationError):

@@ -82,5 +82,21 @@ class PatchValidationError(WorkspaceExecutionError):
     """Raised when a candidate patch violates syntax, scope, budget, AST, or semantic invariants."""
 
 
+class PatchIntegrityError(PatchValidationError):
+    """Raised when patch digest, artifact identity, or cryptographic chain of custody verification fails."""
+
+
+class PatchScopeViolationError(PatchValidationError):
+    """Raised when patch touches unauthorized files, protected paths, or exceeds budget constraints."""
+
+
+class PatchSemanticInvariantError(PatchValidationError):
+    """Raised when patch breaks semantic invariants (e.g. stripped guards, dead code, auth bypass)."""
+
+
+class PatchAdversarialDefectError(PatchValidationError):
+    """Raised when patch contains adversarial content (null bytes, duplicate/overlapping hunks, mode tampering, secrets)."""
+
+
 class PatchApplicationError(WorkspaceExecutionError):
     """Raised when a candidate patch fails to apply cleanly to the workspace files."""

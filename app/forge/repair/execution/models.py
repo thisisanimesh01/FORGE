@@ -55,6 +55,17 @@ class FailureCategory(str, Enum):
     TIMEOUT = "timeout"
     WORKSPACE_ERROR = "workspace_error"
     INTERNAL_ERROR = "internal_error"
+    INTEGRITY_ERROR = "integrity_error"
+    ADVERSARIAL_DEFECT = "adversarial_defect"
+    SEMANTIC_VIOLATION = "semantic_violation"
+
+
+class ValidationOutcome(str, Enum):
+    """Explicit outcomes for independent patch validation."""
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+    INCONCLUSIVE = "INCONCLUSIVE"
+    ERROR = "ERROR"
 
 
 # =============================================================================
@@ -91,6 +102,31 @@ class ValidationResult(BaseModel):
     violations: List[str] = Field(default_factory=list, description="List of policy or safety violations")
     checks_passed: List[str] = Field(default_factory=list, description="List of validation checks that passed")
     validated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Timestamp of validation")
+
+
+class IndependentValidationResult(ValidationResult):
+    """Defense-in-depth independent validation result for a candidate patch artifact."""
+    model_config = ConfigDict(frozen=True)
+
+    validation_id: str = Field(description="Deterministic validation identifier (val_indep_...)")
+    patch_artifact_id: str = Field(description="Target patch artifact ID")
+    repair_id: str = Field(description="Associated repair request identifier")
+    finding_id: str = Field(description="Associated finding identifier")
+    repository_target: str = Field(description="Target repository identifier or URL")
+    base_commit_sha: str = Field(description="Pinned repository base commit revision")
+    workspace_id: str = Field(description="Validated workspace identifier")
+    patch_sha256: str = Field(description="SHA-256 digest of exact validated patch bytes")
+    validated_file_paths: List[str] = Field(default_factory=list, description="Files modified by patch")
+    validated_hunk_count: int = Field(default=0, ge=0, description="Hunks count verified from raw diff")
+    lines_added: int = Field(default=0, ge=0, description="Recalculated added lines count")
+    lines_deleted: int = Field(default=0, ge=0, description="Recalculated deleted lines count")
+    patch_bytes: int = Field(default=0, ge=0, description="Raw patch byte size")
+    scope_result: Dict[str, Any] = Field(default_factory=dict, description="Detailed scope validation findings")
+    integrity_result: Dict[str, Any] = Field(default_factory=dict, description="Detailed cryptographic & baseline integrity findings")
+    semantic_result: Dict[str, Any] = Field(default_factory=dict, description="Detailed AST & semantic analysis findings")
+    overall_status: ValidationOutcome = Field(default=ValidationOutcome.REJECTED, description="Final independent validation outcome")
+    rejection_reasons: List[str] = Field(default_factory=list, description="Concrete rejection rationales if not accepted")
+    policy_version: str = Field(default="1.0", description="Security policy version applied")
 
 
 class PatchArtifact(BaseModel):
@@ -279,3 +315,7 @@ class WorkspaceRecord(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Metadata such as baseline hash count, sandbox mode")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Creation timestamp")
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Last update timestamp")
+
+
+# Compatibility alias
+RepairExecutionRequest = RepairRequest

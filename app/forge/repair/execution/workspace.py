@@ -124,6 +124,10 @@ class RepairWorkspace:
     def baseline_hashes(self) -> Dict[str, str]:
         return dict(self._baseline_hashes)
 
+    @property
+    def baseline_manifest(self) -> Dict[str, str]:
+        return dict(self._baseline_hashes)
+
     def prepare(self) -> None:
         """Create the isolated scratch workspace, verify git commit, and capture baseline hashes."""
         if self._cleaned:
