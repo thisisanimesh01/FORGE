@@ -14,9 +14,14 @@ import uuid
 from forge.config import redact_secrets
 from forge.repair.execution.interfaces import RepairEventStoreProtocol
 from forge.repair.execution.models import (
+    ApprovalBinding,
+    ApprovalDecisionRecord,
+    ApprovalState,
+    AuthorizedAction,
     FailureCategory,
     FailureClassification,
     IndependentValidationResult,
+    OperatorDecisionType,
     PatchArtifact,
     RepairActor,
     RepairExecutionEvent,
@@ -24,6 +29,7 @@ from forge.repair.execution.models import (
     RepairExecutionRecord,
     RepairExecutionState,
     RepairRequest,
+    ReviewDossier,
     SelectedTest,
     TestComparisonResult,
     TestExecutionRecord,
@@ -72,6 +78,8 @@ class RepairExecutionStore(RepairEventStoreProtocol):
                         failure_json, created_at, updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(repair_id) DO UPDATE SET
+                        target_repo = excluded.target_repo,
+                        base_commit_sha = excluded.base_commit_sha,
                         state = excluded.state,
                         workspace_id = excluded.workspace_id,
                         patch_artifact_id = excluded.patch_artifact_id,
@@ -332,7 +340,15 @@ class RepairExecutionStore(RepairEventStoreProtocol):
                 diff_content, content_hash, lines_added, lines_deleted, hunks_count,
                 affected_paths_json, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(artifact_id) DO NOTHING
+            ON CONFLICT(artifact_id) DO UPDATE SET
+                base_commit_sha = excluded.base_commit_sha,
+                target_file = excluded.target_file,
+                diff_content = excluded.diff_content,
+                content_hash = excluded.content_hash,
+                lines_added = excluded.lines_added,
+                lines_deleted = excluded.lines_deleted,
+                hunks_count = excluded.hunks_count,
+                affected_paths_json = excluded.affected_paths_json
             """,
             (
                 patch.artifact_id,
@@ -746,11 +762,25 @@ class RepairExecutionStore(RepairEventStoreProtocol):
                         validated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(validation_id) DO UPDATE SET
+                        repository_target = excluded.repository_target,
+                        base_commit_sha = excluded.base_commit_sha,
+                        workspace_id = excluded.workspace_id,
+                        patch_sha256 = excluded.patch_sha256,
+                        validated_file_paths_json = excluded.validated_file_paths_json,
+                        validated_hunk_count = excluded.validated_hunk_count,
+                        lines_added = excluded.lines_added,
+                        lines_deleted = excluded.lines_deleted,
+                        patch_bytes = excluded.patch_bytes,
+                        scope_result_json = excluded.scope_result_json,
+                        integrity_result_json = excluded.integrity_result_json,
+                        semantic_result_json = excluded.semantic_result_json,
                         overall_status = excluded.overall_status,
+                        rejection_reasons_json = excluded.rejection_reasons_json,
+                        policy_version = excluded.policy_version,
                         is_valid = excluded.is_valid,
                         violations_json = excluded.violations_json,
                         checks_passed_json = excluded.checks_passed_json,
-                        rejection_reasons_json = excluded.rejection_reasons_json
+                        validated_at = excluded.validated_at
                     """,
                     (
                         result.validation_id,
@@ -982,6 +1012,17 @@ class RepairExecutionStore(RepairEventStoreProtocol):
                         started_at, completed_at, duration_ms
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(verification_id) DO UPDATE SET
+                        patch_artifact_id = excluded.patch_artifact_id,
+                        validation_id = excluded.validation_id,
+                        repository_target = excluded.repository_target,
+                        base_commit_sha = excluded.base_commit_sha,
+                        workspace_id = excluded.workspace_id,
+                        baseline_workspace_id = excluded.baseline_workspace_id,
+                        patch_sha256 = excluded.patch_sha256,
+                        plan_json = excluded.plan_json,
+                        baseline_summary_json = excluded.baseline_summary_json,
+                        patched_summary_json = excluded.patched_summary_json,
+                        regression_analysis_json = excluded.regression_analysis_json,
                         overall_outcome = excluded.overall_outcome,
                         failure_category = excluded.failure_category,
                         failure_message = excluded.failure_message,
@@ -1101,5 +1142,189 @@ class RepairExecutionStore(RepairEventStoreProtocol):
                 (repair_id,),
             )
             return [self._row_to_verification_run(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    # -------------------------------------------------------------------------
+    # Milestone 6: Review Dossier Persistence
+    # -------------------------------------------------------------------------
+
+    def save_review_dossier(self, dossier: ReviewDossier) -> None:
+        """Persist or insert a ReviewDossier."""
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO repair_review_dossiers (
+                        dossier_id, repair_id, dossier_version, patch_artifact_id,
+                        patch_sha256, dossier_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(dossier_id) DO UPDATE SET
+                        dossier_json = excluded.dossier_json
+                    """,
+                    (
+                        dossier.dossier_id,
+                        dossier.repair_id,
+                        dossier.dossier_version,
+                        dossier.patch_artifact_id,
+                        dossier.patch_sha256,
+                        json.dumps(dossier.model_dump(mode="json")),
+                        dossier.generated_at.isoformat(),
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def _row_to_review_dossier(self, row: sqlite3.Row) -> ReviewDossier:
+        dossier_dict = json.loads(row["dossier_json"])
+        return ReviewDossier.model_validate(dossier_dict)
+
+    def get_review_dossier(self, dossier_id: str) -> Optional[ReviewDossier]:
+        """Fetch a ReviewDossier by dossier_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_review_dossiers WHERE dossier_id = ?",
+                (dossier_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_review_dossier(row)
+        finally:
+            conn.close()
+
+    def get_latest_review_dossier_for_repair(self, repair_id: str) -> Optional[ReviewDossier]:
+        """Fetch the latest ReviewDossier for a repair_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_review_dossiers WHERE repair_id = ? ORDER BY created_at DESC LIMIT 1",
+                (repair_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_review_dossier(row)
+        finally:
+            conn.close()
+
+    def list_review_dossiers_for_repair(self, repair_id: str) -> List[ReviewDossier]:
+        """List all ReviewDossiers for a repair_id ordered by created_at DESC."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_review_dossiers WHERE repair_id = ? ORDER BY created_at DESC",
+                (repair_id,),
+            )
+            return [self._row_to_review_dossier(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+    # -------------------------------------------------------------------------
+    # Milestone 6: Approval Decision Persistence
+    # -------------------------------------------------------------------------
+
+    def save_approval_decision(self, decision: ApprovalDecisionRecord) -> None:
+        """Persist or insert an immutable ApprovalDecisionRecord."""
+        conn = self._conn()
+        try:
+            with conn:
+                clean_reason = redact_secrets(decision.reason)
+                clean_feedback = redact_secrets(decision.feedback) if decision.feedback else None
+                conn.execute(
+                    """
+                    INSERT INTO repair_approval_decisions (
+                        decision_id, repair_id, state, decision, authorized_action,
+                        actor, reason, feedback, binding_json, expires_at, created_at,
+                        invalidation_reason, invalidation_timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(decision_id) DO UPDATE SET
+                        state = excluded.state,
+                        invalidation_reason = excluded.invalidation_reason,
+                        invalidation_timestamp = excluded.invalidation_timestamp
+                    """,
+                    (
+                        decision.decision_id,
+                        decision.repair_id,
+                        decision.state.value,
+                        decision.decision.value,
+                        decision.authorized_action.value if decision.authorized_action else None,
+                        decision.actor,
+                        clean_reason,
+                        clean_feedback,
+                        json.dumps(decision.binding.model_dump(mode="json")),
+                        decision.expires_at.isoformat() if decision.expires_at else None,
+                        decision.created_at.isoformat(),
+                        decision.invalidation_reason,
+                        decision.invalidation_timestamp.isoformat() if decision.invalidation_timestamp else None,
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def _row_to_approval_decision(self, row: sqlite3.Row) -> ApprovalDecisionRecord:
+        binding_dict = json.loads(row["binding_json"])
+        binding = ApprovalBinding.model_validate(binding_dict)
+        auth_action = AuthorizedAction(row["authorized_action"]) if row["authorized_action"] else None
+        expires_at = datetime.fromisoformat(row["expires_at"]) if row["expires_at"] else None
+        inval_ts = datetime.fromisoformat(row["invalidation_timestamp"]) if row["invalidation_timestamp"] else None
+
+        return ApprovalDecisionRecord(
+            decision_id=row["decision_id"],
+            repair_id=row["repair_id"],
+            binding=binding,
+            state=ApprovalState(row["state"]),
+            decision=OperatorDecisionType(row["decision"]),
+            authorized_action=auth_action,
+            actor=row["actor"],
+            reason=row["reason"],
+            feedback=row["feedback"],
+            expires_at=expires_at,
+            created_at=datetime.fromisoformat(row["created_at"]),
+            invalidation_reason=row["invalidation_reason"],
+            invalidation_timestamp=inval_ts,
+        )
+
+    def get_approval_decision(self, decision_id: str) -> Optional[ApprovalDecisionRecord]:
+        """Fetch an ApprovalDecisionRecord by decision_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_approval_decisions WHERE decision_id = ?",
+                (decision_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_approval_decision(row)
+        finally:
+            conn.close()
+
+    def get_latest_approval_decision_for_repair(self, repair_id: str) -> Optional[ApprovalDecisionRecord]:
+        """Fetch the latest ApprovalDecisionRecord for a repair_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_approval_decisions WHERE repair_id = ? ORDER BY created_at DESC LIMIT 1",
+                (repair_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_approval_decision(row)
+        finally:
+            conn.close()
+
+    def list_approval_decisions_for_repair(self, repair_id: str) -> List[ApprovalDecisionRecord]:
+        """List all ApprovalDecisionRecords for a repair_id ordered by created_at DESC."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_approval_decisions WHERE repair_id = ? ORDER BY created_at DESC",
+                (repair_id,),
+            )
+            return [self._row_to_approval_decision(r) for r in cur.fetchall()]
         finally:
             conn.close()

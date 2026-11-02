@@ -109,3 +109,39 @@ class VerificationPreconditionError(WorkspaceExecutionError):
 
 class VerificationExecutionError(WorkspaceExecutionError):
     """Raised when test execution or verification analysis fails unrecoverably."""
+
+
+# =============================================================================
+# Milestone 6: Operator Review & Approval Failures
+# =============================================================================
+
+class ApprovalError(WorkspaceExecutionError):
+    """Base exception for operator review, approval, and authorization issues."""
+
+
+class ApprovalPreconditionError(ApprovalError):
+    """Raised when preconditions for review or approval are not satisfied."""
+
+
+class ArtifactBindingMismatchError(ApprovalError):
+    """Raised when current artifact or workspace state differs from the bound approval record."""
+
+
+class InvalidApprovalTransitionError(ApprovalError):
+    """Raised when an illegal transition in the approval lifecycle is attempted."""
+
+
+class DuplicateDecisionError(ApprovalError):
+    """Raised when attempting to submit a duplicate or conflicting decision on an existing record."""
+
+
+class ApprovalExpiredError(ApprovalError):
+    """Raised when an operation is attempted on an expired approval decision."""
+
+
+class ApprovalInvalidatedError(ApprovalError):
+    """Raised when an operation is attempted on an invalidated approval decision."""
+
+
+class UnauthorizedOperatorError(ApprovalError):
+    """Raised when operator identity is missing, empty, or fails authorization policy."""

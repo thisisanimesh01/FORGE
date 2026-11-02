@@ -2153,6 +2153,233 @@ def repair_acceptance_alias(
 
 
 # =============================================================================
+# Milestone 6: Operator Review & Approval CLI Commands
+# =============================================================================
+
+@repair_app.command(name="review")
+def repair_review(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to inspect and review"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output raw review dossier as JSON"),
+) -> None:
+    """Generate and inspect the comprehensive Review Dossier for a verified repair."""
+    from forge.repair.execution.coordinator import RepairExecutionCoordinator
+    from forge.repair.execution.dossier import ReviewDossierBuilder
+    from forge.repair.execution.storage import RepairExecutionStore
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+    forge_store = ForgeStore(db_path=settings.db_path)
+    coordinator = RepairExecutionCoordinator(execution_store=exec_store, forge_store=forge_store)
+
+    try:
+        dossier = coordinator.prepare_review_dossier(repair_id=repair_id)
+    except Exception as e:
+        typer.secho(f"Error generating review dossier: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if as_json:
+        typer.echo(json.dumps(dossier.model_dump(mode="json"), indent=2))
+    else:
+        typer.echo(ReviewDossierBuilder.render_markdown(dossier))
+
+
+@repair_app.command(name="approve")
+def repair_approve(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to approve"),
+    actor: str = typer.Option(..., "--actor", "-a", prompt="Operator Identity (e.g. username/email)", help="Authorized operator identity"),
+    reason: str = typer.Option(..., "--reason", "-r", prompt="Approval Justification", help="Mandatory justification for approval"),
+    action: str = typer.Option("export_patch", "--action", help="Authorized downstream action: export_patch, stage_for_pr, manual_integration"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip interactive confirmation prompt"),
+) -> None:
+    """Explicitly authorize a verified candidate patch artifact for downstream publication."""
+    from forge.repair.execution.coordinator import RepairExecutionCoordinator
+    from forge.repair.execution.failures import ApprovalError
+    from forge.repair.execution.models import AuthorizedAction, OperatorDecisionType
+    from forge.repair.execution.storage import RepairExecutionStore
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+    forge_store = ForgeStore(db_path=settings.db_path)
+    coordinator = RepairExecutionCoordinator(execution_store=exec_store, forge_store=forge_store)
+
+    # Validate action choice
+    try:
+        auth_action = AuthorizedAction(action.lower().strip())
+    except ValueError:
+        valid_actions = ", ".join([a.value for a in AuthorizedAction])
+        typer.secho(f"Invalid authorized action '{action}'. Valid choices are: {valid_actions}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        dossier = coordinator.prepare_review_dossier(repair_id=repair_id)
+    except Exception as e:
+        typer.secho(f"Cannot inspect repair for approval: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo("==================================================")
+    typer.echo(f"  FORGE Operator Approval Gate: Repair {repair_id}")
+    typer.echo("==================================================")
+    typer.echo(f"  Finding:          {dossier.finding_id} — {dossier.finding_title}")
+    typer.echo(f"  Patch Artifact:   {dossier.patch_artifact_id}")
+    typer.echo(f"  Patch SHA-256:    {dossier.patch_sha256}")
+    typer.echo(f"  Target File(s):   {', '.join(dossier.target_files)}")
+    typer.echo(f"  Validation (M4):  {dossier.validation_outcome}")
+    typer.echo(f"  Verification (M5):{dossier.verification_outcome}")
+    typer.echo(f"  Authorized Action:{auth_action.value}")
+    typer.echo(f"  Operator:         {actor.strip()}")
+    typer.echo("--------------------------------------------------")
+
+    if not yes:
+        confirm = typer.confirm(
+            f"Do you explicitly authorize candidate patch [{dossier.patch_sha256[:12]}] for action '{auth_action.value}'?",
+            default=False,
+        )
+        if not confirm:
+            typer.secho("Approval cancelled by operator. No decision recorded.", fg=typer.colors.YELLOW)
+            raise typer.Exit(code=0)
+
+    try:
+        decision, _ = coordinator.process_operator_decision(
+            repair_id=repair_id,
+            decision=OperatorDecisionType.APPROVE,
+            actor=actor,
+            reason=reason,
+            authorized_action=auth_action,
+        )
+    except ApprovalError as e:
+        typer.secho(f"Approval rejected by policy: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"Unexpected error during approval: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    typer.secho(
+        f"[OK] Approval recorded successfully: Decision ID {decision.decision_id} (State: {decision.state.value})",
+        fg=typer.colors.GREEN,
+    )
+    typer.echo(f"     Authorized Action: {auth_action.value}")
+    typer.echo(f"     Bound Patch SHA-256: {decision.binding.patch_sha256}")
+    typer.echo(f"     Note: Approval authorizes downstream action. No automatic Git commit or PR was performed.")
+
+
+@repair_app.command(name="reject")
+def repair_reject(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to reject"),
+    actor: str = typer.Option(..., "--actor", "-a", prompt="Operator Identity (e.g. username/email)", help="Authorized operator identity"),
+    reason: str = typer.Option(..., "--reason", "-r", prompt="Rejection Reason", help="Mandatory rejection rationale"),
+) -> None:
+    """Explicitly reject a candidate repair and record immutable rejection history."""
+    from forge.repair.execution.coordinator import RepairExecutionCoordinator
+    from forge.repair.execution.failures import ApprovalError
+    from forge.repair.execution.models import OperatorDecisionType
+    from forge.repair.execution.storage import RepairExecutionStore
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+    forge_store = ForgeStore(db_path=settings.db_path)
+    coordinator = RepairExecutionCoordinator(execution_store=exec_store, forge_store=forge_store)
+
+    try:
+        decision, _ = coordinator.process_operator_decision(
+            repair_id=repair_id,
+            decision=OperatorDecisionType.REJECT,
+            actor=actor,
+            reason=reason,
+        )
+    except ApprovalError as e:
+        typer.secho(f"Rejection rejected: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"Error recording rejection: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    typer.secho(
+        f"[OK] Repair {repair_id} rejected. Decision ID: {decision.decision_id}",
+        fg=typer.colors.RED,
+    )
+
+
+@repair_app.command(name="request-changes")
+def repair_request_changes(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to request changes on"),
+    actor: str = typer.Option(..., "--actor", "-a", prompt="Operator Identity (e.g. username/email)", help="Authorized operator identity"),
+    feedback: str = typer.Option(..., "--feedback", "-f", prompt="Actionable Feedback", help="Actionable changes requested"),
+    reason: str = typer.Option("Changes requested by operator", "--reason", "-r", help="Summary reason"),
+) -> None:
+    """Record actionable operator feedback requesting changes on a repair."""
+    from forge.repair.execution.coordinator import RepairExecutionCoordinator
+    from forge.repair.execution.failures import ApprovalError
+    from forge.repair.execution.models import OperatorDecisionType
+    from forge.repair.execution.storage import RepairExecutionStore
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+    forge_store = ForgeStore(db_path=settings.db_path)
+    coordinator = RepairExecutionCoordinator(execution_store=exec_store, forge_store=forge_store)
+
+    try:
+        decision, _ = coordinator.process_operator_decision(
+            repair_id=repair_id,
+            decision=OperatorDecisionType.REQUEST_CHANGES,
+            actor=actor,
+            reason=reason,
+            feedback=feedback,
+        )
+    except ApprovalError as e:
+        typer.secho(f"Request-changes failed: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.secho(f"Error recording feedback: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    typer.secho(
+        f"[OK] Changes requested for repair {repair_id}. Decision ID: {decision.decision_id}",
+        fg=typer.colors.YELLOW,
+    )
+
+
+@repair_app.command(name="approval-history")
+def repair_approval_history(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to query approval history for"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output approval records as JSON"),
+) -> None:
+    """List historical operator review decisions and invalidations for a repair."""
+    from forge.repair.execution.storage import RepairExecutionStore
+
+    settings = get_settings()
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+
+    try:
+        decisions = exec_store.list_approval_decisions_for_repair(repair_id)
+    except Exception as e:
+        typer.secho(f"Error querying approval history: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if as_json:
+        typer.echo(json.dumps([d.model_dump(mode="json") for d in decisions], indent=2))
+        return
+
+    if not decisions:
+        typer.echo(f"No approval decisions recorded for repair '{repair_id}'.")
+        return
+
+    typer.echo(f"{'Decision ID':<20} {'State':<18} {'Decision':<16} {'Actor':<22} {'Created At':<22}")
+    typer.echo("-" * 100)
+    for d in decisions:
+        typer.echo(
+            f"{d.decision_id:<20} {d.state.value:<18} {d.decision.value:<16} {d.actor[:20]:<22} {d.created_at.strftime('%Y-%m-%d %H:%M:%S'):<22}"
+        )
+        if d.invalidation_reason:
+            typer.secho(f"  [INVALIDATED] {d.invalidation_reason}", fg=typer.colors.RED)
+        if d.feedback:
+            typer.echo(f"  [FEEDBACK] {d.feedback}")
+
+
+# =============================================================================
 # Controlled Repair Orchestration Workflow CLI Commands (Phase 4 M4)
 # =============================================================================
 

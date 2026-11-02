@@ -435,6 +435,35 @@ CREATE TABLE IF NOT EXISTS repair_test_executions (
     FOREIGN KEY(verification_id) REFERENCES repair_verification_runs(verification_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS repair_review_dossiers (
+    dossier_id TEXT PRIMARY KEY,
+    repair_id TEXT NOT NULL,
+    dossier_version TEXT NOT NULL,
+    patch_artifact_id TEXT NOT NULL,
+    patch_sha256 TEXT NOT NULL,
+    dossier_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE,
+    FOREIGN KEY(patch_artifact_id) REFERENCES patch_artifacts(artifact_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS repair_approval_decisions (
+    decision_id TEXT PRIMARY KEY,
+    repair_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    authorized_action TEXT,
+    actor TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    feedback TEXT,
+    binding_json TEXT NOT NULL DEFAULT '{}',
+    expires_at TEXT,
+    created_at TEXT NOT NULL,
+    invalidation_reason TEXT,
+    invalidation_timestamp TEXT,
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
@@ -472,6 +501,10 @@ CREATE INDEX IF NOT EXISTS idx_repair_verif_runs_repair ON repair_verification_r
 CREATE INDEX IF NOT EXISTS idx_repair_verif_runs_patch ON repair_verification_runs(patch_artifact_id);
 CREATE INDEX IF NOT EXISTS idx_repair_test_exec_verif ON repair_test_executions(verification_id);
 CREATE INDEX IF NOT EXISTS idx_repair_test_exec_repair ON repair_test_executions(repair_id);
+CREATE INDEX IF NOT EXISTS idx_repair_dossiers_repair ON repair_review_dossiers(repair_id);
+CREATE INDEX IF NOT EXISTS idx_repair_dossiers_patch ON repair_review_dossiers(patch_artifact_id);
+CREATE INDEX IF NOT EXISTS idx_repair_approval_repair ON repair_approval_decisions(repair_id);
+CREATE INDEX IF NOT EXISTS idx_repair_approval_state ON repair_approval_decisions(state);
 """
 
 

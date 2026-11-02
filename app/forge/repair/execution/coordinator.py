@@ -27,17 +27,23 @@ from forge.repair.execution.failures import (
     WorkspaceExecutionError,
 )
 from forge.repair.execution.generator import RepairPatchGenerator
+from forge.repair.execution.approval import ApprovalManager
 from forge.repair.execution.interfaces import RepairWorkspaceProtocol
 from forge.repair.execution.models import (
+    ApprovalDecisionRecord,
+    ApprovalState,
+    AuthorizedAction,
     FailureCategory,
     FailureClassification,
     IndependentValidationResult,
+    OperatorDecisionType,
     PatchArtifact,
     RepairActor,
     RepairExecutionEvent,
     RepairExecutionPlan,
     RepairExecutionState,
     RepairRequest,
+    ReviewDossier,
     ValidationResult,
     VerificationOutcome,
     VerificationRunRecord,
@@ -63,6 +69,7 @@ class RepairExecutionCoordinator:
         patch_validator: Optional[PatchValidator] = None,
         applier: Optional[SafePatchApplier] = None,
         verifier: Optional[RepairVerifier] = None,
+        approval_manager: Optional[ApprovalManager] = None,
         db_path: Optional[Path] = None,
     ):
         self.exec_store = execution_store or RepairExecutionStore(db_path=db_path)
@@ -76,6 +83,10 @@ class RepairExecutionCoordinator:
             execution_store=self.exec_store,
             forge_store=self.forge_store,
             db_path=db_path,
+        )
+        self.approval_manager = approval_manager or ApprovalManager(
+            execution_store=self.exec_store,
+            forge_store=self.forge_store,
         )
 
     def execute_candidate_generation(
@@ -423,3 +434,38 @@ class RepairExecutionCoordinator:
 
         updated_req = self.exec_store.get_repair_request(request.repair_id) or request
         return updated_req, run_record
+
+    # -------------------------------------------------------------------------
+    # Milestone 6: Operator Review & Approval Workflow Methods
+    # -------------------------------------------------------------------------
+
+    def prepare_review_dossier(self, repair_id: str) -> ReviewDossier:
+        """Assemble a complete, factual review dossier for an operator."""
+        return self.approval_manager.get_or_create_dossier(repair_id=repair_id)
+
+    def process_operator_decision(
+        self,
+        repair_id: str,
+        decision: OperatorDecisionType,
+        actor: str,
+        reason: str,
+        authorized_action: Optional[AuthorizedAction] = None,
+        feedback: Optional[str] = None,
+        ttl_hours: Optional[float] = 24.0,
+    ) -> Tuple[ApprovalDecisionRecord, ReviewDossier]:
+        """Submit and validate an operator decision, updating approval and repair states."""
+        dec_record = self.approval_manager.submit_decision(
+            repair_id=repair_id,
+            decision=decision,
+            actor=actor,
+            reason=reason,
+            authorized_action=authorized_action,
+            feedback=feedback,
+            ttl_hours=ttl_hours,
+        )
+        dossier = self.approval_manager.get_or_create_dossier(repair_id=repair_id)
+        return dec_record, dossier
+
+    def audit_approval_integrity(self, repair_id: str) -> Tuple[bool, Optional[str]]:
+        """Verify that current repair artifacts still match the exact approval binding."""
+        return self.approval_manager.validate_approval_binding(repair_id=repair_id)

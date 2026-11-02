@@ -36,8 +36,22 @@ Candidate Semantic Verification Hardening ── [COMPLETED]
 Deterministic Repair Construction Architecture ── [COMPLETED]
 Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (Milestones 1–6 Complete — Supervised Beta Release Gate Reached)
 Phase 7: Evidence-Driven Investigation Engine ── [COMPLETED] (Cross-File Evidence, Contradiction Detection, Investigation Orchestration)
-Phase 8: Controlled Evidence-Grounded Software Repair ── [IN PROGRESS] (Milestones 1, 2, 3, 4, & 5 Completed)
+Phase 8: Controlled Evidence-Grounded Software Repair ── [COMPLETED] (Milestones 1–6 Completed & Verified)
 ```
+
+### Phase 8, Milestone 6: Operator Review, Approval & Authorization Workflows (Completed)
+- **Objective & Scope**: Build an explicit, operator-in-the-loop review, approval, and authorization workflow for candidate repairs that have completed independent patch validation (M4) and sandbox regression verification (M5), enforcing strict artifact binding, dynamic tamper invalidation, and fail-closed human authorization boundaries.
+- **Architectural Deliverables**:
+  - *Factual Review Dossier Engine (`forge.repair.execution.dossier`)*: Implemented `ReviewDossierBuilder` synthesizing verified audit records into an immutable `ReviewDossier` containing repository target, pinned base commit, finding details, candidate patch diff, size metrics, M4 validation outcomes, M5 sandbox verification outcomes, dual-workspace comparative regression results, and traceable audit facts. AI-generated explanations are strictly segregated from verified facts.
+  - *Artifact-Bound Authorization Matrix (`forge.repair.execution.approval`)*: Approvals are cryptographically and deterministically bound to an exact 11-tuple: `(repair_id, finding_id, repository_target, base_commit_sha, patch_artifact_id, patch_sha256, validation_id, verification_id, dossier_id, dossier_version, policy_version)`. Approvals are never generic or transferable across candidate revisions.
+  - *Dynamic Invalidation on Drift & Expiration*: Any modification to the underlying patch artifact, workspace content, base commit revision, or expiration of the configured time-to-live (TTL) immediately invalidates the approval (`ApprovalState.INVALIDATED` or `ApprovalState.EXPIRED`).
+  - *Guarded Approval State Machine (`forge.repair.execution.approval`)*: Enforces strict lifecycle transitions across `PENDING_REVIEW`, `APPROVED`, `REJECTED`, `CHANGES_REQUESTED`, `WITHDRAWN`, `EXPIRED`, and `INVALIDATED`, preventing duplicate decisions or transitions out of terminal review states.
+  - *Preconditions Enforcement Gate*: Approvals are strictly refused unless the repair is `VERIFIED`, M4 validation is `ACCEPTED`, M5 sandbox verification is `VERIFIED`, patch SHA-256 matches all records, pinned base commit SHA matches, 0 regressions are detected, the defect is demonstrably resolved, operator identity is authenticated, and a non-empty justification reason is supplied.
+  - *Human Authorization Boundary*: Approved repairs record an explicit `AuthorizedAction` (`EXPORT_PATCH`, `STAGE_FOR_PR`, or `MANUAL_INTEGRATION`). FORGE strictly refuses to automatically modify target repositories, run `git commit`, run `git push`, open PRs, merge code, or deploy software.
+  - *Typed SQLite Persistence & Audit Ledger (`forge.storage.database`, `forge.repair.execution.storage`)*: Added `repair_review_dossiers` and `repair_approval_decisions` database tables and indices. Implemented persistence in `RepairExecutionStore` and recorded immutable, secret-redacted audit events (`operator_decision_submitted`, `approval_invalidated`) in `repair_execution_events`.
+  - *CLI Operator Commands (`forge.cli`)*: Added `forge repair review`, `forge repair approve`, `forge repair reject`, `forge repair request-changes`, and `forge repair approval-history`.
+  - *Dedicated Specification ([`docs/specs/phase-8-m6-operator-approval.md`](docs/specs/phase-8-m6-operator-approval.md))*: Formal architecture specification detailing review dossier schemas, approval lifecycle, binding invariants, and tamper invalidation workflows.
+  - *Verification Suite*: 33 unit tests in `tests/unit/test_phase8_m6_operator_approval.py` and 1,306 tests across the full pytest suite passing with zero regressions.
 
 ### Phase 8, Milestone 5: Sandbox Repair Verification & Regression Testing (Completed)
 - **Objective & Scope**: Build a production-quality sandbox verification and regression testing engine that executes dual-workspace comparative analysis in isolated Docker containers, verifying defect resolution without introducing regressions while strictly enforcing fail-closed container boundaries and zero target repository mutation.
@@ -682,6 +696,39 @@ forge repair test --scenario ACC01
 
 # Export machine-readable JSON acceptance report with automated secret scrubbing
 forge repair test --format json --output reports/acceptance_report.json
+```
+
+### Controlled Software Repair Review & Operator Approval (Phase 8 Milestone 6)
+```bash
+# Review candidate repair dossier with verified facts and diff
+forge repair review rep_12345
+
+# Review candidate repair dossier in JSON format for automation
+forge repair review rep_12345 --format json
+
+# Export candidate repair dossier Markdown to file
+forge repair review rep_12345 --output dossier.md
+
+# Operator explicitly approves candidate repair with authorized downstream action
+forge repair approve rep_12345 \
+  --actor "lead_engineer@company.com" \
+  --reason "Verified defect resolution and 0 regressions." \
+  --action export_patch \
+  --ttl 48.0
+
+# Operator explicitly rejects candidate repair
+forge repair reject rep_12345 \
+  --actor "lead_engineer@company.com" \
+  --reason "Unacceptable architectural side effects in implementation."
+
+# Operator requests changes with actionable feedback
+forge repair request-changes rep_12345 \
+  --actor "lead_engineer@company.com" \
+  --reason "Guard logic correct, but exception message requires clarification." \
+  --feedback "Change 'Rate too high' to 'Discount rate must be between 0.0 and 1.0'."
+
+# Inspect immutable operator review decision history and audit trail
+forge repair approval-history rep_12345
 ```
 
 ### Isolated Defect Reproduction Contracts (Phase 3 Milestone 1)

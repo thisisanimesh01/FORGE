@@ -58,6 +58,9 @@ class FailureCategory(str, Enum):
     INTEGRITY_ERROR = "integrity_error"
     ADVERSARIAL_DEFECT = "adversarial_defect"
     SEMANTIC_VIOLATION = "semantic_violation"
+    APPROVAL_REJECTED = "approval_rejected"
+    APPROVAL_INVALIDATED = "approval_invalidated"
+    APPROVAL_EXPIRED = "approval_expired"
 
 
 class ValidationOutcome(str, Enum):
@@ -357,7 +360,7 @@ class SelectedTest(BaseModel):
     command: List[str] = Field(description="Vetted executable command line array")
     relative_cwd: str = Field(default=".", description="Working directory relative to workspace root")
     target_file: Optional[str] = Field(default=None, description="Primary source or test file targeted")
-    rationale: str = Field(description="Audit explanation for why this test was selected")
+    rationale: str = Field(default="", description="Audit explanation for why this test was selected")
     expected_to_fail_on_baseline: bool = Field(default=False, description="True if this test reproduces the reported defect")
 
 
@@ -459,3 +462,109 @@ class VerificationRunRecord(BaseModel):
 
 # Compatibility alias
 RepairExecutionRequest = RepairRequest
+
+
+# =============================================================================
+# Milestone 6: Operator Review, Approval & Authorization Models
+# =============================================================================
+
+class ApprovalState(str, Enum):
+    """Guarded lifecycle states for repair review and approval."""
+    PENDING_REVIEW = "pending_review"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    CHANGES_REQUESTED = "changes_requested"
+    WITHDRAWN = "withdrawn"
+    EXPIRED = "expired"
+    INVALIDATED = "invalidated"
+
+
+class OperatorDecisionType(str, Enum):
+    """Explicit decision choices submitted by an authorized operator."""
+    APPROVE = "approve"
+    REJECT = "reject"
+    REQUEST_CHANGES = "request_changes"
+    WITHDRAW = "withdraw"
+
+
+class AuthorizedAction(str, Enum):
+    """Specific downstream publication actions that can be authorized."""
+    EXPORT_PATCH = "export_patch"
+    STAGE_FOR_PR = "stage_for_pr"
+    MANUAL_INTEGRATION = "manual_integration"
+
+
+class ApprovalBinding(BaseModel):
+    """Cryptographic and contextual binding tuple tying an approval to exact artifacts."""
+    model_config = ConfigDict(frozen=True)
+
+    repair_id: str = Field(description="Unique repair request identifier")
+    finding_id: str = Field(description="Associated finding identifier")
+    repository_target: str = Field(description="Target repository identifier or URL")
+    base_commit_sha: str = Field(description="Exact base commit revision SHA")
+    patch_artifact_id: str = Field(description="Bound patch artifact identifier")
+    patch_sha256: str = Field(description="Exact SHA-256 digest of verified patch bytes")
+    validation_id: str = Field(description="Bound M4 independent validation result identifier")
+    verification_id: str = Field(description="Bound M5 sandbox verification run identifier")
+    dossier_id: str = Field(description="Associated review dossier identifier")
+    dossier_version: str = Field(default="1.0.0", description="Review dossier schema version")
+    policy_version: str = Field(default="1.0.0", description="Approval policy version")
+
+
+class ReviewDossier(BaseModel):
+    """Structured, factual dossier consolidating complete audit evidence for operator review."""
+    model_config = ConfigDict(frozen=True)
+
+    dossier_id: str = Field(description="Unique review dossier identifier (dossier_...)")
+    dossier_version: str = Field(default="1.0.0", description="Review dossier schema version")
+    repair_id: str = Field(description="Associated repair request identifier")
+    finding_id: str = Field(description="Associated finding identifier")
+    finding_title: str = Field(description="Title of original finding under repair")
+    finding_severity: str = Field(description="Severity of original finding")
+    repository_target: str = Field(description="Target repository identifier or URL")
+    base_commit_sha: str = Field(description="Exact pinned base commit SHA")
+    evidence_ids: List[str] = Field(default_factory=list, description="Associated evidence record IDs")
+    patch_artifact_id: str = Field(description="Candidate patch artifact identifier")
+    patch_sha256: str = Field(description="SHA-256 digest of exact candidate patch bytes")
+    target_files: List[str] = Field(default_factory=list, description="Target files touched by patch")
+    lines_added: int = Field(default=0, ge=0, description="Total inserted lines in patch")
+    lines_removed: int = Field(default=0, ge=0, description="Total deleted lines in patch")
+    hunk_count: int = Field(default=0, ge=0, description="Total diff hunks in patch")
+    unified_diff: str = Field(description="Full unified diff of candidate patch")
+    validation_id: str = Field(description="M4 independent validation result identifier")
+    validation_outcome: str = Field(description="Outcome of independent M4 validation")
+    verification_id: str = Field(description="M5 sandbox verification run identifier")
+    verification_outcome: str = Field(description="Outcome of M5 sandbox verification")
+    baseline_test_summary: Dict[str, Any] = Field(default_factory=dict, description="Summary of baseline test run")
+    patched_test_summary: Dict[str, Any] = Field(default_factory=dict, description="Summary of patched test run")
+    regression_analysis_summary: str = Field(default="", description="Summary of comparative regression analysis")
+    regression_detected: bool = Field(default=False, description="Whether regressions were detected")
+    defect_resolved: bool = Field(default=False, description="Whether original defect was demonstrably resolved")
+    workspace_integrity_confirmed: bool = Field(default=True, description="Whether workspace file integrity is confirmed")
+    workspace_id: str = Field(description="Workspace identifier where verification occurred")
+    security_findings: List[str] = Field(default_factory=list, description="Security invariant checks or notices")
+    limitations: List[str] = Field(default_factory=list, description="Known operational or verification limitations")
+    recommended_decision: str = Field(default="MANUAL_REVIEW", description="Deterministic recommendation based on verification facts")
+    facts: List[str] = Field(default_factory=list, description="Factual statements directly traceable to stored records")
+    model_explanations: List[str] = Field(default_factory=list, description="Model-generated explanations labeled as AI text")
+    unresolved_uncertainties: List[str] = Field(default_factory=list, description="Identified uncertainties or open questions")
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Dossier generation timestamp")
+
+
+class ApprovalDecisionRecord(BaseModel):
+    """Immutable audit record of an operator review decision."""
+    model_config = ConfigDict(frozen=True)
+
+    decision_id: str = Field(description="Unique decision record identifier (dec_...)")
+    repair_id: str = Field(description="Associated repair request identifier")
+    binding: ApprovalBinding = Field(description="Artifact and context binding")
+    state: ApprovalState = Field(description="Resulting approval lifecycle state")
+    decision: OperatorDecisionType = Field(description="Operator decision choice")
+    authorized_action: Optional[AuthorizedAction] = Field(default=None, description="Authorized action if approved")
+    actor: str = Field(description="Operator or agent identifier who recorded the decision")
+    reason: str = Field(description="Mandatory justification or rationale for the decision")
+    feedback: Optional[str] = Field(default=None, description="Actionable feedback if changes were requested")
+    expires_at: Optional[datetime] = Field(default=None, description="Approval expiration timestamp if TTL configured")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Decision creation timestamp")
+    invalidation_reason: Optional[str] = Field(default=None, description="Reason for invalidation if invalidated")
+    invalidation_timestamp: Optional[datetime] = Field(default=None, description="Timestamp of invalidation if invalidated")

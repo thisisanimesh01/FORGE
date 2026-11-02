@@ -8,8 +8,15 @@ and audit event ledger for evidence-grounded software repair execution.
 from forge.repair.execution.applier import SafePatchApplier
 from forge.repair.execution.coordinator import RepairExecutionCoordinator
 from forge.repair.execution.failures import (
+    ApprovalError,
+    ApprovalExpiredError,
+    ApprovalInvalidatedError,
+    ApprovalPreconditionError,
+    ArtifactBindingMismatchError,
     CommitMismatchError,
+    DuplicateDecisionError,
     InsufficientEvidenceError,
+    InvalidApprovalTransitionError,
     PatchAdversarialDefectError,
     PatchApplicationError,
     PatchGenerationError,
@@ -25,6 +32,7 @@ from forge.repair.execution.failures import (
     ScopeContainmentViolationError,
     StaleBaseRevisionError,
     TargetRepoImmutabilityViolationError,
+    UnauthorizedOperatorError,
     VerificationExecutionError,
     VerificationPreconditionError,
     WorkspaceCleanupError,
@@ -43,13 +51,24 @@ from forge.repair.execution.interfaces import (
     RepairVerifierProtocol,
     RepairWorkspaceProtocol,
 )
+from forge.repair.execution.approval import (
+    ALLOWED_APPROVAL_TRANSITIONS,
+    ApprovalManager,
+    ApprovalStateMachine,
+)
+from forge.repair.execution.dossier import ReviewDossierBuilder
 from forge.repair.execution.manager import RepairWorkspaceManager
 from forge.repair.execution.models import (
+    ApprovalBinding,
+    ApprovalDecisionRecord,
+    ApprovalState,
+    AuthorizedAction,
     ComparisonStatus,
     ExecutionTestResult,
     FailureCategory,
     FailureClassification,
     IndependentValidationResult,
+    OperatorDecisionType,
     PatchArtifact,
     RegressionAnalysisRecord,
     RepairActor,
@@ -59,6 +78,7 @@ from forge.repair.execution.models import (
     RepairExecutionRequest,
     RepairExecutionState,
     RepairRequest,
+    ReviewDossier,
     SelectedTest,
     TestComparisonResult,
     TestExecutionRecord,
@@ -220,4 +240,23 @@ __all__ = [
     "VerificationEvidenceCollector",
     "VerificationReportBuilder",
     "parse_test_runner_output",
+    # M6 Operator Review & Approval Components
+    "ApprovalState",
+    "OperatorDecisionType",
+    "AuthorizedAction",
+    "ApprovalBinding",
+    "ReviewDossier",
+    "ApprovalDecisionRecord",
+    "ApprovalError",
+    "ApprovalPreconditionError",
+    "ArtifactBindingMismatchError",
+    "InvalidApprovalTransitionError",
+    "DuplicateDecisionError",
+    "ApprovalExpiredError",
+    "ApprovalInvalidatedError",
+    "UnauthorizedOperatorError",
+    "ALLOWED_APPROVAL_TRANSITIONS",
+    "ApprovalStateMachine",
+    "ApprovalManager",
+    "ReviewDossierBuilder",
 ]
