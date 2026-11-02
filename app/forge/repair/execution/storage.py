@@ -22,6 +22,7 @@ from forge.repair.execution.models import (
     RepairExecutionRecord,
     RepairExecutionState,
     RepairRequest,
+    WorkspaceRecord,
 )
 from forge.repair.execution.state import validate_repair_transition
 from forge.storage.database import get_db_connection, init_database
@@ -467,3 +468,133 @@ class RepairExecutionStore(RepairEventStoreProtocol):
             events=events,
             failure=req.failure,
         )
+
+    # -------------------------------------------------------------------------
+    # Workspace Record Persistence
+    # -------------------------------------------------------------------------
+
+    def save_workspace_record(self, record: WorkspaceRecord) -> None:
+        """Persist or insert a WorkspaceRecord."""
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO repair_workspaces (
+                        workspace_id, repair_id, target_repo, base_commit_sha,
+                        workspace_path, provisioning_status, isolation_verified,
+                        cleanup_status, metadata_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(workspace_id) DO UPDATE SET
+                        provisioning_status = excluded.provisioning_status,
+                        isolation_verified = excluded.isolation_verified,
+                        cleanup_status = excluded.cleanup_status,
+                        metadata_json = excluded.metadata_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        record.workspace_id,
+                        record.repair_id,
+                        record.target_repo,
+                        record.base_commit_sha,
+                        record.workspace_path,
+                        record.provisioning_status,
+                        1 if record.isolation_verified else 0,
+                        record.cleanup_status,
+                        json.dumps(record.metadata),
+                        record.created_at.isoformat(),
+                        record.updated_at.isoformat(),
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def get_workspace_record(self, workspace_id: str) -> Optional[WorkspaceRecord]:
+        """Fetch a WorkspaceRecord by workspace_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_workspaces WHERE workspace_id = ?",
+                (workspace_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return WorkspaceRecord(
+                workspace_id=row["workspace_id"],
+                repair_id=row["repair_id"],
+                target_repo=row["target_repo"],
+                base_commit_sha=row["base_commit_sha"],
+                workspace_path=row["workspace_path"],
+                provisioning_status=row["provisioning_status"],
+                isolation_verified=bool(row["isolation_verified"]),
+                cleanup_status=row["cleanup_status"],
+                metadata=json.loads(row["metadata_json"]),
+                created_at=datetime.fromisoformat(row["created_at"]),
+                updated_at=datetime.fromisoformat(row["updated_at"]),
+            )
+        finally:
+            conn.close()
+
+    def get_workspace_record_for_repair(self, repair_id: str) -> Optional[WorkspaceRecord]:
+        """Fetch the WorkspaceRecord associated with a repair_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM repair_workspaces WHERE repair_id = ? ORDER BY created_at DESC LIMIT 1",
+                (repair_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return WorkspaceRecord(
+                workspace_id=row["workspace_id"],
+                repair_id=row["repair_id"],
+                target_repo=row["target_repo"],
+                base_commit_sha=row["base_commit_sha"],
+                workspace_path=row["workspace_path"],
+                provisioning_status=row["provisioning_status"],
+                isolation_verified=bool(row["isolation_verified"]),
+                cleanup_status=row["cleanup_status"],
+                metadata=json.loads(row["metadata_json"]),
+                created_at=datetime.fromisoformat(row["created_at"]),
+                updated_at=datetime.fromisoformat(row["updated_at"]),
+            )
+        finally:
+            conn.close()
+
+    def update_workspace_record(self, workspace_id: str, updates: Dict[str, Any]) -> None:
+        """Update fields of an existing WorkspaceRecord."""
+        conn = self._conn()
+        try:
+            with conn:
+                allowed_cols = {
+                    "provisioning_status",
+                    "isolation_verified",
+                    "cleanup_status",
+                    "metadata_json",
+                }
+                set_clauses = []
+                values = []
+                for k, v in updates.items():
+                    if k == "metadata":
+                        set_clauses.append("metadata_json = ?")
+                        values.append(json.dumps(v))
+                    elif k == "isolation_verified":
+                        set_clauses.append("isolation_verified = ?")
+                        values.append(1 if v else 0)
+                    elif k in allowed_cols:
+                        set_clauses.append(f"{k} = ?")
+                        values.append(v)
+
+                if not set_clauses:
+                    return
+
+                set_clauses.append("updated_at = ?")
+                values.append(datetime.now(timezone.utc).isoformat())
+                values.append(workspace_id)
+
+                sql = f"UPDATE repair_workspaces SET {', '.join(set_clauses)} WHERE workspace_id = ?"
+                conn.execute(sql, tuple(values))
+        finally:
+            conn.close()

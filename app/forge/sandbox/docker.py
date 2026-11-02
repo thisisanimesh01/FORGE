@@ -128,6 +128,7 @@ class DockerSandbox:
         workspace_resolved = request.workspace_path.resolve().as_posix()
         workdir_in_container = f"/workspace/{request.relative_cwd}".rstrip("/")
 
+        readonly_opt = ",readonly" if request.read_only_workspace else ""
         args = [
             self.docker_binary,
             "run",
@@ -140,7 +141,7 @@ class DockerSandbox:
             "--pids-limit", str(request.limits.pids_limit),
             "--memory", request.limits.memory_limit,
             "--cpus", str(request.limits.cpu_quota),
-            "--mount", f"type=bind,source={workspace_resolved},target=/workspace,readonly",
+            "--mount", f"type=bind,source={workspace_resolved},target=/workspace{readonly_opt}",
             "--mount", "type=tmpfs,destination=/tmp,tmpfs-size=64M,tmpfs-mode=1777",
             "-w", workdir_in_container,
         ]

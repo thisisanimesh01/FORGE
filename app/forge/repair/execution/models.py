@@ -262,3 +262,20 @@ class RepairExecutionRecord(BaseModel):
     test_results: List[ExecutionTestResult] = Field(default_factory=list, description="Observed verification test outcomes")
     failure: Optional[FailureClassification] = Field(default=None, description="Failure diagnostic if failed")
     events: List[RepairExecutionEvent] = Field(default_factory=list, description="Ordered audit event trail")
+
+
+class WorkspaceRecord(BaseModel):
+    """Persistent audit record of an isolated repair scratch workspace."""
+    model_config = ConfigDict(frozen=True)
+
+    workspace_id: str = Field(description="Unique workspace identifier")
+    repair_id: str = Field(description="Associated repair request identifier")
+    target_repo: str = Field(description="Target repository identifier or URL")
+    base_commit_sha: str = Field(description="Pinned git commit SHA")
+    workspace_path: str = Field(description="Absolute path to workspace directory")
+    provisioning_status: str = Field(default="provisioned", description="Provisioning status: provisioned, failed, cleaned")
+    isolation_verified: bool = Field(default=False, description="Whether workspace isolation was successfully verified")
+    cleanup_status: str = Field(default="active", description="Cleanup status: active, cleaned, failed")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Metadata such as baseline hash count, sandbox mode")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Creation timestamp")
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Last update timestamp")

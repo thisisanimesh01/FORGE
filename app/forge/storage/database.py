@@ -324,6 +324,21 @@ CREATE TABLE IF NOT EXISTS patch_artifacts (
     FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS repair_workspaces (
+    workspace_id TEXT PRIMARY KEY,
+    repair_id TEXT NOT NULL,
+    target_repo TEXT NOT NULL,
+    base_commit_sha TEXT NOT NULL,
+    workspace_path TEXT NOT NULL,
+    provisioning_status TEXT NOT NULL,
+    isolation_verified INTEGER NOT NULL DEFAULT 0,
+    cleanup_status TEXT NOT NULL DEFAULT 'active',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
@@ -353,6 +368,7 @@ CREATE INDEX IF NOT EXISTS idx_repair_exec_events_seq ON repair_execution_events
 CREATE UNIQUE INDEX IF NOT EXISTS uq_repair_exec_events_seq ON repair_execution_events(repair_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_patch_artifacts_repair ON patch_artifacts(repair_id);
 CREATE INDEX IF NOT EXISTS idx_patch_artifacts_finding ON patch_artifacts(finding_id);
+CREATE INDEX IF NOT EXISTS idx_repair_workspaces_repair ON repair_workspaces(repair_id);
 """
 
 

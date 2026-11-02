@@ -36,8 +36,21 @@ Candidate Semantic Verification Hardening ── [COMPLETED]
 Deterministic Repair Construction Architecture ── [COMPLETED]
 Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (Milestones 1–6 Complete — Supervised Beta Release Gate Reached)
 Phase 7: Evidence-Driven Investigation Engine ── [COMPLETED] (Cross-File Evidence, Contradiction Detection, Investigation Orchestration)
-Phase 8: Controlled Evidence-Grounded Software Repair ── [IN PROGRESS] (Milestone 1 Architecture Completed)
+Phase 8: Controlled Evidence-Grounded Software Repair ── [IN PROGRESS] (Milestones 1 & 2 Completed)
 ```
+
+### Phase 8, Milestone 2: Isolated Workspace Management & Sandbox Integration (Completed)
+- **Objective & Scope**: Implement secure, isolated scratch workspace provisioning, exact Git commit identity verification, baseline filesystem integrity auditing, and Docker sandbox integration with fail-closed guarantees for evidence-grounded repair execution.
+- **Architectural Deliverables**:
+  - *Isolated Scratch Workspace Engine (`forge.repair.execution.workspace`)*: Engineered `RepairWorkspace` implementing `RepairWorkspaceProtocol` with physical directory isolation outside the target repository, exact `git rev-parse HEAD` commit verification, scope containment, and symlink escape defenses.
+  - *Filesystem Baseline Fingerprinting & Integrity Auditing*: Captured SHA-256 baseline file manifests upon workspace preparation. Implemented `check_integrity()` to detect modified, added, deleted, or symlinked files, rejecting unauthorized alterations outside declared `allowed_files` with `WorkspaceIntegrityViolationError`.
+  - *Docker Sandbox Integration with Configurable Mounts (`forge.sandbox.docker`)*: Updated `DockerSandbox` to support configurable read-only vs writable workspace bind mounts (`readonly_opt`) while maintaining non-root execution (`UID:GID 1000:1000`), network isolation (`--network none`), dropped capabilities (`--cap-drop ALL`, `no-new-privileges`), and strict resource limits (CPU quota, memory caps, timeout bounds, and PIDs limit).
+  - *Fail-Closed Boundary & Structured Failures (`forge.repair.execution.failures`)*: Established structured failure hierarchy: `WorkspaceExecutionError`, `WorkspaceProvisioningError`, `RepositoryAcquisitionError`, `CommitMismatchError`, `WorkspaceCollisionError`, `WorkspaceReuseForbiddenError`, `WorkspaceIntegrityViolationError`, `SandboxUnavailableError`, `SandboxInitializationError`, `ResourceLimitViolationError`, and `WorkspaceCleanupError`. When Docker is unavailable, runtime execution is strictly refused without host fallback.
+  - *Workspace Manager Orchestrator (`forge.repair.execution.manager`)*: Implemented `RepairWorkspaceManager` coordinating end-to-end workspace provisioning, isolation checks, sandbox command execution, integrity verification, and directory cleanup.
+  - *Persistent Storage & Audit Ledger (`forge.storage.database`, `forge.repair.execution.storage`)*: Added `repair_workspaces` table and indices to SQLite schema. Implemented `WorkspaceRecord` persistence and recorded sequential audit events (`workspace_provisioned`, `workspace_integrity_verified`, `sandbox_command_executed`, `workspace_cleaned`) in `repair_execution_events`.
+  - *Dedicated Specification ([`docs/specs/phase-8-m2-workspace-sandbox-integration.md`](docs/specs/phase-8-m2-workspace-sandbox-integration.md))*: Formal architecture specification detailing workspace lifecycle, containment policies, integrity checks, and sandbox integration contracts.
+  - *Verification Suite*: 25 unit tests in `tests/unit/test_phase8_m2_workspace_sandbox_integration.py` and 1,191 tests across full pytest suite passing with zero regressions.
+  - *Scope Boundary*: Actual candidate source-code patch generation remains deferred to Milestone 3; automated commits, pushes, branches, PRs, and software deployments on target repositories remain strictly forbidden.
 
 ### Phase 8, Milestone 1: Repair Execution Architecture (Completed)
 - **Objective & Scope**: Establish the typed domain models, guarded state machine, strict safety boundaries, component protocols, and SQLite audit event ledgers for controlled, evidence-grounded software repair execution.
