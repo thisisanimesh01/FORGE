@@ -530,21 +530,49 @@ class RepairExecutionStore(RepairEventStoreProtocol):
         clean_payload = {k: redact_secrets(str(v)) if isinstance(v, str) else v for k, v in payload.items()}
         now_str = datetime.now(timezone.utc).isoformat()
 
+        # Query previous event hash for cryptographic hash chaining
+        cur_prev = conn.execute(
+            "SELECT event_hash FROM repair_execution_events WHERE repair_id = ? ORDER BY sequence DESC LIMIT 1",
+            (repair_id,),
+        ).fetchone()
+        prev_hash = cur_prev["event_hash"] if cur_prev and cur_prev["event_hash"] else None
+
+        actor_str = actor.value if hasattr(actor, "value") else str(actor)
+        from_str = from_state.value if from_state else None
+        to_str = to_state.value if hasattr(to_state, "value") else str(to_state)
+
+        event_data = {
+            "event_id": event_id,
+            "repair_id": repair_id,
+            "sequence": cur_seq,
+            "from_state": from_str,
+            "to_state": to_str,
+            "actor": actor_str,
+            "payload": clean_payload,
+            "timestamp": now_str,
+        }
+        from forge.publication.audit_crypto import compute_event_hash
+
+        event_hash = compute_event_hash(prev_hash, event_data)
+
         conn.execute(
             """
             INSERT INTO repair_execution_events (
-                event_id, repair_id, sequence, from_state, to_state, actor, payload_json, timestamp
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                event_id, repair_id, sequence, from_state, to_state, actor, payload_json, timestamp,
+                prev_event_hash, event_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_id,
                 repair_id,
                 cur_seq,
-                from_state.value if from_state else None,
-                to_state.value,
-                actor.value,
+                from_str,
+                to_str,
+                actor_str,
                 json.dumps(clean_payload),
                 now_str,
+                prev_hash,
+                event_hash,
             ),
         )
 
@@ -561,6 +589,9 @@ class RepairExecutionStore(RepairEventStoreProtocol):
                 from_st = RepairExecutionState(row["from_state"]) if row["from_state"] else None
                 to_st = RepairExecutionState(row["to_state"])
                 actor = RepairActor(row["actor"])
+                col_keys = row.keys()
+                prev_h = row["prev_event_hash"] if "prev_event_hash" in col_keys else None
+                ev_h = row["event_hash"] if "event_hash" in col_keys else None
                 events.append(
                     RepairExecutionEvent(
                         event_id=row["event_id"],
@@ -571,6 +602,8 @@ class RepairExecutionStore(RepairEventStoreProtocol):
                         actor=actor,
                         payload=json.loads(row["payload_json"]),
                         timestamp=datetime.fromisoformat(row["timestamp"]),
+                        prev_event_hash=prev_h,
+                        event_hash=ev_h,
                     )
                 )
             return events
@@ -1335,3 +1368,7 @@ class RepairExecutionStore(RepairEventStoreProtocol):
             return [self._row_to_approval_decision(r) for r in cur.fetchall()]
         finally:
             conn.close()
+
+    # Convenience aliases
+    get_dossier_for_repair = get_latest_review_dossier_for_repair
+    get_latest_approval_for_repair = get_latest_approval_decision_for_repair

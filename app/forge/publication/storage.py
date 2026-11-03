@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from forge.config import redact_secrets
+from forge.publication.audit_crypto import compute_event_hash
 from forge.publication.interfaces import PublicationAuditStoreProtocol
 from forge.publication.models import (
     CommitAuthor,
@@ -270,6 +271,11 @@ class PublicationStore(PublicationAuditStoreProtocol):
         finally:
             conn.close()
 
+    def get_publication_plan_for_repair(self, repair_id: str) -> Optional[PublicationPlan]:
+        """Fetch the latest PublicationPlan for a given repair_id."""
+        plans = self.list_publication_plans_for_repair(repair_id)
+        return plans[0] if plans else None
+
     # -------------------------------------------------------------------------
     # Audit Event Ledger Integration
     # -------------------------------------------------------------------------
@@ -316,22 +322,45 @@ class PublicationStore(PublicationAuditStoreProtocol):
                         cur_st = RepairExecutionState.VERIFIED
 
                 actor_val = actor.value if hasattr(actor, "value") else str(actor)
+                from_str = from_state.value if from_state else None
+                to_str = cur_st.value if hasattr(cur_st, "value") else str(cur_st)
+
+                cur_prev = conn.execute(
+                    "SELECT event_hash FROM repair_execution_events WHERE repair_id = ? ORDER BY sequence DESC LIMIT 1",
+                    (repair_id,),
+                ).fetchone()
+                prev_hash = cur_prev["event_hash"] if cur_prev and cur_prev["event_hash"] else None
+
+                event_data = {
+                    "event_id": event_id,
+                    "repair_id": repair_id,
+                    "sequence": cur_seq,
+                    "from_state": from_str,
+                    "to_state": to_str,
+                    "actor": actor_val,
+                    "payload": clean_payload,
+                    "timestamp": now_str,
+                }
+                event_hash = compute_event_hash(prev_hash, event_data)
 
                 conn.execute(
                     """
                     INSERT INTO repair_execution_events (
-                        event_id, repair_id, sequence, from_state, to_state, actor, payload_json, timestamp
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        event_id, repair_id, sequence, from_state, to_state, actor, payload_json, timestamp,
+                        prev_event_hash, event_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event_id,
                         repair_id,
                         cur_seq,
-                        from_state.value if from_state else None,
-                        cur_st.value,
+                        from_str,
+                        to_str,
                         actor_val,
                         json.dumps(clean_payload),
                         now_str,
+                        prev_hash,
+                        event_hash,
                     ),
                 )
         finally:
@@ -748,6 +777,31 @@ class PublicationStore(PublicationAuditStoreProtocol):
         finally:
             conn.close()
 
+    def record_provider_operation(
+        self,
+        repair_id: str,
+        provider: str,
+        operation_type: str,
+        idempotency_key: str,
+        request_payload: Dict[str, Any],
+        response_payload: Dict[str, Any],
+        status: str = "success",
+        error_message: Optional[str] = None,
+    ) -> None:
+        """Create and persist a ProviderOperationRecord."""
+        rec = ProviderOperationRecord(
+            operation_id=f"pop_{uuid.uuid4().hex[:12]}",
+            repair_id=repair_id,
+            provider=provider,
+            operation_type=operation_type,
+            idempotency_key=idempotency_key,
+            request_payload=request_payload,
+            response_payload=response_payload,
+            status=status,
+            error_message=error_message,
+        )
+        self.save_provider_operation(rec)
+
     def _row_to_provider_operation(self, row: sqlite3.Row) -> ProviderOperationRecord:
         """Hydrate ProviderOperationRecord from sqlite3.Row."""
         return ProviderOperationRecord(
@@ -919,5 +973,202 @@ class PublicationStore(PublicationAuditStoreProtocol):
                     "SELECT * FROM publication_remote_records ORDER BY created_at DESC"
                 )
             return [self._row_to_remote_publication(row) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    # -------------------------------------------------------------------------
+    # Audit Verification & Reconciliation Persistence (Milestone 4)
+    # -------------------------------------------------------------------------
+
+    def save_audit_verification(
+        self,
+        verification_id: str,
+        repair_id: str,
+        status: str,
+        total_events: int,
+        sealed_events: int,
+        legacy_events: int,
+        is_tampered: bool,
+        details: Dict[str, Any],
+        verified_at: Optional[datetime] = None,
+    ) -> None:
+        """Persist or update a publication audit verification."""
+        conn = self._conn()
+        try:
+            with conn:
+                v_at = (verified_at or datetime.now(timezone.utc)).isoformat()
+                conn.execute(
+                    """
+                    INSERT INTO publication_audit_verifications (
+                        verification_id, repair_id, status, total_events, sealed_events,
+                        legacy_events, is_tampered, details_json, verified_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(verification_id) DO UPDATE SET
+                        status = excluded.status,
+                        total_events = excluded.total_events,
+                        sealed_events = excluded.sealed_events,
+                        legacy_events = excluded.legacy_events,
+                        is_tampered = excluded.is_tampered,
+                        details_json = excluded.details_json,
+                        verified_at = excluded.verified_at
+                    """,
+                    (
+                        verification_id,
+                        repair_id,
+                        status,
+                        total_events,
+                        sealed_events,
+                        legacy_events,
+                        1 if is_tampered else 0,
+                        json.dumps(details),
+                        v_at,
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def get_latest_audit_verification_for_repair(self, repair_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch the most recent audit verification record for a repair execution."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM publication_audit_verifications WHERE repair_id = ? ORDER BY verified_at DESC LIMIT 1",
+                (repair_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                "verification_id": row["verification_id"],
+                "repair_id": row["repair_id"],
+                "status": row["status"],
+                "total_events": row["total_events"],
+                "sealed_events": row["sealed_events"],
+                "legacy_events": row["legacy_events"],
+                "is_tampered": bool(row["is_tampered"]),
+                "details": json.loads(row["details_json"]),
+                "verified_at": datetime.fromisoformat(row["verified_at"]),
+            }
+        finally:
+            conn.close()
+
+    def save_reconciliation(
+        self,
+        reconciliation_id: str,
+        repair_id: str,
+        status: str,
+        local_commit_sha: Optional[str] = None,
+        remote_commit_sha: Optional[str] = None,
+        pr_number: Optional[int] = None,
+        pr_state: Optional[str] = None,
+        is_consistent: bool = True,
+        details: Optional[Dict[str, Any]] = None,
+        reconciled_at: Optional[datetime] = None,
+    ) -> None:
+        """Persist or update a publication reconciliation record."""
+        conn = self._conn()
+        try:
+            with conn:
+                r_at = (reconciled_at or datetime.now(timezone.utc)).isoformat()
+                conn.execute(
+                    """
+                    INSERT INTO publication_reconciliations (
+                        reconciliation_id, repair_id, status, local_commit_sha, remote_commit_sha,
+                        pr_number, pr_state, is_consistent, details_json, reconciled_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(reconciliation_id) DO UPDATE SET
+                        status = excluded.status,
+                        local_commit_sha = excluded.local_commit_sha,
+                        remote_commit_sha = excluded.remote_commit_sha,
+                        pr_number = excluded.pr_number,
+                        pr_state = excluded.pr_state,
+                        is_consistent = excluded.is_consistent,
+                        details_json = excluded.details_json,
+                        reconciled_at = excluded.reconciled_at
+                    """,
+                    (
+                        reconciliation_id,
+                        repair_id,
+                        status,
+                        local_commit_sha,
+                        remote_commit_sha,
+                        pr_number,
+                        pr_state,
+                        1 if is_consistent else 0,
+                        json.dumps(details or {}),
+                        r_at,
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def get_latest_reconciliation_for_repair(self, repair_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch the most recent publication reconciliation record for a repair execution."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM publication_reconciliations WHERE repair_id = ? ORDER BY reconciled_at DESC LIMIT 1",
+                (repair_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                "reconciliation_id": row["reconciliation_id"],
+                "repair_id": row["repair_id"],
+                "status": row["status"],
+                "local_commit_sha": row["local_commit_sha"],
+                "remote_commit_sha": row["remote_commit_sha"],
+                "pr_number": row["pr_number"],
+                "pr_state": row["pr_state"],
+                "is_consistent": bool(row["is_consistent"]),
+                "details": json.loads(row["details_json"]),
+                "reconciled_at": datetime.fromisoformat(row["reconciled_at"]),
+            }
+        finally:
+            conn.close()
+
+    def list_publication_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """List historical publications correlating requests, staged commits, and remote records."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                """
+                SELECT
+                    pr.publication_id,
+                    pr.repair_id,
+                    pr.action,
+                    pr.status,
+                    pr.created_at,
+                    pr.updated_at,
+                    sc.branch_name,
+                    sc.commit_sha,
+                    ppr.pr_number,
+                    ppr.pr_url,
+                    ppr.pr_state
+                FROM publication_requests pr
+                LEFT JOIN publication_staged_commits sc ON pr.repair_id = sc.repair_id
+                LEFT JOIN publication_pull_requests ppr ON pr.repair_id = ppr.repair_id
+                ORDER BY pr.created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            records = []
+            for row in cur.fetchall():
+                records.append({
+                    "publication_id": row["publication_id"],
+                    "repair_id": row["repair_id"],
+                    "action": row["action"],
+                    "status": row["status"],
+                    "branch_name": row["branch_name"],
+                    "commit_sha": row["commit_sha"],
+                    "pr_number": row["pr_number"],
+                    "pr_url": row["pr_url"],
+                    "pr_state": row["pr_state"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                })
+            return records
         finally:
             conn.close()

@@ -95,6 +95,32 @@ from forge.publication.storage import PublicationStore
 from forge.publication.validator import GitPublicationValidator
 from forge.publication.workspace import PublicationWorkspace
 
+from forge.publication.audit_crypto import (
+    AuditIntegrityStatus,
+    canonical_event_bytes,
+    compute_event_hash,
+    verify_event_hash,
+)
+from forge.publication.audit import (
+    ArtifactProvenanceRecord,
+    AuthorizationAuditRecord,
+    EventLedgerAuditor,
+    LedgerIntegrityResult,
+    OperationExecutionStatus,
+    PublicationAuditReport,
+    PublicationAuditReportBuilder,
+    PublicationLifecycleStage,
+    PublicationReconciliationRecord,
+    PublicationReconciler,
+    PublicationSecurityAuditor,
+    PublicationTimelineBuilder,
+    ReconciliationStatus,
+    SecurityAuditItem,
+    SecurityAuditSummary,
+    SecurityCheckOutcome,
+    TimelineEventRecord,
+)
+
 __all__ = [
     # Models
     "PublicationAction",
@@ -178,4 +204,26 @@ __all__ = [
     "GitHubPullRequestProvider",
     "retry_idempotent_operation",
     "parse_repository_owner_and_name",
+    # Milestone 4 Audit & Governance
+    "AuditIntegrityStatus",
+    "canonical_event_bytes",
+    "compute_event_hash",
+    "verify_event_hash",
+    "PublicationLifecycleStage",
+    "OperationExecutionStatus",
+    "SecurityCheckOutcome",
+    "ReconciliationStatus",
+    "TimelineEventRecord",
+    "ArtifactProvenanceRecord",
+    "AuthorizationAuditRecord",
+    "SecurityAuditItem",
+    "SecurityAuditSummary",
+    "LedgerIntegrityResult",
+    "PublicationReconciliationRecord",
+    "PublicationAuditReport",
+    "EventLedgerAuditor",
+    "PublicationTimelineBuilder",
+    "PublicationSecurityAuditor",
+    "PublicationReconciler",
+    "PublicationAuditReportBuilder",
 ]

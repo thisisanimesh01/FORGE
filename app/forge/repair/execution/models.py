@@ -318,6 +318,8 @@ class RepairExecutionEvent(BaseModel):
     actor: RepairActor = Field(description="Component or human actor triggering the transition")
     payload: Dict[str, Any] = Field(default_factory=dict, description="Sanitized event parameters")
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Event UTC timestamp")
+    prev_event_hash: Optional[str] = Field(default=None, description="SHA-256 hash of previous event in chain")
+    event_hash: Optional[str] = Field(default=None, description="SHA-256 hash of this event and chain")
 
 
 class RepairExecutionRecord(BaseModel):

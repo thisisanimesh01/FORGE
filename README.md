@@ -36,8 +36,22 @@ Candidate Semantic Verification Hardening ── [COMPLETED]
 Deterministic Repair Construction Architecture ── [COMPLETED]
 Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (Milestones 1–6 Complete — Supervised Beta Release Gate Reached)
 Phase 7: Evidence-Driven Investigation Engine ── [COMPLETED] (Cross-File Evidence, Contradiction Detection, Investigation Orchestration)
-Phase 9: Safe Git Publication & Upstream Integration ── [IN PROGRESS] (Milestones 1, 2, & 3 Completed)
+Phase 9: Safe Git Publication & Upstream Integration ── [COMPLETED] (Milestones 1–4 Complete — Phase 9 Complete)
 ```
+
+### Phase 9, Milestone 4: Operator Audit, Publication Ledger & End-to-End Governance (Completed)
+- **Objective & Scope**: Implement a comprehensive operator audit, publication ledger, and end-to-end governance system for FORGE, providing a trustworthy, queryable, reconstructable, and cryptographically verified record of the entire repair-to-pull-request lifecycle.
+- **Architectural Deliverables**:
+  - *Cryptographic Hash-Chained Event Ledger (`forge.publication.audit_crypto`)*: Engineered deterministic canonical JSON serialization (RFC 8785 sorting and compact formatting) with SHA-256 hash chaining (`prev_event_hash`, `event_hash`). Enforces continuous sequence integrity, duplicate/gap detection, and backward compatibility with unsealed legacy records (`AuditIntegrityStatus.LEGACY_UNSEALED`). Any event alteration, insertion, deletion, or reordering triggers `TAMPERED` or `BROKEN_CHAIN`.
+  - *Unified Publication Ledger & 22-Stage Chronological Timeline (`forge.publication.audit`)*: Reconstructs the complete lifecycle across 22 stages (defect investigation, evidence collection, candidate patch generation, validation, verification, review dossier compilation, operator approval, publication planning, local commit staging, remote branch push, PR creation, provider operations) without fabricating missing events.
+  - *14-Point Publication Security Auditor (`forge.publication.audit`)*: Implemented `PublicationSecurityAuditor` executing 14 independent security and invariant checks (`SEC-01` through `SEC-14`) covering authoritative approval binding, action match (`CREATE_PR` required for remote PRs), non-expiration, non-invalidation, patch hash alignment, base commit SHA match, target repo immutability, branch name alignment, remote commit SHA verification, non-destructive fast-forward push enforcement, target branch validity, audit ledger cryptographic integrity, and zero credential leakage.
+  - *Non-Destructive State Reconciler (`forge.publication.audit`)*: Implemented `PublicationReconciler` evaluating observed repository and hosting provider states against persisted records (`CONFIRMED_SUCCESS`, `PARTIAL_SUCCESS`, `CONFIRMED_FAILURE`, `EXTERNAL_MODIFICATION`, `AUTHORIZATION_INVALIDATED`). Strictly non-destructive: never deletes remote branches, merges code, or closes pull requests.
+  - *Fact-Segregated Audit Reporting (`forge.publication.audit`)*: Implemented `PublicationAuditReportBuilder` rendering comprehensive audit reports in Markdown and JSON formats, strictly segregating verified empirical facts from automated model explanations, with automated secret redaction.
+  - *Typed SQLite Persistence & Audit Ledger (`forge.storage.database`, `forge.publication.storage`)*: Bumped database schema to Version 5 with tables `publication_audit_verifications`, `publication_reconciliations`, and hash-chained columns on `repair_execution_events`.
+  - *CLI Commands (`forge.cli`)*: Added `forge repair publish audit`, `forge repair publish timeline`, `forge repair publish audit-verify`, `forge repair publish report`, `forge repair publish history`, and top-level aliases under `forge publish ...`.
+  - *Dedicated Specification ([`docs/specs/phase-9-m4-publication-ledger-governance.md`](docs/specs/phase-9-m4-publication-ledger-governance.md))*: Formal architecture specification detailing cryptographic hash chaining, 14-point security auditor, non-destructive reconciliation, fact segregation, and SQLite schemas.
+  - *Verification Suite*: 37 unit & governance tests in `tests/unit/test_phase9_m4_governance.py` and 140 tests across Phase 9 passing with zero regressions.
+  - *Scope Boundary*: Phase 9 is complete. FORGE strictly investigates repositories, stages branches and creates PRs under operator authorization, and audits the entire lifecycle. Automated merging, deployment, and unsupervised mutations remain strictly forbidden.
 
 ### Phase 9, Milestone 3: Remote Pull Request Creation & Upstream Integration (Completed)
 - **Objective & Scope**: Implement controlled remote Git branch publication and upstream pull request creation for Phase 8 verified and operator-authorized candidate repairs, validating authoritative `CREATE_PR` approvals, publishing dedicated branches via standard Git push, independently querying remote refs, generating evidence-grounded pull requests with strict separation of verified facts from AI text, and persisting a full audit ledger in SQLite.
@@ -740,6 +754,34 @@ forge repair test --scenario ACC01
 
 # Export machine-readable JSON acceptance report with automated secret scrubbing
 forge repair test --format json --output reports/acceptance_report.json
+```
+
+### Publication Audit, Verification & Ledger Governance (Phase 9 Milestone 4)
+```bash
+# Run comprehensive 14-point publication security audit for an approved repair
+forge repair publish audit rep_12345
+
+# View chronological 22-stage publication timeline
+forge repair publish timeline rep_12345
+
+# Verify cryptographic hash-chain integrity of repair execution events
+forge repair publish audit-verify rep_12345
+
+# Generate complete publication audit report in Markdown format
+forge repair publish report rep_12345 --format markdown
+
+# Generate complete publication audit report in JSON format saved to file
+forge repair publish report rep_12345 --format json --output reports/audit_rep_12345.json
+
+# List historical publication records and governance outcomes
+forge repair publish history --limit 20
+
+# Top-level CLI aliases
+forge publish audit rep_12345
+forge publish timeline rep_12345
+forge publish audit-verify rep_12345
+forge publish report rep_12345
+forge publish history
 ```
 
 ### Remote Pull Request Creation & Upstream Integration (Phase 9 Milestone 3)

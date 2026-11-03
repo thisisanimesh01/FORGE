@@ -6,7 +6,7 @@ from typing import Optional
 from forge.config import get_settings
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 INIT_SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -305,6 +305,8 @@ CREATE TABLE IF NOT EXISTS repair_execution_events (
     actor TEXT NOT NULL,
     payload_json TEXT NOT NULL DEFAULT '{}',
     timestamp TEXT NOT NULL,
+    prev_event_hash TEXT,
+    event_hash TEXT,
     FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE
 );
 
@@ -612,6 +614,33 @@ CREATE TABLE IF NOT EXISTS publication_remote_records (
     FOREIGN KEY(publication_id) REFERENCES publication_requests(publication_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS publication_audit_verifications (
+    verification_id TEXT PRIMARY KEY,
+    repair_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    total_events INTEGER NOT NULL DEFAULT 0,
+    sealed_events INTEGER NOT NULL DEFAULT 0,
+    legacy_events INTEGER NOT NULL DEFAULT 0,
+    is_tampered INTEGER NOT NULL DEFAULT 0,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    verified_at TEXT NOT NULL,
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS publication_reconciliations (
+    reconciliation_id TEXT PRIMARY KEY,
+    repair_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    local_commit_sha TEXT,
+    remote_commit_sha TEXT,
+    pr_number INTEGER,
+    pr_state TEXT,
+    is_consistent INTEGER NOT NULL DEFAULT 1,
+    details_json TEXT NOT NULL DEFAULT '{}',
+    reconciled_at TEXT NOT NULL,
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
@@ -668,6 +697,8 @@ CREATE INDEX IF NOT EXISTS idx_pub_provider_ops_repair ON publication_provider_o
 CREATE INDEX IF NOT EXISTS idx_pub_provider_ops_key ON publication_provider_operations(idempotency_key);
 CREATE INDEX IF NOT EXISTS idx_pub_remote_records_repair ON publication_remote_records(repair_id);
 CREATE INDEX IF NOT EXISTS idx_pub_remote_records_status ON publication_remote_records(status);
+CREATE INDEX IF NOT EXISTS idx_pub_audit_verif_repair ON publication_audit_verifications(repair_id);
+CREATE INDEX IF NOT EXISTS idx_pub_reconcile_repair ON publication_reconciliations(repair_id);
 """
 
 
@@ -690,6 +721,15 @@ def init_database(db_path: Optional[Path] = None) -> None:
     try:
         with conn:
             conn.executescript(INIT_SCHEMA_SQL)
+            # Idempotent column migrations for repair_execution_events
+            cur_cols = conn.execute("PRAGMA table_info(repair_execution_events)")
+            cols = {r["name"] for r in cur_cols.fetchall()}
+            if "prev_event_hash" not in cols:
+                conn.execute("ALTER TABLE repair_execution_events ADD COLUMN prev_event_hash TEXT")
+            if "event_hash" not in cols:
+                conn.execute("ALTER TABLE repair_execution_events ADD COLUMN event_hash TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_repair_exec_events_hash ON repair_execution_events(event_hash)")
+
             # Check migration records
             import datetime
             now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()

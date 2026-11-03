@@ -6,7 +6,10 @@ repository identity consistency, policy compliance, and secret scanning.
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from forge.repair.execution.storage import RepairExecutionStore
 
 from forge.config import redact_secrets
 from forge.publication.authorization import validate_action_authorization
@@ -41,7 +44,6 @@ from forge.repair.execution.models import (
     ApprovalState,
     AuthorizedAction,
 )
-from forge.repair.execution.storage import RepairExecutionStore
 
 
 class GitPublicationValidator(GitPublicationValidatorProtocol):
@@ -49,7 +51,7 @@ class GitPublicationValidator(GitPublicationValidatorProtocol):
 
     def __init__(
         self,
-        execution_store: RepairExecutionStore,
+        execution_store: "RepairExecutionStore",
         policy: Optional[GitPublicationPolicy] = None,
         inspector: Optional[GitRepositoryInspectorProtocol] = None,
     ):

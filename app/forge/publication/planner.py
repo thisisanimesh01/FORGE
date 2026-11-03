@@ -7,7 +7,11 @@ mutating target repositories or creating remote branches.
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from forge.repair.execution.storage import RepairExecutionStore
+    from forge.storage.store import ForgeStore
 
 from forge.config import redact_secrets
 from forge.publication.failures import (
@@ -35,8 +39,6 @@ from forge.publication.policy import (
     validate_branch_name,
 )
 from forge.publication.validator import GitPublicationValidator
-from forge.repair.execution.storage import RepairExecutionStore
-from forge.storage.store import ForgeStore
 
 
 class GitPublicationPlanner:
@@ -44,8 +46,8 @@ class GitPublicationPlanner:
 
     def __init__(
         self,
-        execution_store: RepairExecutionStore,
-        forge_store: Optional[ForgeStore] = None,
+        execution_store: "RepairExecutionStore",
+        forge_store: Optional["ForgeStore"] = None,
         policy: Optional[GitPublicationPolicy] = None,
         validator: Optional[GitPublicationValidatorProtocol] = None,
         inspector: Optional[GitRepositoryInspectorProtocol] = None,

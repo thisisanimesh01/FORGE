@@ -3073,6 +3073,201 @@ def publish_remote_inspect(
             typer.echo(f"  [{ev.sequence}] {ev.timestamp.strftime('%H:%M:%S')} {action_name}")
 
 
+# -----------------------------------------------------------------------------
+# Phase 9 Milestone 4: Operator Audit, Publication Ledger & Governance Commands
+# -----------------------------------------------------------------------------
+
+@publish_app.command(name="audit")
+def publish_audit(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to audit"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output audit summary as JSON"),
+) -> None:
+    """Execute all 14 publication security invariant audits and verify ledger integrity."""
+    from forge.publication.audit import PublicationSecurityAuditor, SecurityCheckOutcome
+    from forge.repair.execution.storage import RepairExecutionStore
+
+    settings = get_settings()
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+    req = exec_store.get_repair_request(repair_id)
+    if not req:
+        typer.secho(f"Error: Repair execution '{repair_id}' does not exist.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    auditor = PublicationSecurityAuditor(db_path=settings.db_path)
+    summary = auditor.audit_publication(repair_id)
+
+    if as_json:
+        typer.echo(summary.model_dump_json(indent=2))
+    else:
+        typer.secho(f"Publication Security Audit: {repair_id}", bold=True)
+        typer.echo("=" * 72)
+        typer.echo(f"{'Check':<10} {'Title':<35} {'Outcome':<12} {'Description':<30}")
+        typer.echo("-" * 72)
+        for chk in summary.checks:
+            color = typer.colors.GREEN if chk.outcome == SecurityCheckOutcome.PASS else (
+                typer.colors.YELLOW if chk.outcome in (SecurityCheckOutcome.NOT_APPLICABLE, SecurityCheckOutcome.INCONCLUSIVE)
+                else typer.colors.RED
+            )
+            typer.echo(f"{chk.check_id:<10} {chk.title[:34]:<35} ", nl=False)
+            typer.secho(f"{chk.outcome.value:<12}", fg=color, bold=True, nl=False)
+            typer.echo(f" {chk.description[:60]}")
+        typer.echo("-" * 72)
+        result_color = typer.colors.GREEN if summary.all_passed else typer.colors.RED
+        status_text = "ALL CHECKS PASSED" if summary.all_passed else "SECURITY INVARIANT FAILURES DETECTED"
+        typer.secho(f"Summary: {summary.passed}/{summary.total_checks} passed. Status: {status_text}", fg=result_color, bold=True)
+
+    if not summary.all_passed:
+        raise typer.Exit(code=1)
+
+
+@publish_app.command(name="timeline")
+def publish_timeline(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to reconstruct timeline for"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output timeline as JSON"),
+) -> None:
+    """Reconstruct end-to-end chronological lifecycle timeline for a repair execution."""
+    from forge.publication.audit import PublicationTimelineBuilder
+    from forge.repair.execution.storage import RepairExecutionStore
+
+    settings = get_settings()
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+    req = exec_store.get_repair_request(repair_id)
+    if not req:
+        typer.secho(f"Error: Repair execution '{repair_id}' does not exist.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    builder = PublicationTimelineBuilder(db_path=settings.db_path)
+    events = builder.reconstruct_timeline(repair_id)
+
+    if as_json:
+        typer.echo(json.dumps([e.model_dump(mode="json") for e in events], indent=2))
+        return
+
+    typer.secho(f"End-to-End Publication Timeline: {repair_id}", bold=True)
+    typer.echo("=" * 80)
+    typer.echo(f"{'Seq':<5} {'Timestamp (UTC)':<20} {'Stage':<25} {'Actor':<18} {'Status':<10}")
+    typer.echo("-" * 80)
+    for e in events:
+        seq_str = str(e.sequence) if e.sequence is not None else "-"
+        status_color = typer.colors.GREEN if e.status.value == "success" else typer.colors.RED
+        typer.echo(f"{seq_str:<5} {e.timestamp.strftime('%Y-%m-%d %H:%M:%S'):<20} {e.stage.value:<25} {e.actor:<18} ", nl=False)
+        typer.secho(f"{e.status.value.upper():<10}", fg=status_color)
+        typer.echo(f"      -> {e.description}")
+    typer.echo("=" * 80)
+
+
+@publish_app.command(name="audit-verify")
+def publish_audit_verify(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to verify ledger integrity for"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output verification details as JSON"),
+) -> None:
+    """Cryptographically verify SHA-256 hash chaining of sequential execution events."""
+    from forge.publication.audit import EventLedgerAuditor, AuditIntegrityStatus
+    from forge.repair.execution.storage import RepairExecutionStore
+
+    settings = get_settings()
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+    req = exec_store.get_repair_request(repair_id)
+    if not req:
+        typer.secho(f"Error: Repair execution '{repair_id}' does not exist.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    auditor = EventLedgerAuditor(db_path=settings.db_path)
+    result = auditor.verify_event_chain(repair_id)
+
+    if as_json:
+        typer.echo(result.model_dump_json(indent=2))
+    else:
+        typer.secho(f"Cryptographic Ledger Verification: {repair_id}", bold=True)
+        typer.echo("-" * 60)
+        typer.echo(f"  Total Events:      {result.total_events}")
+        typer.echo(f"  Sealed Events:     {result.sealed_events}")
+        typer.echo(f"  Legacy Events:     {result.legacy_events}")
+        color = typer.colors.GREEN if result.status in (AuditIntegrityStatus.VERIFIED, AuditIntegrityStatus.LEGACY_UNSEALED) else typer.colors.RED
+        typer.echo("  Integrity Status:  ", nl=False)
+        typer.secho(f"{result.status.value.upper()}", fg=color, bold=True)
+        if result.tampered_sequence is not None:
+            typer.secho(f"  Tampered Sequence: {result.tampered_sequence}", fg=typer.colors.RED, bold=True)
+        if result.details:
+            typer.echo(f"  Details:           {json.dumps(result.details)}")
+
+    if result.status not in (AuditIntegrityStatus.VERIFIED, AuditIntegrityStatus.LEGACY_UNSEALED):
+        raise typer.Exit(code=1)
+
+
+@publish_app.command(name="report")
+def publish_report(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to generate report for"),
+    format: str = typer.Option("markdown", "--format", "-f", help="Report format: markdown or json"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Optional output file path to write report to"),
+) -> None:
+    """Generate unified publication audit and governance report with factual segregation."""
+    from forge.publication.audit import PublicationAuditReportBuilder
+    from forge.repair.execution.storage import RepairExecutionStore
+
+    settings = get_settings()
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+    req = exec_store.get_repair_request(repair_id)
+    if not req:
+        typer.secho(f"Error: Repair execution '{repair_id}' does not exist.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    builder = PublicationAuditReportBuilder(db_path=settings.db_path)
+    try:
+        report_obj = builder.build_report(repair_id)
+    except Exception as e:
+        typer.secho(f"Error building report: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if format.lower() == "json":
+        rendered = builder.render_json(report_obj)
+    else:
+        rendered = builder.render_markdown(report_obj)
+
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(rendered, encoding="utf-8")
+        typer.secho(f"Report successfully written to: {output}", fg=typer.colors.GREEN)
+    else:
+        typer.echo(rendered)
+
+
+@publish_app.command(name="history")
+def publish_history(
+    limit: int = typer.Option(20, "--limit", "-l", help="Maximum historical publication records to return"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output history as JSON"),
+) -> None:
+    """List historical publication workflows across requests, staged commits, and remote PRs."""
+    from forge.publication.storage import PublicationStore
+
+    settings = get_settings()
+    pub_store = PublicationStore(db_path=settings.db_path)
+    records = pub_store.list_publication_history(limit=limit)
+
+    if as_json:
+        typer.echo(json.dumps(records, indent=2))
+        return
+
+    if not records:
+        typer.echo("No historical publication workflows found.")
+        return
+
+    typer.secho("Publication Workflow History:", bold=True)
+    typer.echo("=" * 85)
+    typer.echo(f"{'Publication ID':<18} {'Repair ID':<16} {'Action':<14} {'Status':<12} {'PR / Target':<20}")
+    typer.echo("-" * 85)
+    for rec in records:
+        pr_info = f"#{rec['pr_number']}" if rec.get("pr_number") else (rec.get("branch_name") or "-")
+        status_color = typer.colors.GREEN if rec["status"] == "completed" else (
+            typer.colors.RED if rec["status"] == "failed" else typer.colors.YELLOW
+        )
+        typer.echo(f"{rec['publication_id']:<18} {rec['repair_id']:<16} {rec['action']:<14} ", nl=False)
+        typer.secho(f"{rec['status']:<12}", fg=status_color, nl=False)
+        typer.echo(f" {pr_info:<20}")
+    typer.echo("=" * 85)
+
+
+
 
 # =============================================================================
 # Controlled Repair Orchestration Workflow CLI Commands (Phase 4 M4)
