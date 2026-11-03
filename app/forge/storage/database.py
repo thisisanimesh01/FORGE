@@ -6,7 +6,7 @@ from typing import Optional
 from forge.config import get_settings
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 INIT_SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -528,6 +528,90 @@ CREATE TABLE IF NOT EXISTS publication_staged_commits (
     FOREIGN KEY(decision_id) REFERENCES repair_approval_decisions(decision_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS publication_remote_branches (
+    remote_branch_id TEXT PRIMARY KEY,
+    repair_id TEXT NOT NULL,
+    publication_id TEXT NOT NULL,
+    plan_id TEXT NOT NULL,
+    staged_commit_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    remote_name TEXT NOT NULL,
+    remote_url TEXT NOT NULL,
+    branch_name TEXT NOT NULL,
+    commit_sha TEXT NOT NULL,
+    parent_commit_sha TEXT NOT NULL,
+    tree_sha TEXT NOT NULL,
+    patch_sha256 TEXT NOT NULL,
+    pushed_at TEXT NOT NULL,
+    verified_at TEXT,
+    status TEXT NOT NULL,
+    verification_details_json TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE,
+    FOREIGN KEY(publication_id) REFERENCES publication_requests(publication_id) ON DELETE CASCADE,
+    FOREIGN KEY(decision_id) REFERENCES repair_approval_decisions(decision_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS publication_pull_requests (
+    pr_record_id TEXT PRIMARY KEY,
+    repair_id TEXT NOT NULL,
+    publication_id TEXT NOT NULL,
+    plan_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    staged_commit_id TEXT NOT NULL,
+    remote_branch_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    repository_owner TEXT NOT NULL,
+    repository_name TEXT NOT NULL,
+    target_branch TEXT NOT NULL,
+    source_branch TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    pr_url TEXT NOT NULL,
+    pr_title TEXT NOT NULL,
+    pr_body TEXT NOT NULL,
+    pr_state TEXT NOT NULL,
+    is_draft INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    verified_at TEXT,
+    status TEXT NOT NULL,
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE,
+    FOREIGN KEY(publication_id) REFERENCES publication_requests(publication_id) ON DELETE CASCADE,
+    FOREIGN KEY(remote_branch_id) REFERENCES publication_remote_branches(remote_branch_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS publication_provider_operations (
+    operation_id TEXT PRIMARY KEY,
+    repair_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    operation_type TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    request_payload_json TEXT NOT NULL DEFAULT '{}',
+    response_payload_json TEXT NOT NULL DEFAULT '{}',
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS publication_remote_records (
+    remote_publication_id TEXT PRIMARY KEY,
+    repair_id TEXT NOT NULL,
+    publication_id TEXT NOT NULL,
+    plan_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    staged_commit_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    status TEXT NOT NULL,
+    remote_branch_id TEXT,
+    pr_record_id TEXT,
+    failure_classification TEXT,
+    failure_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    FOREIGN KEY(repair_id) REFERENCES repair_executions(repair_id) ON DELETE CASCADE,
+    FOREIGN KEY(publication_id) REFERENCES publication_requests(publication_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_findings_run_id ON findings(run_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence(finding_id);
 CREATE INDEX IF NOT EXISTS idx_evidence_run_id ON evidence(run_id);
@@ -576,6 +660,14 @@ CREATE INDEX IF NOT EXISTS idx_pub_plans_repair ON publication_plans(repair_id);
 CREATE INDEX IF NOT EXISTS idx_pub_staged_commits_repair ON publication_staged_commits(repair_id);
 CREATE INDEX IF NOT EXISTS idx_pub_staged_commits_branch ON publication_staged_commits(branch_name);
 CREATE INDEX IF NOT EXISTS idx_pub_staged_commits_state ON publication_staged_commits(state);
+CREATE INDEX IF NOT EXISTS idx_pub_remote_branches_repair ON publication_remote_branches(repair_id);
+CREATE INDEX IF NOT EXISTS idx_pub_remote_branches_branch ON publication_remote_branches(branch_name);
+CREATE INDEX IF NOT EXISTS idx_pub_pull_requests_repair ON publication_pull_requests(repair_id);
+CREATE INDEX IF NOT EXISTS idx_pub_pull_requests_pr_num ON publication_pull_requests(pr_number);
+CREATE INDEX IF NOT EXISTS idx_pub_provider_ops_repair ON publication_provider_operations(repair_id);
+CREATE INDEX IF NOT EXISTS idx_pub_provider_ops_key ON publication_provider_operations(idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_pub_remote_records_repair ON publication_remote_records(repair_id);
+CREATE INDEX IF NOT EXISTS idx_pub_remote_records_status ON publication_remote_records(status);
 """
 
 

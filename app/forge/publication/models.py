@@ -184,3 +184,120 @@ class StagedCommitRecord(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc),
         description="Last update timestamp."
     )
+
+
+class RemoteRepositorySpec(BaseModel):
+    """Verified specification of an upstream remote Git repository."""
+    provider: str = Field(..., description="Hosting provider name (e.g. 'github').")
+    owner: str = Field(..., description="Repository owner or organization account.")
+    repository: str = Field(..., description="Repository project name.")
+    default_branch: str = Field(default="main", description="Target base branch on remote.")
+    remote_url: str = Field(..., description="Sanitized remote clone/push URL.")
+    is_private: bool = Field(False, description="True if repository is private.")
+    can_push: bool = Field(True, description="True if push access is permitted with current credentials.")
+
+
+class PullRequestDetails(BaseModel):
+    """Detailed payload specification for creating a pull request."""
+    title: str = Field(..., min_length=1, description="Pull request title.")
+    body: str = Field(..., min_length=1, description="Pull request markdown body description.")
+    target_branch: str = Field(..., description="Upstream base branch to merge into.")
+    source_branch: str = Field(..., description="Head branch containing the staged commit.")
+    draft: bool = Field(False, description="Whether to open as draft pull request.")
+
+
+class RemoteBranchRecord(BaseModel):
+    """Persisted record of an approved, published and verified remote Git branch."""
+    remote_branch_id: str = Field(..., description="Unique remote branch record identifier.")
+    repair_id: str = Field(..., description="Associated repair execution ID.")
+    publication_id: str = Field(..., description="Associated publication request ID.")
+    plan_id: str = Field(..., description="Associated publication plan ID.")
+    staged_commit_id: str = Field(..., description="Associated local staged commit ID.")
+    decision_id: str = Field(..., description="Authorizing operator decision ID.")
+    remote_name: str = Field("origin", description="Git remote name used for push.")
+    remote_url: str = Field(..., description="Sanitized remote repository URL.")
+    branch_name: str = Field(..., description="Remote branch name.")
+    commit_sha: str = Field(..., description="Published commit SHA on remote.")
+    parent_commit_sha: str = Field(..., description="Verified parent commit SHA on remote.")
+    tree_sha: str = Field(..., description="Verified tree SHA on remote.")
+    patch_sha256: str = Field(..., description="SHA-256 digest of patch published in commit.")
+    pushed_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Timestamp when branch was pushed."
+    )
+    verified_at: Optional[datetime] = Field(None, description="Timestamp when remote branch was verified.")
+    status: str = Field(default="published", description="Status ('published', 'verified', 'failed').")
+    verification_details: Dict[str, Any] = Field(default_factory=dict, description="Verification audit facts.")
+
+
+class PullRequestRecord(BaseModel):
+    """Persisted record of an opened and verified upstream pull request."""
+    pr_record_id: str = Field(..., description="Unique pull request record identifier.")
+    repair_id: str = Field(..., description="Associated repair execution ID.")
+    publication_id: str = Field(..., description="Associated publication request ID.")
+    plan_id: str = Field(..., description="Associated publication plan ID.")
+    decision_id: str = Field(..., description="Authorizing operator decision ID.")
+    staged_commit_id: str = Field(..., description="Associated local staged commit ID.")
+    remote_branch_id: str = Field(..., description="Associated remote branch record ID.")
+    provider: str = Field("github", description="Hosting provider name.")
+    repository_owner: str = Field(..., description="Target repository owner.")
+    repository_name: str = Field(..., description="Target repository name.")
+    target_branch: str = Field(..., description="Base branch on upstream repository.")
+    source_branch: str = Field(..., description="Head branch published to upstream repository.")
+    pr_number: int = Field(..., description="Provider-assigned pull request number.")
+    pr_url: str = Field(..., description="Canonical web URL of created pull request.")
+    pr_title: str = Field(..., description="Title of created pull request.")
+    pr_body: str = Field(..., description="Body of created pull request.")
+    pr_state: str = Field(default="open", description="State on provider ('open', 'closed', 'merged').")
+    is_draft: bool = Field(False, description="Whether opened as draft.")
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Timestamp when pull request was created."
+    )
+    verified_at: Optional[datetime] = Field(None, description="Timestamp when pull request was verified on remote.")
+    status: str = Field(default="created", description="Record status ('created', 'verified', 'failed').")
+
+
+class ProviderOperationRecord(BaseModel):
+    """Audit record of an individual operation performed against a Git hosting provider."""
+    operation_id: str = Field(..., description="Unique provider operation ID.")
+    repair_id: str = Field(..., description="Associated repair execution ID.")
+    provider: str = Field(..., description="Target provider ('github', etc.).")
+    operation_type: str = Field(..., description="Type of operation ('verify_remote', 'push', 'create_pr', etc.).")
+    idempotency_key: str = Field(..., description="Deterministic key preventing duplicate remote operations.")
+    status: str = Field(default="pending", description="Operation status ('pending', 'success', 'failed').")
+    request_payload: Dict[str, Any] = Field(default_factory=dict, description="Sanitized request payload.")
+    response_payload: Dict[str, Any] = Field(default_factory=dict, description="Sanitized provider response.")
+    error_message: Optional[str] = Field(None, description="Diagnostic error message if failed.")
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Timestamp when operation was performed."
+    )
+
+
+class RemotePublicationRecord(BaseModel):
+    """High-level lifecycle record tracking end-to-end remote publication for a repair."""
+    remote_publication_id: str = Field(..., description="Unique remote publication lifecycle ID.")
+    repair_id: str = Field(..., description="Associated repair execution ID.")
+    publication_id: str = Field(..., description="Associated publication request ID.")
+    plan_id: str = Field(..., description="Associated publication plan ID.")
+    decision_id: str = Field(..., description="Authorizing operator decision ID.")
+    staged_commit_id: str = Field(..., description="Associated staged commit ID.")
+    provider: str = Field(default="github", description="Target provider name.")
+    status: str = Field(
+        default="pending",
+        description="Status ('pending', 'branch_pushed', 'pr_created', 'completed', 'failed', 'aborted')."
+    )
+    remote_branch_id: Optional[str] = Field(None, description="Linked RemoteBranchRecord ID once pushed.")
+    pr_record_id: Optional[str] = Field(None, description="Linked PullRequestRecord ID once created.")
+    failure_classification: Optional[str] = Field(None, description="Categorized failure classification if failed.")
+    failure_reason: Optional[str] = Field(None, description="Detailed diagnostic reason if failed.")
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Publication initiation timestamp."
+    )
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Last status update timestamp."
+    )
+    completed_at: Optional[datetime] = Field(None, description="Completion timestamp.")

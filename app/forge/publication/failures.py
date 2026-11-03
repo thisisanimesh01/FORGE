@@ -98,3 +98,58 @@ class WorkspaceIntegrityError(PublicationError):
 class SymlinkEscapeError(WorkspaceIntegrityError):
     """Raised when a symlink escapes the publication workspace root."""
     pass
+
+
+class RemotePublicationError(PublicationError):
+    """Base exception for all remote publication and pull request errors."""
+    pass
+
+
+class RemoteAuthenticationError(RemotePublicationError):
+    """Raised when provider authentication fails or credentials are missing/invalid."""
+    pass
+
+
+class RemoteRepositoryVerificationError(RemotePublicationError):
+    """Raised when remote repository identity, owner, name, or default branch does not match."""
+    pass
+
+
+class RemoteBranchPushError(RemotePublicationError):
+    """Raised when pushing a branch to the remote repository fails."""
+    pass
+
+
+class RemoteBranchVerificationError(RemotePublicationError):
+    """Raised when verifying the published remote branch or its commit SHA fails."""
+    pass
+
+
+class PullRequestCreationError(RemotePublicationError):
+    """Raised when creating a pull request via the Git hosting provider fails."""
+    pass
+
+
+class PullRequestVerificationError(RemotePublicationError):
+    """Raised when verifying a created pull request on the remote provider fails."""
+    pass
+
+
+class ProviderRateLimitError(RemotePublicationError):
+    """Raised when Git hosting provider rate limits or throttling are encountered."""
+    pass
+
+
+class ProviderTimeoutError(RemotePublicationError):
+    """Raised when communication with the Git hosting provider times out."""
+    pass
+
+
+class RemoteBranchCollisionError(RemotePublicationError):
+    """Raised when an existing remote branch conflicts with the publication branch."""
+    pass
+
+
+class DuplicatePullRequestError(RemotePublicationError):
+    """Raised when an open pull request already exists for the publication branch."""
+    pass

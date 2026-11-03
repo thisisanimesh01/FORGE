@@ -36,9 +36,22 @@ Candidate Semantic Verification Hardening ── [COMPLETED]
 Deterministic Repair Construction Architecture ── [COMPLETED]
 Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (Milestones 1–6 Complete — Supervised Beta Release Gate Reached)
 Phase 7: Evidence-Driven Investigation Engine ── [COMPLETED] (Cross-File Evidence, Contradiction Detection, Investigation Orchestration)
-Phase 8: Controlled Evidence-Grounded Software Repair ── [COMPLETED] (Milestones 1–6 Completed & Verified)
-Phase 9: Safe Git Publication & Upstream Integration ── [IN PROGRESS] (Milestones 1 & 2 Completed)
+Phase 9: Safe Git Publication & Upstream Integration ── [IN PROGRESS] (Milestones 1, 2, & 3 Completed)
 ```
+
+### Phase 9, Milestone 3: Remote Pull Request Creation & Upstream Integration (Completed)
+- **Objective & Scope**: Implement controlled remote Git branch publication and upstream pull request creation for Phase 8 verified and operator-authorized candidate repairs, validating authoritative `CREATE_PR` approvals, publishing dedicated branches via standard Git push, independently querying remote refs, generating evidence-grounded pull requests with strict separation of verified facts from AI text, and persisting a full audit ledger in SQLite.
+- **Architectural Deliverables**:
+  - *Strict Authorization Gate (`forge.publication.remote_coordinator`)*: Re-validates operator review decisions directly from SQLite before remote push and before PR creation. Enforces invariant that only `AuthorizedAction.CREATE_PR` in state `APPROVED` may proceed. Historical or alternative approvals (`EXPORT_PATCH`, `MANUAL_INTEGRATION`, `STAGE_FOR_PR`, `STAGE_BRANCH`) fail closed and are strictly forbidden from remote publication.
+  - *Safe Remote Branch Publishing (`forge.publication.remote_publisher`)*: Verifies remote repository identity (`verify_remote_repository_identity`), enforces protected branch defense (`ProtectedBranchViolationError` for `main`, `master`, etc.), executes safe Git push (`git push origin <commit_sha>:refs/heads/<branch>`) without force flags, and proactively checks for remote collisions (`RemoteBranchCollisionError` on commit mismatch; safe idempotent reconciliation on identical commit).
+  - *Post-Push Independent Remote Verification (`forge.publication.remote_publisher`)*: Directly inspects the remote ref using `git ls-remote` and revision parsing, independently verifying that remote HEAD matches the expected commit SHA, that commit parent matches the base commit SHA, and that the tree SHA matches the verified candidate patch tree.
+  - *Evidence-Grounded Pull Request Construction (`forge.publication.pr_template`)*: Implemented `PullRequestFormatter` generating deterministic, structured PR descriptions strictly separating verified empirical facts (finding ID, base commit SHA, patch SHA-256, test summaries, 0 regressions, touched files) from automated model explanations, and including operator authorization notices and verification limitations.
+  - *Extensible Provider Architecture (`forge.publication.providers`)*: Defined `PullRequestProviderProtocol` and production `GitHubPullRequestProvider` with token resolution from `FORGE_GITHUB_TOKEN`/`GITHUB_TOKEN`, zero credential leakage in logs or exceptions, duplicate PR detection, rate-limit exponential backoff, and lost-response recovery.
+  - *Typed SQLite Persistence & Audit Ledger (`forge.storage.database`, `forge.publication.storage`)*: Bumped database schema to Version 4 with tables `publication_remote_branches`, `publication_pull_requests`, `publication_provider_operations`, `publication_remote_records`. Recorded sequential, secret-redacted audit events (`remote_identity_verified`, `remote_branch_published`, `remote_branch_verified`, `pull_request_created`, `pull_request_verified`) in `repair_execution_events`.
+  - *CLI Commands (`forge.cli`)*: Added `forge repair publish remote-validate`, `forge repair publish push`, `forge repair publish pr`, `forge repair publish remote-status`, `forge repair publish pr-status`, `forge repair publish remote-inspect`, and top-level aliases under `forge publish ...`.
+  - *Dedicated Specification ([`docs/specs/phase-9-m3-remote-pull-request-publication.md`](docs/specs/phase-9-m3-remote-pull-request-publication.md))*: Formal architecture specification detailing provider contracts, threat model, authorization gates, remote verification invariants, SQLite schemas, and real provider acceptance instructions.
+  - *Verification Suite*: 26 unit & security tests in `tests/unit/test_phase9_m3_remote_publication.py` and 1,409 tests across the full pytest suite passing with zero regressions.
+  - *Scope Boundary*: Branch publishing and PR opening only; automated pull-request merging, automated branch deletion, and production deployment remain strictly forbidden. Upstream CI feedback, review monitoring, and merge readiness gating are deferred to Milestone 4.
 
 ### Phase 9, Milestone 2: Isolated Branch Staging & Commit Creation (Completed)
 - **Objective & Scope**: Implement safe, isolated local Git branch staging and commit creation for Phase 8 verified and operator-authorized candidate repairs, provisioning dedicated scratch Git clones, creating deterministic branches, staging approved patches, and constructing verified commits with strict target repository immutability.
@@ -727,6 +740,40 @@ forge repair test --scenario ACC01
 
 # Export machine-readable JSON acceptance report with automated secret scrubbing
 forge repair test --format json --output reports/acceptance_report.json
+```
+
+### Remote Pull Request Creation & Upstream Integration (Phase 9 Milestone 3)
+```bash
+# Validate remote publication preconditions for an approved repair (zero-mutation verification)
+forge repair publish remote-validate rep_12345
+
+# Validate remote publication with custom remote and JSON output
+forge repair publish remote-validate rep_12345 --remote origin --json
+
+# Push verified staged commit to authorized remote branch
+forge repair publish push rep_12345
+
+# Create upstream pull request on hosting provider (e.g. GitHub)
+forge repair publish pr rep_12345 --base main
+
+# Create draft pull request
+forge repair publish pr rep_12345 --base main --draft
+
+# View high-level remote publication status
+forge repair publish remote-status rep_12345
+
+# Check live pull request status on upstream provider
+forge repair publish pr-status rep_12345
+
+# Inspect comprehensive audit trail, remote records, and provider API operations
+forge repair publish remote-inspect rep_12345
+
+# Top-level CLI aliases
+forge publish remote-validate rep_12345
+forge publish push rep_12345
+forge publish pr rep_12345 --base main
+forge publish remote-status rep_12345
+forge publish remote-inspect rep_12345
 ```
 
 ### Isolated Branch Staging & Commit Creation (Phase 9 Milestone 2)

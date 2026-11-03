@@ -16,11 +16,15 @@ from forge.publication.interfaces import PublicationAuditStoreProtocol
 from forge.publication.models import (
     CommitAuthor,
     CommitProposal,
+    ProviderOperationRecord,
     PublicationAction,
     PublicationExecutionState,
     PublicationPlan,
     PublicationRequest,
     PublicationStatus,
+    PullRequestRecord,
+    RemoteBranchRecord,
+    RemotePublicationRecord,
     RepositoryIdentity,
     StagedCommitRecord,
     WorkspaceIntegritySnapshot,
@@ -472,5 +476,448 @@ class PublicationStore(PublicationAuditStoreProtocol):
                     "SELECT * FROM publication_staged_commits ORDER BY created_at DESC"
                 )
             return [self._row_to_staged_commit(row) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    # --- Phase 9 M3: Remote Branch Records ---
+
+    def save_remote_branch(self, record: RemoteBranchRecord) -> None:
+        """Persist or update a RemoteBranchRecord."""
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO publication_remote_branches (
+                        remote_branch_id, repair_id, publication_id, plan_id,
+                        staged_commit_id, decision_id, remote_name, remote_url,
+                        branch_name, commit_sha, parent_commit_sha, tree_sha,
+                        patch_sha256, pushed_at, verified_at, status,
+                        verification_details_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(remote_branch_id) DO UPDATE SET
+                        status = excluded.status,
+                        verified_at = excluded.verified_at,
+                        verification_details_json = excluded.verification_details_json
+                    """,
+                    (
+                        record.remote_branch_id,
+                        record.repair_id,
+                        record.publication_id,
+                        record.plan_id,
+                        record.staged_commit_id,
+                        record.decision_id,
+                        record.remote_name,
+                        record.remote_url,
+                        record.branch_name,
+                        record.commit_sha,
+                        record.parent_commit_sha,
+                        record.tree_sha,
+                        record.patch_sha256,
+                        record.pushed_at.isoformat(),
+                        record.verified_at.isoformat() if record.verified_at else None,
+                        record.status,
+                        json.dumps(record.verification_details),
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def _row_to_remote_branch(self, row: sqlite3.Row) -> RemoteBranchRecord:
+        """Hydrate RemoteBranchRecord from sqlite3.Row."""
+        return RemoteBranchRecord(
+            remote_branch_id=row["remote_branch_id"],
+            repair_id=row["repair_id"],
+            publication_id=row["publication_id"],
+            plan_id=row["plan_id"],
+            staged_commit_id=row["staged_commit_id"],
+            decision_id=row["decision_id"],
+            remote_name=row["remote_name"],
+            remote_url=row["remote_url"],
+            branch_name=row["branch_name"],
+            commit_sha=row["commit_sha"],
+            parent_commit_sha=row["parent_commit_sha"],
+            tree_sha=row["tree_sha"],
+            patch_sha256=row["patch_sha256"],
+            pushed_at=datetime.fromisoformat(row["pushed_at"]),
+            verified_at=datetime.fromisoformat(row["verified_at"]) if row["verified_at"] else None,
+            status=row["status"],
+            verification_details=json.loads(row["verification_details_json"] or "{}"),
+        )
+
+    def get_remote_branch(self, remote_branch_id: str) -> Optional[RemoteBranchRecord]:
+        """Fetch RemoteBranchRecord by ID."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM publication_remote_branches WHERE remote_branch_id = ?",
+                (remote_branch_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_remote_branch(row)
+        finally:
+            conn.close()
+
+    def get_remote_branch_for_repair(self, repair_id: str) -> Optional[RemoteBranchRecord]:
+        """Fetch the latest RemoteBranchRecord for a repair_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM publication_remote_branches WHERE repair_id = ? ORDER BY pushed_at DESC LIMIT 1",
+                (repair_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_remote_branch(row)
+        finally:
+            conn.close()
+
+    def list_remote_branches(self, repair_id: Optional[str] = None) -> List[RemoteBranchRecord]:
+        """List RemoteBranchRecords, optionally filtered by repair_id."""
+        conn = self._conn()
+        try:
+            if repair_id:
+                cur = conn.execute(
+                    "SELECT * FROM publication_remote_branches WHERE repair_id = ? ORDER BY pushed_at DESC",
+                    (repair_id,),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM publication_remote_branches ORDER BY pushed_at DESC"
+                )
+            return [self._row_to_remote_branch(row) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    # --- Phase 9 M3: Pull Request Records ---
+
+    def save_pull_request(self, record: PullRequestRecord) -> None:
+        """Persist or update a PullRequestRecord."""
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO publication_pull_requests (
+                        pr_record_id, repair_id, publication_id, plan_id,
+                        decision_id, staged_commit_id, remote_branch_id, provider,
+                        repository_owner, repository_name, target_branch, source_branch,
+                        pr_number, pr_url, pr_title, pr_body, pr_state, is_draft,
+                        created_at, verified_at, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(pr_record_id) DO UPDATE SET
+                        pr_state = excluded.pr_state,
+                        verified_at = excluded.verified_at,
+                        status = excluded.status
+                    """,
+                    (
+                        record.pr_record_id,
+                        record.repair_id,
+                        record.publication_id,
+                        record.plan_id,
+                        record.decision_id,
+                        record.staged_commit_id,
+                        record.remote_branch_id,
+                        record.provider,
+                        record.repository_owner,
+                        record.repository_name,
+                        record.target_branch,
+                        record.source_branch,
+                        record.pr_number,
+                        record.pr_url,
+                        record.pr_title,
+                        record.pr_body,
+                        record.pr_state,
+                        1 if record.is_draft else 0,
+                        record.created_at.isoformat(),
+                        record.verified_at.isoformat() if record.verified_at else None,
+                        record.status,
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def _row_to_pull_request(self, row: sqlite3.Row) -> PullRequestRecord:
+        """Hydrate PullRequestRecord from sqlite3.Row."""
+        return PullRequestRecord(
+            pr_record_id=row["pr_record_id"],
+            repair_id=row["repair_id"],
+            publication_id=row["publication_id"],
+            plan_id=row["plan_id"],
+            decision_id=row["decision_id"],
+            staged_commit_id=row["staged_commit_id"],
+            remote_branch_id=row["remote_branch_id"],
+            provider=row["provider"],
+            repository_owner=row["repository_owner"],
+            repository_name=row["repository_name"],
+            target_branch=row["target_branch"],
+            source_branch=row["source_branch"],
+            pr_number=row["pr_number"],
+            pr_url=row["pr_url"],
+            pr_title=row["pr_title"],
+            pr_body=row["pr_body"],
+            pr_state=row["pr_state"],
+            is_draft=bool(row["is_draft"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            verified_at=datetime.fromisoformat(row["verified_at"]) if row["verified_at"] else None,
+            status=row["status"],
+        )
+
+    def get_pull_request(self, pr_record_id: str) -> Optional[PullRequestRecord]:
+        """Fetch PullRequestRecord by ID."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM publication_pull_requests WHERE pr_record_id = ?",
+                (pr_record_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_pull_request(row)
+        finally:
+            conn.close()
+
+    def get_pull_request_for_repair(self, repair_id: str) -> Optional[PullRequestRecord]:
+        """Fetch latest PullRequestRecord for a repair_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM publication_pull_requests WHERE repair_id = ? ORDER BY created_at DESC LIMIT 1",
+                (repair_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_pull_request(row)
+        finally:
+            conn.close()
+
+    def list_pull_requests(self, repair_id: Optional[str] = None) -> List[PullRequestRecord]:
+        """List PullRequestRecords, optionally filtered by repair_id."""
+        conn = self._conn()
+        try:
+            if repair_id:
+                cur = conn.execute(
+                    "SELECT * FROM publication_pull_requests WHERE repair_id = ? ORDER BY created_at DESC",
+                    (repair_id,),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM publication_pull_requests ORDER BY created_at DESC"
+                )
+            return [self._row_to_pull_request(row) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    # --- Phase 9 M3: Provider Operations ---
+
+    def save_provider_operation(self, record: ProviderOperationRecord) -> None:
+        """Persist or update a ProviderOperationRecord."""
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO publication_provider_operations (
+                        operation_id, repair_id, provider, operation_type,
+                        idempotency_key, status, request_payload_json,
+                        response_payload_json, error_message, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(operation_id) DO UPDATE SET
+                        status = excluded.status,
+                        response_payload_json = excluded.response_payload_json,
+                        error_message = excluded.error_message
+                    """,
+                    (
+                        record.operation_id,
+                        record.repair_id,
+                        record.provider,
+                        record.operation_type,
+                        record.idempotency_key,
+                        record.status,
+                        json.dumps(record.request_payload),
+                        json.dumps(record.response_payload),
+                        record.error_message,
+                        record.created_at.isoformat(),
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def _row_to_provider_operation(self, row: sqlite3.Row) -> ProviderOperationRecord:
+        """Hydrate ProviderOperationRecord from sqlite3.Row."""
+        return ProviderOperationRecord(
+            operation_id=row["operation_id"],
+            repair_id=row["repair_id"],
+            provider=row["provider"],
+            operation_type=row["operation_type"],
+            idempotency_key=row["idempotency_key"],
+            status=row["status"],
+            request_payload=json.loads(row["request_payload_json"] or "{}"),
+            response_payload=json.loads(row["response_payload_json"] or "{}"),
+            error_message=row["error_message"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    def get_provider_operation(self, operation_id: str) -> Optional[ProviderOperationRecord]:
+        """Fetch ProviderOperationRecord by ID."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM publication_provider_operations WHERE operation_id = ?",
+                (operation_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_provider_operation(row)
+        finally:
+            conn.close()
+
+    def get_provider_operation_by_key(self, idempotency_key: str) -> Optional[ProviderOperationRecord]:
+        """Fetch ProviderOperationRecord by idempotency_key."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM publication_provider_operations WHERE idempotency_key = ? ORDER BY created_at DESC LIMIT 1",
+                (idempotency_key,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_provider_operation(row)
+        finally:
+            conn.close()
+
+    def list_provider_operations(self, repair_id: Optional[str] = None) -> List[ProviderOperationRecord]:
+        """List ProviderOperationRecords, optionally filtered by repair_id."""
+        conn = self._conn()
+        try:
+            if repair_id:
+                cur = conn.execute(
+                    "SELECT * FROM publication_provider_operations WHERE repair_id = ? ORDER BY created_at DESC",
+                    (repair_id,),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM publication_provider_operations ORDER BY created_at DESC"
+                )
+            return [self._row_to_provider_operation(row) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    # --- Phase 9 M3: Remote Publication Lifecycle Records ---
+
+    def save_remote_publication(self, record: RemotePublicationRecord) -> None:
+        """Persist or update a RemotePublicationRecord."""
+        conn = self._conn()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO publication_remote_records (
+                        remote_publication_id, repair_id, publication_id, plan_id,
+                        decision_id, staged_commit_id, provider, status,
+                        remote_branch_id, pr_record_id, failure_classification,
+                        failure_reason, created_at, updated_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(remote_publication_id) DO UPDATE SET
+                        status = excluded.status,
+                        remote_branch_id = excluded.remote_branch_id,
+                        pr_record_id = excluded.pr_record_id,
+                        failure_classification = excluded.failure_classification,
+                        failure_reason = excluded.failure_reason,
+                        updated_at = excluded.updated_at,
+                        completed_at = excluded.completed_at
+                    """,
+                    (
+                        record.remote_publication_id,
+                        record.repair_id,
+                        record.publication_id,
+                        record.plan_id,
+                        record.decision_id,
+                        record.staged_commit_id,
+                        record.provider,
+                        record.status,
+                        record.remote_branch_id,
+                        record.pr_record_id,
+                        record.failure_classification,
+                        record.failure_reason,
+                        record.created_at.isoformat(),
+                        record.updated_at.isoformat(),
+                        record.completed_at.isoformat() if record.completed_at else None,
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def _row_to_remote_publication(self, row: sqlite3.Row) -> RemotePublicationRecord:
+        """Hydrate RemotePublicationRecord from sqlite3.Row."""
+        return RemotePublicationRecord(
+            remote_publication_id=row["remote_publication_id"],
+            repair_id=row["repair_id"],
+            publication_id=row["publication_id"],
+            plan_id=row["plan_id"],
+            decision_id=row["decision_id"],
+            staged_commit_id=row["staged_commit_id"],
+            provider=row["provider"],
+            status=row["status"],
+            remote_branch_id=row["remote_branch_id"],
+            pr_record_id=row["pr_record_id"],
+            failure_classification=row["failure_classification"],
+            failure_reason=row["failure_reason"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+            completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
+        )
+
+    def get_remote_publication(self, remote_publication_id: str) -> Optional[RemotePublicationRecord]:
+        """Fetch RemotePublicationRecord by ID."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM publication_remote_records WHERE remote_publication_id = ?",
+                (remote_publication_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_remote_publication(row)
+        finally:
+            conn.close()
+
+    def get_remote_publication_for_repair(self, repair_id: str) -> Optional[RemotePublicationRecord]:
+        """Fetch the latest RemotePublicationRecord for a repair_id."""
+        conn = self._conn()
+        try:
+            cur = conn.execute(
+                "SELECT * FROM publication_remote_records WHERE repair_id = ? ORDER BY created_at DESC LIMIT 1",
+                (repair_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_remote_publication(row)
+        finally:
+            conn.close()
+
+    def list_remote_publications(self, repair_id: Optional[str] = None) -> List[RemotePublicationRecord]:
+        """List RemotePublicationRecords, optionally filtered by repair_id."""
+        conn = self._conn()
+        try:
+            if repair_id:
+                cur = conn.execute(
+                    "SELECT * FROM publication_remote_records WHERE repair_id = ? ORDER BY created_at DESC",
+                    (repair_id,),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM publication_remote_records ORDER BY created_at DESC"
+                )
+            return [self._row_to_remote_publication(row) for row in cur.fetchall()]
         finally:
             conn.close()

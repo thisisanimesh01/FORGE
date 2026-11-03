@@ -18,14 +18,25 @@ from forge.publication.failures import (
     BranchCreationError,
     CommitCreationError,
     CommitVerificationError,
+    DuplicatePullRequestError,
     DuplicatePublicationError,
     PatchStagingError,
     ProtectedBranchViolationError,
+    ProviderRateLimitError,
+    ProviderTimeoutError,
     PublicationActionMismatchError,
     PublicationAuthorizationError,
     PublicationError,
     PublicationPolicyViolationError,
     PublicationWorkspaceError,
+    PullRequestCreationError,
+    PullRequestVerificationError,
+    RemoteAuthenticationError,
+    RemoteBranchCollisionError,
+    RemoteBranchPushError,
+    RemoteBranchVerificationError,
+    RemotePublicationError,
+    RemoteRepositoryVerificationError,
     RepositoryDirtyError,
     RepositoryIdentityMismatchError,
     SecretDetectedError,
@@ -46,13 +57,18 @@ from forge.publication.models import (
     BranchProposal,
     CommitAuthor,
     CommitProposal,
+    ProviderOperationRecord,
     PublicationAction,
     PublicationExecutionState,
     PublicationPlan,
     PublicationRequest,
     PublicationStatus,
     PublicationValidationResult,
-    RepositoryIdentity,
+    PullRequestDetails,
+    PullRequestRecord,
+    RemoteBranchRecord,
+    RemotePublicationRecord,
+    RemoteRepositorySpec,
     StagedCommitRecord,
     WorkspaceIntegritySnapshot,
 )
@@ -63,6 +79,16 @@ from forge.publication.policy import (
     scan_for_secrets,
     validate_branch_name,
     validate_remote_url,
+)
+from forge.publication.pr_template import PullRequestFormatter
+from forge.publication.providers import (
+    GitHubPullRequestProvider,
+    retry_idempotent_operation,
+)
+from forge.publication.remote_coordinator import RemotePublicationCoordinator
+from forge.publication.remote_publisher import (
+    RemoteBranchPublisher,
+    parse_repository_owner_and_name,
 )
 from forge.publication.staging import PublicationStagingCoordinator
 from forge.publication.storage import PublicationStore
@@ -83,6 +109,12 @@ __all__ = [
     "PublicationValidationResult",
     "StagedCommitRecord",
     "WorkspaceIntegritySnapshot",
+    "RemoteRepositorySpec",
+    "PullRequestDetails",
+    "RemoteBranchRecord",
+    "PullRequestRecord",
+    "ProviderOperationRecord",
+    "RemotePublicationRecord",
     # Protocols
     "GitRepositoryInspectorProtocol",
     "GitBranchManagerProtocol",
@@ -110,6 +142,17 @@ __all__ = [
     "CommitVerificationError",
     "WorkspaceIntegrityError",
     "SymlinkEscapeError",
+    "RemotePublicationError",
+    "RemoteAuthenticationError",
+    "RemoteRepositoryVerificationError",
+    "RemoteBranchPushError",
+    "RemoteBranchVerificationError",
+    "PullRequestCreationError",
+    "PullRequestVerificationError",
+    "ProviderRateLimitError",
+    "ProviderTimeoutError",
+    "RemoteBranchCollisionError",
+    "DuplicatePullRequestError",
     # Policy & Authorization
     "GitPublicationPolicy",
     "is_protected_branch",
@@ -120,7 +163,7 @@ __all__ = [
     "get_permitted_publication_actions",
     "is_action_authorized",
     "validate_action_authorization",
-    # Components
+    # Components & Providers
     "GitRepositoryInspector",
     "GitPublicationValidator",
     "GitPublicationPlanner",
@@ -129,4 +172,10 @@ __all__ = [
     "GitBranchManager",
     "GitCommitBuilder",
     "PublicationStagingCoordinator",
+    "PullRequestFormatter",
+    "RemoteBranchPublisher",
+    "RemotePublicationCoordinator",
+    "GitHubPullRequestProvider",
+    "retry_idempotent_operation",
+    "parse_repository_owner_and_name",
 ]

@@ -2799,6 +2799,280 @@ def publish_inspect(
         typer.echo(f"  [{ev.sequence}] {ev.timestamp.strftime('%H:%M:%S')} {ev.actor.value if hasattr(ev.actor, 'value') else ev.actor}: {ev.payload.get('action', ev.to_state.value)}")
 
 
+# --- Phase 9 M3 Remote Publication Commands ---
+
+@publish_app.command(name="remote-validate")
+def publish_remote_validate(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to validate remote publication for"),
+    repo_path: Optional[str] = typer.Option(None, "--repo", "-r", help="Target repository directory (defaults to cwd)"),
+    remote_name: str = typer.Option("origin", "--remote", "-m", help="Git remote name (default: origin)"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output validation results as JSON"),
+) -> None:
+    """Validate remote publication preconditions for an approved repair without mutation."""
+    from forge.publication.remote_coordinator import RemotePublicationCoordinator
+    from forge.publication.storage import PublicationStore
+    from forge.repair.execution.storage import RepairExecutionStore
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+    forge_store = ForgeStore(db_path=settings.db_path)
+    pub_store = PublicationStore(db_path=settings.db_path)
+
+    coordinator = RemotePublicationCoordinator(
+        execution_store=exec_store,
+        forge_store=forge_store,
+        publication_store=pub_store,
+    )
+
+    resolved_repo = Path(repo_path).resolve() if repo_path else None
+
+    try:
+        result = coordinator.validate_remote_prerequisites(
+            repair_id=repair_id,
+            repo_path=resolved_repo,
+            remote_name=remote_name,
+        )
+    except Exception as e:
+        typer.secho(f"Remote publication validation failed: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if as_json:
+        typer.echo(json.dumps(result, indent=2))
+        return
+
+    typer.secho(f"[VALID] Remote publication authorized for repair '{repair_id}'.", fg=typer.colors.GREEN)
+    typer.echo(f"  Authorized Action: {result['authorized_action']}")
+    typer.echo(f"  Decision ID:       {result['decision_id']}")
+    typer.echo(f"  Staged Commit SHA: {result['staged_commit_sha']}")
+    typer.echo(f"  Branch Name:       {result['branch_name']}")
+    spec = result["remote_spec"]
+    typer.echo(f"  Provider:          {spec['provider']}")
+    typer.echo(f"  Target Repository: {spec['owner']}/{spec['repository']}")
+    typer.echo(f"  Remote URL:        {spec['remote_url']}")
+    typer.echo(f"  Default Branch:    {spec['default_branch']}")
+
+
+@publish_app.command(name="push")
+def publish_remote_push(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to push to remote"),
+    repo_path: Optional[str] = typer.Option(None, "--repo", "-r", help="Target repository directory (defaults to cwd)"),
+    remote_name: str = typer.Option("origin", "--remote", "-m", help="Git remote name (default: origin)"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output push result as JSON"),
+) -> None:
+    """Push verified staged commit to authorized remote branch."""
+    from forge.publication.remote_coordinator import RemotePublicationCoordinator
+    from forge.publication.storage import PublicationStore
+    from forge.repair.execution.storage import RepairExecutionStore
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+    forge_store = ForgeStore(db_path=settings.db_path)
+    pub_store = PublicationStore(db_path=settings.db_path)
+
+    coordinator = RemotePublicationCoordinator(
+        execution_store=exec_store,
+        forge_store=forge_store,
+        publication_store=pub_store,
+    )
+
+    resolved_repo = Path(repo_path).resolve() if repo_path else None
+
+    try:
+        record = coordinator.publish_remote_branch(
+            repair_id=repair_id,
+            repo_path=resolved_repo,
+            remote_name=remote_name,
+        )
+    except Exception as e:
+        typer.secho(f"Remote push failed: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if as_json:
+        typer.echo(record.model_dump_json(indent=2))
+        return
+
+    typer.secho(f"[PUBLISHED] Branch '{record.branch_name}' published and verified on remote.", fg=typer.colors.GREEN)
+    typer.echo(f"  Remote Branch ID:  {record.remote_branch_id}")
+    typer.echo(f"  Remote Name:       {record.remote_name}")
+    typer.echo(f"  Remote URL:        {record.remote_url}")
+    typer.echo(f"  Commit SHA:        {record.commit_sha}")
+    typer.echo(f"  Parent Commit:     {record.parent_commit_sha}")
+    typer.echo(f"  Tree SHA:          {record.tree_sha}")
+    typer.echo(f"  Status:            {record.status}")
+
+
+@publish_app.command(name="pr")
+def publish_create_pr(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to create pull request for"),
+    repo_path: Optional[str] = typer.Option(None, "--repo", "-r", help="Target repository directory (defaults to cwd)"),
+    remote_name: str = typer.Option("origin", "--remote", "-m", help="Git remote name (default: origin)"),
+    target_base: Optional[str] = typer.Option(None, "--base", "-b", help="Target base branch on upstream (e.g. main)"),
+    draft: bool = typer.Option(False, "--draft", help="Open as draft pull request"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output created PR as JSON"),
+) -> None:
+    """Create an upstream pull request for an already-pushed and verified branch."""
+    from forge.publication.remote_coordinator import RemotePublicationCoordinator
+    from forge.publication.storage import PublicationStore
+    from forge.repair.execution.storage import RepairExecutionStore
+    from forge.storage.store import ForgeStore
+
+    settings = get_settings()
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+    forge_store = ForgeStore(db_path=settings.db_path)
+    pub_store = PublicationStore(db_path=settings.db_path)
+
+    coordinator = RemotePublicationCoordinator(
+        execution_store=exec_store,
+        forge_store=forge_store,
+        publication_store=pub_store,
+    )
+
+    resolved_repo = Path(repo_path).resolve() if repo_path else None
+
+    try:
+        pr_record = coordinator.create_pull_request(
+            repair_id=repair_id,
+            repo_path=resolved_repo,
+            remote_name=remote_name,
+            target_base_branch=target_base,
+            draft=draft,
+        )
+    except Exception as e:
+        typer.secho(f"Pull request creation failed: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if as_json:
+        typer.echo(pr_record.model_dump_json(indent=2))
+        return
+
+    typer.secho(f"[CREATED] Pull Request #{pr_record.pr_number} created successfully.", fg=typer.colors.GREEN)
+    typer.echo(f"  PR Title:          {pr_record.pr_title}")
+    typer.echo(f"  PR URL:            {pr_record.pr_url}")
+    typer.echo(f"  Repository:        {pr_record.repository_owner}/{pr_record.repository_name}")
+    typer.echo(f"  Base Branch:       {pr_record.target_branch}")
+    typer.echo(f"  Head Branch:       {pr_record.source_branch}")
+    typer.echo(f"  State:             {pr_record.pr_state}")
+    typer.echo(f"  Draft:             {'Yes' if pr_record.is_draft else 'No'}")
+
+
+@publish_app.command(name="remote-status")
+def publish_remote_status(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to check remote publication status for"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output status as JSON"),
+) -> None:
+    """Check remote branch publication and PR status for a repair."""
+    from forge.publication.storage import PublicationStore
+
+    settings = get_settings()
+    pub_store = PublicationStore(db_path=settings.db_path)
+
+    remote_branch = pub_store.get_remote_branch_for_repair(repair_id)
+    pr = pub_store.get_pull_request_for_repair(repair_id)
+    remote_pub = pub_store.get_remote_publication_for_repair(repair_id)
+
+    if as_json:
+        payload = {
+            "remote_branch": remote_branch.model_dump(mode="json") if remote_branch else None,
+            "pull_request": pr.model_dump(mode="json") if pr else None,
+            "remote_publication": remote_pub.model_dump(mode="json") if remote_pub else None,
+        }
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    typer.secho(f"Remote Publication Status: {repair_id}", bold=True)
+    typer.echo("=" * 60)
+    if remote_branch:
+        typer.echo(f"  Remote Branch:     {remote_branch.branch_name}")
+        typer.echo(f"  Remote URL:        {remote_branch.remote_url}")
+        typer.echo(f"  Commit SHA:        {remote_branch.commit_sha}")
+        typer.echo(f"  Branch Status:     {remote_branch.status}")
+    else:
+        typer.echo("  Remote Branch:     Not pushed")
+
+    if pr:
+        typer.echo(f"  Pull Request:      #{pr.pr_number} ({pr.pr_state})")
+        typer.echo(f"  PR Title:          {pr.pr_title}")
+        typer.echo(f"  PR URL:            {pr.pr_url}")
+        typer.echo(f"  PR Status:         {pr.status}")
+    else:
+        typer.echo("  Pull Request:      Not created")
+
+    if remote_pub:
+        typer.echo(f"  Overall Status:    {remote_pub.status}")
+
+
+@publish_app.command(name="pr-status")
+def publish_pr_status(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to check PR status for"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output PR status as JSON"),
+) -> None:
+    """Check pull request status for an approved repair."""
+    publish_remote_status(repair_id=repair_id, as_json=as_json)
+
+
+@publish_app.command(name="remote-inspect")
+def publish_remote_inspect(
+    repair_id: str = typer.Argument(..., help="Repair execution ID to inspect remote records for"),
+    as_json: bool = typer.Option(False, "--json", "-j", help="Output inspection as JSON"),
+) -> None:
+    """Inspect detailed remote branch, pull request, and provider operation records."""
+    from forge.publication.storage import PublicationStore
+    from forge.repair.execution.storage import RepairExecutionStore
+
+    settings = get_settings()
+    pub_store = PublicationStore(db_path=settings.db_path)
+    exec_store = RepairExecutionStore(db_path=settings.db_path)
+
+    remote_branch = pub_store.get_remote_branch_for_repair(repair_id)
+    pr = pub_store.get_pull_request_for_repair(repair_id)
+    ops = pub_store.list_provider_operations(repair_id)
+    events = exec_store.get_events_for_repair(repair_id)
+    remote_events = [
+        e for e in events
+        if any(keyword in str(e.payload.get("action", "")) for keyword in ("remote", "pull_request", "push"))
+    ]
+
+    if as_json:
+        payload = {
+            "remote_branch": remote_branch.model_dump(mode="json") if remote_branch else None,
+            "pull_request": pr.model_dump(mode="json") if pr else None,
+            "provider_operations": [op.model_dump(mode="json") for op in ops],
+            "audit_events": [e.model_dump(mode="json") for e in remote_events],
+        }
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    typer.secho(f"Detailed Remote Publication Inspection: {repair_id}", bold=True)
+    typer.echo("=" * 60)
+    if remote_branch:
+        typer.echo(f"Remote Branch ID:    {remote_branch.remote_branch_id}")
+        typer.echo(f"  Branch Name:       {remote_branch.branch_name}")
+        typer.echo(f"  Commit SHA:        {remote_branch.commit_sha}")
+        typer.echo(f"  Parent Commit:     {remote_branch.parent_commit_sha}")
+        typer.echo(f"  Tree SHA:          {remote_branch.tree_sha}")
+        typer.echo(f"  Remote URL:        {remote_branch.remote_url}")
+        typer.echo(f"  Pushed At:         {remote_branch.pushed_at.strftime('%Y-%m-%d %H:%M:%S')}")
+        typer.echo(f"  Verified At:       {remote_branch.verified_at.strftime('%Y-%m-%d %H:%M:%S') if remote_branch.verified_at else 'N/A'}")
+
+    if pr:
+        typer.echo("")
+        typer.echo(f"Pull Request #{pr.pr_number}:")
+        typer.echo(f"  Title:             {pr.pr_title}")
+        typer.echo(f"  URL:               {pr.pr_url}")
+        typer.echo(f"  State:             {pr.pr_state}")
+        typer.echo(f"  Base -> Head:      {pr.target_branch} <- {pr.source_branch}")
+        typer.echo(f"  Created At:        {pr.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    if remote_events:
+        typer.echo("")
+        typer.echo(f"Remote Audit Trail ({len(remote_events)} events):")
+        for ev in remote_events:
+            action_name = ev.payload.get("action", ev.to_state.value if hasattr(ev.to_state, "value") else str(ev.to_state))
+            typer.echo(f"  [{ev.sequence}] {ev.timestamp.strftime('%H:%M:%S')} {action_name}")
+
+
 
 # =============================================================================
 # Controlled Repair Orchestration Workflow CLI Commands (Phase 4 M4)
