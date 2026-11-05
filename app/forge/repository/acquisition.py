@@ -6,10 +6,17 @@ import shutil
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Optional
-from pydantic import BaseModel, Field
+from typing import Any, Optional
+from pydantic import BaseModel, ConfigDict, Field
 
 from forge.config import get_settings, redact_secrets
+from forge.repository.git_mediator import GitMediator
+from forge.repository.protection import (
+    create_copytree_ignore,
+    purge_protected_paths_from_workspace,
+    purge_protected_git_metadata,
+    GitMetadataProtectionError,
+)
 from forge.repository.validation import (
     TargetType,
     TargetValidationResult,
@@ -21,6 +28,8 @@ from forge.repository.validation import (
 
 class AcquiredRepository(BaseModel):
     """Metadata describing a safely acquired repository."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     target: str
     workspace_path: Path
     base_workspace: Path
@@ -28,6 +37,10 @@ class AcquiredRepository(BaseModel):
     resolved_commit_sha: Optional[str] = None
     target_branch: Optional[str] = None
     is_local_copy: bool = False
+    trusted_git_path: Optional[Path] = None
+    upstream_commit_sha: Optional[str] = None
+    analysis_commit_sha: Optional[str] = None
+    mediator: Optional[Any] = None
 
 
 class AcquisitionError(Exception):
@@ -81,142 +94,219 @@ def acquire_repository(
     run_token = uuid.uuid4().hex[:12]
     dest_dir = base_dir / f"repo_{run_token}"
     dest_dir.mkdir(parents=True, exist_ok=False)
+    trusted_dir = base_dir / f"trusted_{run_token}.git"
 
     target_commit = (commit_sha or "").strip() or None
     if not target_commit and branch and re.match(r"^[0-9a-fA-F]{40}$", branch.strip()):
         target_commit = branch.strip()
 
     if validation.target_type == TargetType.REMOTE_GIT:
-        # If pinned commit is requested, attempt shallow commit fetch
-        if target_commit:
-            run_git_command(["init"], cwd=dest_dir)
-            run_git_command(["config", "core.hooksPath", "/dev/null"], cwd=dest_dir)
-            run_git_command(["remote", "add", "origin", validation.sanitized_target], cwd=dest_dir)
-            fetch_res = run_git_command(
-                ["fetch", "--depth", "1", "origin", target_commit],
-                cwd=dest_dir,
-                timeout_seconds=settings.step_timeout_seconds,
-            )
-            if fetch_res.returncode == 0:
-                checkout_res = run_git_command(["checkout", target_commit], cwd=dest_dir)
-                if checkout_res.returncode == 0:
-                    return AcquiredRepository(
-                        target=target,
-                        workspace_path=dest_dir,
-                        base_workspace=base_dir,
-                        is_temporary=True,
-                        resolved_commit_sha=target_commit,
-                        target_branch=branch or target_commit[:8],
-                        is_local_copy=False,
-                    )
-            # If shallow fetch of specific commit failed, reset directory for fallback clone
-            shutil.rmtree(dest_dir, ignore_errors=True)
-            dest_dir.mkdir(parents=True, exist_ok=False)
-
+        # Clone into isolated trusted repository mirror outside analysis workspace
         clone_args = [
             "clone",
             "--config", "core.hooksPath=/dev/null",
-            "--depth", "1",
         ]
         if branch and not target_commit:
             clone_args.extend(["--branch", branch])
-        clone_args.extend([validation.sanitized_target, str(dest_dir)])
+        clone_args.extend([validation.sanitized_target, str(trusted_dir)])
 
         result = run_git_command(clone_args, timeout_seconds=settings.step_timeout_seconds)
         if result.returncode != 0:
             shutil.rmtree(dest_dir, ignore_errors=True)
+            shutil.rmtree(trusted_dir, ignore_errors=True)
             err_msg = redact_secrets(result.stderr or result.stdout)
             raise AcquisitionError(f"Failed to clone repository: {err_msg}")
 
-        # Explicitly configure cloned repository to disable hooks in local config as well
-        run_git_command(["config", "core.hooksPath", "/dev/null"], cwd=dest_dir)
+        # Secure permissions on trusted repository (user-only, mode 0700)
+        try:
+            os.chmod(trusted_dir, 0o700)
+        except OSError:
+            pass
 
-        # If target commit was requested but shallow fetch was retried via clone:
+        # Explicitly configure cloned repository to disable hooks in local config
+        run_git_command(["config", "core.hooksPath", "/dev/null"], cwd=trusted_dir)
+
         if target_commit:
-            run_git_command(["checkout", target_commit], cwd=dest_dir)
+            run_git_command(["checkout", target_commit], cwd=trusted_dir)
 
-        # Extract resolved commit SHA and branch
-        commit_res = run_git_command(["rev-parse", "HEAD"], cwd=dest_dir)
-        commit_sha_resolved = commit_res.stdout.strip() if commit_res.returncode == 0 else target_commit
+        # Extract authentic upstream commit SHA and branch from trusted mirror
+        commit_res = run_git_command(["rev-parse", "HEAD"], cwd=trusted_dir)
+        upstream_commit_sha = commit_res.stdout.strip() if commit_res.returncode == 0 else target_commit
 
-        branch_res = run_git_command(["rev-parse", "--abbrev-ref", "HEAD"], cwd=dest_dir)
+        branch_res = run_git_command(["rev-parse", "--abbrev-ref", "HEAD"], cwd=trusted_dir)
         resolved_branch = branch_res.stdout.strip() if branch_res.returncode == 0 else branch
+
+        # Instantiate mediator between trusted repository and analysis workspace
+        mediator = GitMediator(trusted_git_path=trusted_dir, workspace_path=dest_dir)
+
+        try:
+            # Export sanitized working tree into dest_dir (excluding all protected paths)
+            mediator.export_sanitized_workspace(dest_dir)
+            purge_protected_paths_from_workspace(dest_dir)
+
+            # Initialize clean local Git repository in analysis workspace containing only sanitized files
+            run_git_command(["init"], cwd=dest_dir)
+            run_git_command(["config", "user.name", "FORGE Analysis Agent"], cwd=dest_dir)
+            run_git_command(["config", "user.email", "agent@forge.local"], cwd=dest_dir)
+            run_git_command(["config", "core.hooksPath", "/dev/null"], cwd=dest_dir)
+            run_git_command(["add", "."], cwd=dest_dir)
+            run_git_command(["commit", "-m", "Sanitized analysis workspace snapshot"], cwd=dest_dir)
+            analysis_commit_res = run_git_command(["rev-parse", "HEAD"], cwd=dest_dir)
+            analysis_commit_sha = analysis_commit_res.stdout.strip() if analysis_commit_res.returncode == 0 else None
+        except Exception as e:
+            shutil.rmtree(dest_dir, ignore_errors=True)
+            shutil.rmtree(trusted_dir, ignore_errors=True)
+            raise AcquisitionError(f"Failed to export sanitized repository workspace: {e}") from e
 
         return AcquiredRepository(
             target=target,
             workspace_path=dest_dir,
             base_workspace=base_dir,
             is_temporary=True,
-            resolved_commit_sha=commit_sha_resolved,
+            resolved_commit_sha=upstream_commit_sha,
             target_branch=resolved_branch,
             is_local_copy=False,
+            trusted_git_path=trusted_dir,
+            upstream_commit_sha=upstream_commit_sha,
+            analysis_commit_sha=analysis_commit_sha,
+            mediator=mediator,
         )
 
     elif validation.target_type == TargetType.LOCAL_DIRECTORY:
         local_src = Path(validation.sanitized_target).resolve()
+        has_git = (local_src / ".git").is_dir()
+        has_commits = False
+        if has_git:
+            commit_chk = run_git_command(["rev-parse", "HEAD"], cwd=local_src)
+            has_commits = (commit_chk.returncode == 0)
 
-        # Copy files safely, ignoring .git hooks and virtual environments, and strictly rejecting external symlinks
-        def ignore_patterns(dir_path: str, names: list[str]) -> set[str]:
-            ignored = set()
-            curr = Path(dir_path)
-            for name in names:
-                item = curr / name
-                if name in [".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache"]:
-                    ignored.add(name)
-                elif item.is_symlink():
-                    try:
-                        resolved_target = item.resolve()
-                        resolved_target.relative_to(local_src)
-                    except (ValueError, RuntimeError):
-                        # Symlink points outside local_src; ignore it for safety
-                        ignored.add(name)
-            return ignored
+        if has_git and has_commits:
+            # Clone from local source into isolated trusted repository mirror outside analysis workspace
+            clone_args = [
+                "clone",
+                "--no-hardlinks",
+                "--config", "core.hooksPath=/dev/null",
+                str(local_src),
+                str(trusted_dir),
+            ]
+            res_clone = run_git_command(clone_args, timeout_seconds=settings.step_timeout_seconds)
+            if res_clone.returncode != 0:
+                shutil.rmtree(dest_dir, ignore_errors=True)
+                shutil.rmtree(trusted_dir, ignore_errors=True)
+                err_msg = redact_secrets(res_clone.stderr or res_clone.stdout)
+                raise AcquisitionError(f"Failed to clone local repository: {err_msg}")
 
-        # Safely copy into workspace without preserving symlinks as symlinks
-        shutil.copytree(local_src, dest_dir, dirs_exist_ok=True, ignore=ignore_patterns, symlinks=False)
+            try:
+                os.chmod(trusted_dir, 0o700)
+            except OSError:
+                pass
 
-        # Check if local source had git
-        commit_sha = None
-        resolved_branch = branch
-        if (local_src / ".git").is_dir():
-            commit_res = run_git_command(["rev-parse", "HEAD"], cwd=local_src)
-            if commit_res.returncode == 0:
-                commit_sha = commit_res.stdout.strip()
-            branch_res = run_git_command(["rev-parse", "--abbrev-ref", "HEAD"], cwd=local_src)
-            if branch_res.returncode == 0:
-                resolved_branch = branch_res.stdout.strip()
+            run_git_command(["config", "core.hooksPath", "/dev/null"], cwd=trusted_dir)
 
-        return AcquiredRepository(
-            target=target,
-            workspace_path=dest_dir,
-            base_workspace=base_dir,
-            is_temporary=True,
-            resolved_commit_sha=commit_sha,
-            target_branch=resolved_branch,
-            is_local_copy=True,
-        )
+            if target_commit:
+                run_git_command(["checkout", target_commit], cwd=trusted_dir)
+            elif branch:
+                run_git_command(["checkout", branch], cwd=trusted_dir)
+
+            commit_res = run_git_command(["rev-parse", "HEAD"], cwd=trusted_dir)
+            upstream_commit_sha = commit_res.stdout.strip() if commit_res.returncode == 0 else target_commit
+
+            branch_res = run_git_command(["rev-parse", "--abbrev-ref", "HEAD"], cwd=trusted_dir)
+            resolved_branch = branch_res.stdout.strip() if branch_res.returncode == 0 else branch
+
+            mediator = GitMediator(trusted_git_path=trusted_dir, workspace_path=dest_dir)
+
+            try:
+                mediator.export_sanitized_workspace(dest_dir)
+                purge_protected_paths_from_workspace(dest_dir)
+
+                # Initialize clean local Git repository in analysis workspace containing only sanitized files
+                run_git_command(["init"], cwd=dest_dir)
+                run_git_command(["config", "user.name", "FORGE Analysis Agent"], cwd=dest_dir)
+                run_git_command(["config", "user.email", "agent@forge.local"], cwd=dest_dir)
+                run_git_command(["config", "core.hooksPath", "/dev/null"], cwd=dest_dir)
+                run_git_command(["add", "."], cwd=dest_dir)
+                run_git_command(["commit", "-m", "Sanitized analysis workspace snapshot"], cwd=dest_dir)
+                analysis_commit_res = run_git_command(["rev-parse", "HEAD"], cwd=dest_dir)
+                analysis_commit_sha = analysis_commit_res.stdout.strip() if analysis_commit_res.returncode == 0 else None
+            except Exception as e:
+                shutil.rmtree(dest_dir, ignore_errors=True)
+                shutil.rmtree(trusted_dir, ignore_errors=True)
+                raise AcquisitionError(f"Failed to export sanitized repository workspace: {e}") from e
+
+            return AcquiredRepository(
+                target=target,
+                workspace_path=dest_dir,
+                base_workspace=base_dir,
+                is_temporary=True,
+                resolved_commit_sha=upstream_commit_sha,
+                target_branch=resolved_branch,
+                is_local_copy=True,
+                trusted_git_path=trusted_dir,
+                upstream_commit_sha=upstream_commit_sha,
+                analysis_commit_sha=analysis_commit_sha,
+                mediator=mediator,
+            )
+        else:
+            # Non-git directory or uncommitted git repo: copy unprotected files
+            ignore_patterns = create_copytree_ignore(local_src)
+            shutil.copytree(local_src, dest_dir, dirs_exist_ok=True, ignore=ignore_patterns, symlinks=False)
+            purge_protected_paths_from_workspace(dest_dir)
+
+            # Strip any uncommitted .git directory copied from source to eliminate hooks
+            ws_git = dest_dir / ".git"
+            if ws_git.exists():
+                shutil.rmtree(ws_git, ignore_errors=True)
+
+            # Initialize clean git repository in analysis workspace
+            run_git_command(["init"], cwd=dest_dir)
+            run_git_command(["config", "user.name", "FORGE Analysis Agent"], cwd=dest_dir)
+            run_git_command(["config", "user.email", "agent@forge.local"], cwd=dest_dir)
+            run_git_command(["config", "core.hooksPath", "/dev/null"], cwd=dest_dir)
+            run_git_command(["add", "."], cwd=dest_dir)
+            run_git_command(["commit", "-m", "Sanitized analysis workspace snapshot"], cwd=dest_dir)
+            analysis_commit_res = run_git_command(["rev-parse", "HEAD"], cwd=dest_dir)
+            analysis_commit_sha = analysis_commit_res.stdout.strip() if analysis_commit_res.returncode == 0 else None
+
+            return AcquiredRepository(
+                target=target,
+                workspace_path=dest_dir,
+                base_workspace=base_dir,
+                is_temporary=True,
+                resolved_commit_sha=None,
+                target_branch=branch,
+                is_local_copy=True,
+                trusted_git_path=None,
+                upstream_commit_sha=None,
+                analysis_commit_sha=analysis_commit_sha,
+                mediator=None,
+            )
 
     raise SecurityError(f"Unsupported target type: {validation.target_type}")
 
 
 def cleanup_repository(repo: AcquiredRepository, allowed_base: Optional[Path] = None) -> None:
-    """Clean up acquired temporary workspace safely, verifying containment within allowed workspace base."""
-    if not repo.is_temporary or not repo.workspace_path.exists():
+    """Clean up acquired temporary workspace and trusted mirror safely, verifying containment."""
+    if not repo.is_temporary:
         return
 
     base_dir = (allowed_base or repo.base_workspace).resolve()
-    target_path = repo.workspace_path.resolve()
 
-    # Enforce that cleanup target is strictly a subdirectory of base_dir and not base_dir itself
-    try:
-        rel = target_path.relative_to(base_dir)
-        if str(rel) in [".", ""]:
-            raise SecurityError(f"Refusing to delete base workspace directory: {target_path}")
-    except ValueError:
-        raise SecurityError(
-            f"Refusing to delete path outside permitted workspace root: {target_path} (root: {base_dir})"
-        )
+    paths_to_clean = []
+    if repo.workspace_path and repo.workspace_path.exists():
+        paths_to_clean.append(repo.workspace_path)
+    if repo.trusted_git_path and repo.trusted_git_path.exists():
+        paths_to_clean.append(repo.trusted_git_path)
 
-    # Target path must be a directory and must follow naming convention repo_*
-    if target_path.is_dir() and target_path.name.startswith("repo_"):
-        shutil.rmtree(target_path, ignore_errors=True)
+    for p in paths_to_clean:
+        target_path = p.resolve()
+        try:
+            rel = target_path.relative_to(base_dir)
+            if str(rel) in [".", ""]:
+                raise SecurityError(f"Refusing to delete base workspace directory: {target_path}")
+        except ValueError:
+            raise SecurityError(
+                f"Refusing to delete path outside permitted workspace root: {target_path} (root: {base_dir})"
+            )
+        if target_path.is_dir() and (target_path.name.startswith("repo_") or target_path.name.startswith("trusted_")):
+            shutil.rmtree(target_path, ignore_errors=True)

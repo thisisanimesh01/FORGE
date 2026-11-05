@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
+from forge.repository.protection import is_protected_path
 from forge.repository.validation import assert_contained_path
 
 
@@ -131,7 +132,18 @@ class ASTSymbolVisitor(ast.NodeVisitor):
 
 def index_python_file(file_path: Path, repo_root: Path) -> List[SymbolRecord]:
     """Parse a single Python file into AST and collect symbols."""
-    resolved_file = assert_contained_path(file_path, repo_root)
+    # Exclude protected files before containment resolution or content reads
+    if is_protected_path(file_path, base_dir=repo_root):
+        return []
+
+    try:
+        resolved_file = assert_contained_path(file_path, repo_root)
+    except Exception:
+        return []
+
+    if is_protected_path(resolved_file, base_dir=repo_root):
+        return []
+
     rel_path = str(resolved_file.relative_to(repo_root))
 
     try:
@@ -163,10 +175,16 @@ def build_symbol_index(
 
     processed_count = 0
     for py_file in root.rglob("*.py"):
+        if is_protected_path(py_file, base_dir=root):
+            continue
+
         # Prevent traversal outside root
         try:
             resolved = assert_contained_path(py_file, root)
         except Exception:
+            continue
+
+        if is_protected_path(resolved, base_dir=root):
             continue
 
         # Skip virtualenvs and caches

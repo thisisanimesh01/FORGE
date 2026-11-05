@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
+from forge.repository.protection import is_protected_path
 from forge.repository.validation import assert_contained_path
 
 
@@ -40,9 +41,13 @@ def load_instruction_files(
         for match in matches:
             if not match.is_file():
                 continue
+            if is_protected_path(match, base_dir=root):
+                continue
             try:
                 resolved = assert_contained_path(match, root)
                 if resolved in seen_paths:
+                    continue
+                if is_protected_path(resolved, base_dir=root):
                     continue
                 seen_paths.add(resolved)
                 rel_path = str(resolved.relative_to(root))

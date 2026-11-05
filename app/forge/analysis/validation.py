@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Sequence, Set, Tuple, runtime_checkable
 
 from forge.analysis.evidence import normalize_relative_path
+from forge.repository.protection import is_protected_path
 from forge.schemas import (
     EvidenceRecord,
     EvidenceType,
@@ -266,6 +267,12 @@ def validate_repository_path(
     except (ValueError, RuntimeError):
         raise RepositoryPathValidationError(
             f"Security violation: Path traversal, symlink escape, or escape outside workspace detected for '{clean_str}'",
+            affected_file=norm_path,
+        )
+
+    if is_protected_path(norm_path, base_dir=ws_resolved) or is_protected_path(candidate, base_dir=ws_resolved):
+        raise RepositoryPathValidationError(
+            f"Security violation: Access to protected sensitive file forbidden: '{norm_path}'",
             affected_file=norm_path,
         )
 

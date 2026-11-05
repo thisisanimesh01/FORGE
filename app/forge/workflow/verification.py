@@ -29,6 +29,7 @@ from forge.repair.contracts import (
 from forge.repair.models import ProtectedPathPolicy, RepairPlan
 from forge.repair.semantic_verifier import analyze_python_ast_semantics
 from forge.repair.verifier import apply_unified_diff_to_file, prepare_disposable_workspace
+from forge.repository.protection import is_protected_path
 from forge.sandbox.contracts import ExecutionEnvironmentSpec, ReproductionCommand
 from forge.sandbox.docker import DockerSandbox
 from forge.sandbox.models import (
@@ -277,6 +278,8 @@ class MultiCheckVerifier:
 
         # Protected file check
         is_prot, prot_msg = ProtectedPathPolicy.is_protected(repair_plan.target_file)
+        if not is_prot and is_protected_path(repair_plan.target_file):
+            is_prot, prot_msg = True, "File matches centralized protected sensitive file policy"
         if is_prot:
             return self._build_blocked_result(
                 attempt_id=attempt_id,
@@ -610,7 +613,35 @@ class MultiCheckVerifier:
 
         # Special handling for SEMANTIC AST verification check
         if check.check_type == VerificationCheckType.SEMANTIC:
+            if is_protected_path(plan.target_file):
+                return VerificationCheckResult(
+                    check_type=check.check_type,
+                    name=check.name,
+                    status=CheckStatus.FAILED,
+                    command=check.command,
+                    pinned_revision=plan.base_commit_sha,
+                    scratch_workspace_id=scratch_id,
+                    provenance=provenance,
+                    is_baseline=is_baseline,
+                    diagnostic=f"Target file '{plan.target_file}' is a protected repository file and cannot be read.",
+                    tool_available=True,
+                )
+
             target_path = workspace_path / plan.target_file
+            if is_protected_path(target_path, base_dir=workspace_path):
+                return VerificationCheckResult(
+                    check_type=check.check_type,
+                    name=check.name,
+                    status=CheckStatus.FAILED,
+                    command=check.command,
+                    pinned_revision=plan.base_commit_sha,
+                    scratch_workspace_id=scratch_id,
+                    provenance=provenance,
+                    is_baseline=is_baseline,
+                    diagnostic=f"Target path '{plan.target_file}' is protected and cannot be read.",
+                    tool_available=True,
+                )
+
             if not target_path.is_file():
                 return VerificationCheckResult(
                     check_type=check.check_type,
@@ -655,6 +686,19 @@ class MultiCheckVerifier:
                     )
             else:
                 baseline_file = (target_repo / plan.target_file) if target_repo else None
+                if baseline_file and is_protected_path(baseline_file, base_dir=target_repo):
+                    return VerificationCheckResult(
+                        check_type=check.check_type,
+                        name=check.name,
+                        status=CheckStatus.FAILED,
+                        command=check.command,
+                        pinned_revision=plan.base_commit_sha,
+                        scratch_workspace_id=scratch_id,
+                        provenance=provenance,
+                        is_baseline=is_baseline,
+                        diagnostic=f"Baseline target file '{plan.target_file}' is protected and cannot be read.",
+                        tool_available=True,
+                    )
                 orig_text = baseline_file.read_text(encoding="utf-8", errors="replace") if baseline_file and baseline_file.is_file() else ""
                 cand_text = target_path.read_text(encoding="utf-8", errors="replace")
                 sem_res = analyze_python_ast_semantics(

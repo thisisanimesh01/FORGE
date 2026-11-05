@@ -18,6 +18,7 @@ from forge import __version__
 from forge.config import redact_secrets
 from forge.repair.contracts import compute_patch_sha256
 from forge.repair.models import ProtectedPathPolicy, RepairPlan
+from forge.repository.protection import is_protected_path
 from forge.schemas import EvidenceType, Finding, FindingSeverity
 from forge.storage.store import ForgeStore
 from forge.workflow.dossier_models import (
@@ -961,6 +962,10 @@ def validate_engineering_dossier(
 
         if fpath.is_symlink():
             errors.append(f"Artifact '{fname}' is an illegal symlink.")
+            continue
+
+        if is_protected_path(fpath, base_dir=dpath):
+            errors.append(f"Security violation: dossier manifest references protected sensitive file '{fname}'.")
             continue
 
         # Verify byte size

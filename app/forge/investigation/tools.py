@@ -17,6 +17,7 @@ from forge.repository.indexer import SymbolIndex
 from forge.repository.validation import assert_contained_path, SecurityError
 from forge.sandbox.adapter import Sandbox
 from forge.sandbox.docker import DockerSandbox
+from forge.repository.protection import is_protected_path
 from forge.sandbox.evidence import record_sandbox_result_in_store
 from forge.sandbox.models import SandboxRequest, ExecutionLimits
 from forge.schemas import (
@@ -599,10 +600,14 @@ class ToolRegistry:
         for f in files_to_check:
             if not f.is_file():
                 continue
+            if is_protected_path(f, base_dir=self.workspace_path):
+                continue
             # Ensure resolved symlinks do not escape workspace
             try:
                 assert_contained_path(f.resolve(), self.workspace_path)
             except SecurityError:
+                continue
+            if is_protected_path(f.resolve(), base_dir=self.workspace_path):
                 continue
             if any(p in [".git", ".venv", "__pycache__", ".pytest_cache"] for p in f.parts):
                 continue

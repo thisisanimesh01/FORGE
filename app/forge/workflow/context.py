@@ -20,6 +20,7 @@ from forge.reproduction.models import FieldProvenance
 from forge.repository.detector import ProjectIntelligence, detect_repository
 from forge.repository.indexer import SymbolIndex, SymbolRecord, build_symbol_index
 from forge.repository.instructions import InstructionFile, load_instruction_files
+from forge.repository.protection import is_protected_path
 from forge.workflow.intake import resolve_and_pin_revision
 from forge.workflow.models import (
     ContextBudget,
@@ -80,11 +81,21 @@ def extract_source_excerpts(
     sorted_files = sorted(list(set(affected_files)))[:max_files]
 
     for rel_path in sorted_files:
-        full_path = (repo_path / rel_path).resolve()
+        if is_protected_path(rel_path, base_dir=repo_path):
+            continue
+
+        raw_path = repo_path / rel_path
+        if is_protected_path(raw_path, base_dir=repo_path):
+            continue
+
+        full_path = raw_path.resolve()
         # Verify containment inside repo_path
         try:
             full_path.relative_to(repo_path.resolve())
         except ValueError:
+            continue
+
+        if is_protected_path(full_path, base_dir=repo_path):
             continue
 
         if not full_path.exists() or not full_path.is_file():
@@ -156,8 +167,9 @@ def render_context_prompt(
         intake.description,
         "",
     ]
-    if intake.affected_files:
-        header_lines.append(f"**Declared Affected Files**: {', '.join(intake.affected_files)}")
+    safe_affected_files = [f for f in intake.affected_files if not is_protected_path(f)]
+    if safe_affected_files:
+        header_lines.append(f"**Declared Affected Files**: {', '.join(safe_affected_files)}")
         header_lines.append("")
     sections.append("\n".join(header_lines))
 
@@ -282,10 +294,11 @@ def assemble_repository_context(
     intelligence = detect_repository(resolved_repo)
 
     # 3. AST Symbol Indexing
+    safe_affected = [f for f in intake.affected_files if not is_protected_path(f, base_dir=resolved_repo)]
     symbol_index = build_symbol_index(resolved_repo)
     relevant_symbols = filter_and_rank_symbols(
         symbol_index=symbol_index,
-        affected_files=intake.affected_files,
+        affected_files=safe_affected,
         max_symbols=active_budget.max_symbols,
     )
 
@@ -295,7 +308,7 @@ def assemble_repository_context(
     # 5. Source Excerpts
     excerpts = extract_source_excerpts(
         repo_path=resolved_repo,
-        affected_files=intake.affected_files,
+        affected_files=safe_affected,
         max_lines_per_file=active_budget.max_source_lines_per_file,
         max_files=active_budget.max_files_excerpted,
     )
