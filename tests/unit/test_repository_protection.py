@@ -850,10 +850,13 @@ def test_git_metadata_purge_fails_closed_on_purge_failure(tmp_path: Path, monkey
     src = tmp_path / "fail_repo"
     src.mkdir()
     run_git_command(["init"], cwd=src)
+    run_git_command(["config", "user.name", "Fail Test"], cwd=src)
+    run_git_command(["config", "user.email", "fail@test.local"], cwd=src)
     (src / "app.py").write_text("code", encoding="utf-8")
     (src / ".env").write_text("secret", encoding="utf-8")
     run_git_command(["add", "."], cwd=src)
-    run_git_command(["commit", "-m", "init"], cwd=src)
+    commit_res = run_git_command(["commit", "-m", "init"], cwd=src)
+    assert commit_res.returncode == 0, f"Git commit failed: {commit_res.stderr}"
 
     # Monkeypatch GitMediator.export_sanitized_workspace to raise an error
     def faulty_export(self, dest_dir, ref=None):
@@ -865,8 +868,46 @@ def test_git_metadata_purge_fails_closed_on_purge_failure(tmp_path: Path, monkey
     with pytest.raises(AcquisitionError, match="Failed to export sanitized repository workspace"):
         acquire_repository(str(src), custom_workspace=ws, allow_local=True)
 
-    # Destination directory must have been cleaned up
+    # Destination directory and trusted mirror must have been cleaned up
     assert not any(ws.glob("repo_*"))
+    assert not any(ws.glob("trusted_*"))
+
+
+def test_git_metadata_purge_fails_closed_on_remote_export_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """If GitMediator.export_sanitized_workspace encounters an operational failure during remote acquisition, fail closed."""
+    remote_src = tmp_path / "remote_fail_repo"
+    remote_src.mkdir()
+    run_git_command(["init"], cwd=remote_src)
+    run_git_command(["config", "user.name", "Remote Fail Test"], cwd=remote_src)
+    run_git_command(["config", "user.email", "remotefail@test.local"], cwd=remote_src)
+    (remote_src / "app.py").write_text("code", encoding="utf-8")
+    (remote_src / ".env").write_text("secret", encoding="utf-8")
+    run_git_command(["add", "."], cwd=remote_src)
+    commit_res = run_git_command(["commit", "-m", "init"], cwd=remote_src)
+    assert commit_res.returncode == 0, f"Git commit failed: {commit_res.stderr}"
+
+    def fake_validate_target(target: str, allow_local: bool = True):
+        return TargetValidationResult(
+            is_valid=True,
+            raw_target=target,
+            target_type=TargetType.REMOTE_GIT,
+            sanitized_target=str(remote_src),
+        )
+
+    monkeypatch.setattr("forge.repository.acquisition.validate_target", fake_validate_target)
+
+    def faulty_export(self, dest_dir, ref=None):
+        raise GitMetadataProtectionError("Simulated filesystem I/O corruption during remote export")
+
+    monkeypatch.setattr("forge.repository.acquisition.GitMediator.export_sanitized_workspace", faulty_export)
+
+    ws = tmp_path / "workspaces"
+    with pytest.raises(AcquisitionError, match="Failed to export sanitized repository workspace"):
+        acquire_repository("https://github.com/example/fail.git", custom_workspace=ws)
+
+    # Destination directory and trusted mirror must have been cleaned up
+    assert not any(ws.glob("repo_*"))
+    assert not any(ws.glob("trusted_*"))
 
 
 # =============================================================================
