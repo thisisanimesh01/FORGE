@@ -33,6 +33,21 @@ from forge.repository.architecture import (
     RepositoryMap,
     build_context_prompt,
 )
+from forge.repository.protection import (
+    PROTECTED_FILE_PATTERNS,
+    is_protected_path,
+    is_protected_name,
+    filter_unprotected_paths,
+    create_copytree_ignore,
+    purge_protected_paths_from_workspace,
+    verify_workspace_sanitized,
+    GitMetadataProtectionError,
+)
+from forge.repository.git_mediator import (
+    GitMediator,
+    GitMediatorError,
+    GitMediatorSecurityError,
+)
 
 __all__ = [
     "TargetType",
@@ -56,4 +71,15 @@ __all__ = [
     "format_instructions_for_context",
     "RepositoryMap",
     "build_context_prompt",
+    "PROTECTED_FILE_PATTERNS",
+    "is_protected_path",
+    "is_protected_name",
+    "filter_unprotected_paths",
+    "create_copytree_ignore",
+    "purge_protected_paths_from_workspace",
+    "verify_workspace_sanitized",
+    "GitMetadataProtectionError",
+    "GitMediator",
+    "GitMediatorError",
+    "GitMediatorSecurityError",
 ]

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Set
 from pydantic import BaseModel, Field
 
+from forge.repository.protection import is_protected_path
 from forge.repository.validation import assert_contained_path
 
 
@@ -105,8 +106,13 @@ def detect_repository(
         # Enforce containment
         assert_contained_path(dirpath, root)
 
-        # Prune excluded directories
-        dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS and not d.endswith(".egg-info")]
+        # Prune excluded and protected directories
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in EXCLUDED_DIRS
+            and not d.endswith(".egg-info")
+            and not is_protected_path(dirpath / d, base_dir=root)
+        ]
 
         rel_dir = dirpath.relative_to(root)
         rel_dir_str = str(rel_dir)
@@ -120,16 +126,23 @@ def detect_repository(
             test_dirs.add(rel_dir_str)
 
         for filename in filenames:
-            scanned_count += 1
-            if scanned_count > max_files:
-                break
-
             file_path = dirpath / filename
+            # Exclude protected files before inspecting, reading, or counting
+            if is_protected_path(file_path, base_dir=root):
+                continue
+
             # Prevent following symlinks outside root
             try:
                 resolved_file = assert_contained_path(file_path, root)
             except Exception:
                 continue
+
+            if is_protected_path(resolved_file, base_dir=root):
+                continue
+
+            scanned_count += 1
+            if scanned_count > max_files:
+                break
 
             rel_file_str = str(resolved_file.relative_to(root))
             ext = file_path.suffix.lower() or "<no_ext>"

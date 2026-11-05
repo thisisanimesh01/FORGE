@@ -130,6 +130,14 @@ class GitCommitBuilder(GitCommitBuilderProtocol):
                 f"Patch attempts to modify unauthorized files: {sorted(unauthorized)}."
             )
 
+        # 3b. Protected path validation: strictly forbid staging changes to protected files
+        from forge.repository.protection import is_protected_name, is_protected_path
+        for rel_file in patch.affected_paths:
+            if is_protected_name(Path(rel_file).name) or is_protected_path(rel_file, base_dir=workspace.workspace_path):
+                raise PatchStagingError(
+                    f"Security violation: patch attempts to modify protected sensitive file: '{rel_file}'."
+                )
+
         # 4. Containment and existence check
         for rel_file in patch.affected_paths:
             target_disk = workspace.validate_containment(rel_file)

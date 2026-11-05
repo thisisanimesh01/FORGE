@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from forge.config import redact_secrets
 from forge.reproduction.models import FieldProvenance
 from forge.repository.acquisition import run_git_command
+from forge.repository.protection import is_protected_path
 from forge.repository.validation import validate_target
 from forge.review.parser import parse_unified_diff
 from forge.storage.store import ForgeStore
@@ -61,6 +62,8 @@ def sanitize_affected_paths(paths: Optional[List[str]]) -> List[str]:
         parts = norm.split("/")
         if ".." in parts:
             raise IntakeValidationError(f"Path traversal ('..') forbidden in affected_files: '{raw}'")
+        if is_protected_path(Path(norm)):
+            raise IntakeValidationError(f"Protected sensitive file forbidden in affected_files: '{raw}'")
         if norm and norm != ".":
             cleaned.append(norm)
 
