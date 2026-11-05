@@ -40,7 +40,7 @@ from forge.repository.protection import (
     filter_unprotected_paths,
     create_copytree_ignore,
     purge_protected_paths_from_workspace,
-    purge_protected_git_metadata,
+    verify_workspace_sanitized,
     GitMetadataProtectionError,
 )
 from forge.repository.git_mediator import (
@@ -77,7 +77,7 @@ __all__ = [
     "filter_unprotected_paths",
     "create_copytree_ignore",
     "purge_protected_paths_from_workspace",
-    "purge_protected_git_metadata",
+    "verify_workspace_sanitized",
     "GitMetadataProtectionError",
     "GitMediator",
     "GitMediatorError",

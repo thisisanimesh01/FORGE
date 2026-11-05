@@ -34,7 +34,7 @@ Phase 10 implements centralized **Protected-File Boundary Enforcement** across a
 | **Path Traversal Attacks (`../../.env`)** | Paths are normalized and anchored against `base_dir`. Traversal attempts escaping workspace roots fail closed. |
 | **I/O Side Effects During Detection** | All protection determinations are metadata-driven. `open()` and `read_text()` are strictly forbidden within protection evaluators. |
 | **LLM Context Budget Exfiltration** | Context builders (`extract_source_excerpts`, `assemble_repository_context`) filter declared affected files and drop protected files before reading or hashing. |
-| **Git Metadata / Packfile Leakage** | `purge_protected_git_metadata` audits `.git` object storage across all branches/tags, unpacks packfiles, unlinks loose blob objects matching protected paths, removes index cache entries, and purges reflogs/stashes while strictly preserving commit SHA and branch identity. |
+| **Git Metadata / Packfile Leakage** | Isolated trusted mirror architecture (Option C) houses upstream Git object database in a permission-restricted (`0700`) directory outside the analysis workspace. `GitMediator` exports clean sanitized trees, `purge_protected_paths_from_workspace` purges any sensitive files, and `verify_workspace_sanitized` conducts an independent audit to guarantee zero protected paths enter the analysis repository. |
 
 ---
 
@@ -120,17 +120,23 @@ PROTECTED_PATTERNS: tuple[str, ...] = (
 
 ## 5. Multi-Stage Pipeline Enforcement Details
 
-### 5.1 Repository Acquisition (`app/forge/repository/acquisition.py` & `app/forge/repository/protection.py`)
-- **Local Directory Clones**: Uses `create_copytree_ignore()` passed to `shutil.copytree(..., ignore=...)`. Protected files are pruned at copy time and never enter the working tree. Following copy, `purge_protected_git_metadata(workspace_path)` purges protected blobs, packs, reflogs, and index entries from `.git` while preserving `resolved_commit_sha`.
-- **Git Remote Clones**: Following `git clone` (shallow or full), `purge_protected_paths_from_workspace(workspace_path)` traverses the workspace and safely unlinks any protected working-tree files or symlinks. In addition, `purge_protected_git_metadata(workspace_path)` purges historical and current protected blobs from `.git` object storage.
-- **Git Metadata Purge Architecture (`purge_protected_git_metadata`)**:
-  1. *Submodule Discovery*: Discovers all `.git` directories (root and nested/submodules).
-  2. *Symlink Hardening*: Fails closed if `.git` or internal Git structures are symlinks or escape containment.
-  3. *Blob Discovery*: Finds all protected blobs across all branches, tags, and commits using `git rev-list --objects --all` and `git cat-file --batch-all-objects --batch-check`.
-  4. *Packfile Unpacking*: When protected blobs exist, unzips/unpacks packfiles into loose objects (`git unpack-objects -r`) and deletes `.pack`/`.idx` files so individual blobs can be removed.
-  5. *Loose Blob Unlinking*: Unlinks loose objects (`.git/objects/xx/yy...`) corresponding to protected files, leaving commit objects intact (preserving commit SHA and history).
-  6. *Index and Reflog Hygiene*: Clears cached index entries (`git rm --cached`), reflogs (`.git/logs`), stashes (`.git/refs/stash`), and commit graphs.
-  7. *Fail-Closed Verification*: Audits `.git/objects` to confirm zero protected blobs or lingering packfiles remain. If any error occurs or verification fails, raises `GitMetadataProtectionError` and acquisition fails closed, removing `workspace_dir`.
+### 5.1 Repository Acquisition & Sanitization (`app/forge/repository/acquisition.py` & `app/forge/repository/protection.py`)
+- **Remote Git Clones (Pathway 1)**: Clones from remote HTTPS targets into an isolated trusted repository mirror (`trusted_<id>.git`, mode `0700`). `GitMediator.export_sanitized_workspace()` extracts non-protected files into `dest_dir` using streaming archive filtering, followed by `purge_protected_paths_from_workspace(dest_dir)` and `verify_workspace_sanitized(dest_dir)`. A clean analysis Git repository is initialized inside `dest_dir`. If clone, export, or sanitization fails, `_cleanup_acquisition_paths(dest_dir, trusted_dir)` safely cleans up without suppressing errors. If cleanup also encounters errors, both the primary error and cleanup failures are visibly reported in `AcquisitionError(f"... Additionally, workspace cleanup failed: ...")`, chaining the original cause.
+- **Local Committed Git Repositories (Pathway 2)**: Clones the local repository into an isolated trusted mirror (`trusted_<id>.git`, mode `0700`). `GitMediator.export_sanitized_workspace()` exports non-protected files to `dest_dir`, followed by `purge_protected_paths_from_workspace(dest_dir)` and `verify_workspace_sanitized(dest_dir)`. A clean analysis repository is initialized. On failure, `_cleanup_acquisition_paths` cleans partial directories, raising `AcquisitionError` with two-tier visible reporting if cleanup encounters errors, chaining the original exception.
+- **Local Uncommitted / Non-Git Directories (Pathway 3)**: Copies non-protected files via `shutil.copytree(..., ignore=create_copytree_ignore())`. Following copy, any source `.git` directory or gitfile is strictly removed without `ignore_errors=True` or swallowed `OSError` exceptions. If source `.git` removal fails or if `.git` remains on disk post-removal, `GitMetadataProtectionError` is raised immediately, halting execution prior to `git init`. Following `.git` removal, `purge_protected_paths_from_workspace(dest_dir)` and `verify_workspace_sanitized(dest_dir)` execute, followed by initializing a clean analysis Git repository snapshot. If any step fails, `_cleanup_acquisition_paths` deletes `dest_dir` and raises `AcquisitionError` with visible cleanup details, chaining the underlying error.
+- **Workspace & Trusted Mirror Cleanup (`cleanup_repository` & `_cleanup_acquisition_paths`)**:
+  1. *Complete Elimination of `ignore_errors=True`*: All deletion routines invoke `shutil.rmtree` and `unlink` without suppressing filesystem errors.
+  2. *Post-Deletion Absence Assertion*: After deletion attempts, paths are verified absent (`not path.exists() and not path.is_symlink()`). If files or directories remain on disk, explicit error descriptions are collected.
+  3. *Visible Two-Tier Error Reporting*: Cleanup failures during acquisition error recovery are attached to the primary error message (`f"{e}. Additionally, workspace cleanup failed: {err_details}"`), preserving both the root cause and notifying operators of orphaned disks or permission locks.
+  4. *Fail-Closed Workflow Teardown*: `cleanup_repository()` raises `AcquisitionError` if any workspace or trusted mirror directory fails to delete cleanly.
+  5. *Safe Symlink Teardown & Target Protection*: `cleanup_repository()` evaluates candidate paths using `is_symlink()` (correctly capturing dangling symlinks where `exists()` returns False). When a symlink is encountered, cleanup validates parent containment against `base_dir` and directly invokes `unlink()`, never following the symlink or invoking `rmtree()` on its target. External targets and sensitive host directories are strictly preserved.
+- **Working-Tree Sanitization Architecture (`purge_protected_paths_from_workspace`)**:
+  1. *Bottom-Up Traversal with Error Handler*: Traverses `dest_dir` bottom-up (`topdown=False`, `followlinks=False`) with an `onerror` handler raising `GitMetadataProtectionError` on any directory access or permission failure.
+  2. *Strict Root Git Exemption*: Preserves exclusively the root analysis `.git` directory (`ws_path / ".git"`).
+  3. *Nested Git Metadata Rejection*: Detects and rejects nested `.git` directories, nested `.git` files (submodule gitfiles), and nested `.git` symlinks, failing closed immediately.
+  4. *Fail-Closed Deletion*: Every file and directory deletion handles `PermissionError` and `OSError` by raising `GitMetadataProtectionError` rather than silently suppressing errors.
+  5. *Post-Deletion Verification*: Asserts that deleted paths no longer exist on the filesystem.
+  6. *Independent Verification*: Immediately invokes `verify_workspace_sanitized(dest_dir)` which walks top-down (`followlinks=False`) with traversal error handling, rejects nested Git metadata, verifies `.git` is not a symlink or regular file, and ensures zero protected paths remain.
 
 ### 5.2 Repository Intelligence & Detection (`app/forge/repository/detector.py`)
 - `detect_repository` prunes protected directories in-place during `os.walk` (`dirs[:] = [d for d in dirs if not is_protected_name(d)]`).
@@ -169,7 +175,7 @@ PROTECTED_PATTERNS: tuple[str, ...] = (
 
 ## 6. Verification & Test Coverage
 
-The enforcement mechanism is validated by a dedicated test suite in `tests/unit/test_repository_protection.py` (51 tests):
+The enforcement mechanism is validated by a dedicated test suite in `tests/unit/test_repository_protection.py` (77 tests):
 
 1. **Pattern Matching & Case Sensitivity**:
    - Matches `.env`, `.env.local`, `.env.production`, `.env.test`.
@@ -186,18 +192,36 @@ The enforcement mechanism is validated by a dedicated test suite in `tests/unit/
 4. **Acquisition & Working-Tree Purge**:
    - Confirms `shutil.copytree` ignore callback excludes protected files.
    - Confirms `purge_protected_paths_from_workspace` deletes protected files from scratch clones.
-5. **Git Metadata Purge & Remediation**:
-   - Local acquisition with protected files packed in Git objects: secret bytes unlinked, commit SHA preserved.
-   - Historical commit purge: historical protected files unlinked, `git show HEAD~1:<protected>` rejected.
-   - Nested directory and packfile unpacking: handles nested paths (`subsystem/data/contacts.json`, `logs/audit.log`).
-   - Remote Git acquisition: clone sanitization verified.
-   - Symlink containment defenses: symlinked `.git` or symlinked `.git/objects` escape attempts fail closed.
-   - Purge failure handling: fails closed, scrubs workspace, and raises `AcquisitionError`.
-6. **Git Integrity & Referential Completeness Regressions**:
-   - Verifies empirical behavior of missing referenced blobs: commit SHA, status, and ordinary file reads succeed; `git show HEAD:<protected>`, `git diff HEAD`, and `git fsck --full` fail as expected.
-   - Verifies rejection of external object stores via `.git/objects/info/alternates`.
-   - Verifies pruning of unreachable dangling blobs via `git prune --expire=now`.
-7. **Option C Git Metadata Isolation Tests (`tests/unit/test_git_metadata_isolation.py`, 9 tests)**:
+5. **Option C Acquisition & Isolation Regressions**:
+   - Local acquisition with protected files packed in Git objects: trusted mirror isolated, sanitized workspace exported, commit SHA preserved.
+   - Historical commit protection: trusted mirror retains history, analysis workspace contains zero protected blobs.
+   - Nested directory sanitization: handles nested paths (`subsystem/data/contacts.json`, `logs/audit.log`).
+   - Remote Git acquisition: HTTPS target cloned to trusted mirror, sanitized snapshot exported to analysis workspace.
+   - Export failure handling: fails closed, scrubs both workspace and trusted mirror, and raises `AcquisitionError`.
+6. **Fail-Closed Workspace Sanitization & Independent Verification (19 tests)**:
+   - Protected file and directory removal: unlinks sensitive files and directories cleanly.
+   - Fail-closed error handling: raises `GitMetadataProtectionError` upon `PermissionError` or `OSError`.
+   - Post-purge verification: `verify_workspace_sanitized` detects remaining protected paths or escaping symlinks.
+   - Symlink safety: symlinks removed without following targets; symlinks escaping workspace or symlinked `.git` fail closed.
+   - Root Git preservation: root analysis `.git` directory preserved and verified functional.
+   - Nested Git metadata rejection: nested `.git` directories, nested `.git` files, and symlinked nested `.git` rejected.
+   - Nested Git bypass protection: protected files inside nested Git directories cannot bypass verification.
+   - Traversal error handling: `os.walk` failure during purge or verification fails closed.
+   - Triple-pathway acquisition fail-closed & cleanup: Remote Git, Local committed Git, and Local uncommitted/non-Git scrub partial workspaces and trusted mirrors on sanitization or traversal failure.
+   - Preservation of ordinary files and legitimate `.git` metadata in analysis workspace.
+7. **Fail-Closed Acquisition Cleanup & Symlink Handling (11 tests)**:
+   - Uncommitted source `.git` deletion failure raises `GitMetadataProtectionError` with original exception chained, failing closed without initializing analysis Git repository.
+   - Uncommitted source `.git` symlink/file unlinking failure raises `GitMetadataProtectionError` with chained exception.
+   - Source `.git` absence verified post-removal; if `.git` remains, raises `GitMetadataProtectionError` before `git init`.
+   - Remote acquisition export failure with workspace cleanup failure reports both primary export error and cleanup failure visibly.
+   - Local committed acquisition export failure with trusted mirror cleanup failure reports both export error and cleanup failure visibly.
+   - Proof that acquisition never returns an `AcquiredRepository` workspace when sanitization or cleanup fails across all 3 pathways.
+   - `cleanup_repository` verifies absence after `rmtree` and raises `AcquisitionError` if deletion fails.
+   - `cleanup_repository` removes ordinary trusted mirror directories and analysis workspace cleanly.
+   - `cleanup_repository` safely unlinks dangling trusted mirror symlinks using `is_symlink()`.
+   - `cleanup_repository` unlinks symlinks pointing outside permitted workspace without following them or modifying external targets.
+   - `cleanup_repository` preserves allowed-base security check, rejecting symlinks located outside the workspace root with `SecurityError`.
+8. **Option C Git Metadata Isolation Tests (`tests/unit/test_git_metadata_isolation.py`, 9 tests)**:
    - Verifies `git fsck --full` on trusted mirror passes with exit code 0 and 0 broken links.
    - Verifies complete historical mirror guarantee across multiple commits and tags.
    - Verifies physical absence of secret bytes and protected blobs in the analysis workspace.
@@ -207,8 +231,8 @@ The enforcement mechanism is validated by a dedicated test suite in `tests/unit/
    - Verifies directory isolation and containment traversal checks.
    - Verifies Phase 9 publication compatibility using isolated trusted mirror.
    - Verifies Phase 9 publication rejects patches touching protected paths.
-8. **Full Regression**:
-   - Verified across the full unit test suite (1,506 collected unit tests passed, 1 skipped) and security test suite (19 passed), totaling 1,525 passed tests with zero regressions.
+9. **Full Regression**:
+   - Verified across the full unit test suite (1,517 collected unit tests passed, 1 skipped) and security test suite (19 passed), totaling 1,536 passed tests with zero regressions.
 
 ---
 

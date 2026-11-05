@@ -22,8 +22,8 @@ from forge.repository.protection import (
     filter_unprotected_paths,
     is_protected_name,
     is_protected_path,
-    purge_protected_git_metadata,
     purge_protected_paths_from_workspace,
+    verify_workspace_sanitized,
 )
 from forge.repository.validation import TargetType, TargetValidationResult
 from forge.schemas import EvidenceType
@@ -806,45 +806,6 @@ def test_git_metadata_purge_remote_acquisition(tmp_path: Path, monkeypatch: pyte
         cleanup_repository(acquired, allowed_base=ws)
 
 
-def test_git_metadata_purge_fails_closed_on_symlink(tmp_path: Path):
-    """If .git in workspace is a symlink, acquisition/purge must fail closed."""
-    ws = tmp_path / "workspace_with_symlink_git"
-    ws.mkdir()
-    (ws / "app.py").write_text("code\n", encoding="utf-8")
-
-    outside_git = tmp_path / "external_git_dir"
-    outside_git.mkdir()
-
-    symlink_git = ws / ".git"
-    try:
-        symlink_git.symlink_to(outside_git)
-    except OSError:
-        pytest.skip("Symlinks not supported in environment")
-
-    with pytest.raises((AcquisitionError, GitMetadataProtectionError), match="cannot be a symlink"):
-        purge_protected_git_metadata(ws)
-
-
-def test_git_metadata_purge_fails_closed_on_internal_symlink_escape(tmp_path: Path):
-    """If internal directory inside .git escapes workspace, purge must fail closed."""
-    ws = tmp_path / "workspace_escaping_internals"
-    ws.mkdir()
-    git_dir = ws / ".git"
-    git_dir.mkdir()
-
-    outside_dir = tmp_path / "external_objects"
-    outside_dir.mkdir()
-
-    symlink_obj = git_dir / "objects"
-    try:
-        symlink_obj.symlink_to(outside_dir)
-    except OSError:
-        pytest.skip("Symlinks not supported in environment")
-
-    with pytest.raises((AcquisitionError, GitMetadataProtectionError), match="escaping symlink inside .git"):
-        purge_protected_git_metadata(ws)
-
-
 def test_git_metadata_purge_fails_closed_on_purge_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """If Git metadata purge encounters an operational failure, it must fail closed."""
     src = tmp_path / "fail_repo"
@@ -911,127 +872,1016 @@ def test_git_metadata_purge_fails_closed_on_remote_export_failure(tmp_path: Path
 
 
 # =============================================================================
-# 11. Git Integrity & Referential Completeness Regression Tests
+# 11. Working-Tree Sanitization & Post-Purge Verification Regression Tests
 # =============================================================================
 
-def test_git_integrity_missing_referenced_blobs_behavior(tmp_path: Path):
-    """Verify exact supported vs failing Git operations when referenced blobs are purged.
-
-    Documents the architectural reality:
-    - Supported: rev-parse, status, ls-tree, show ordinary files, branch management.
-    - Failing: show protected files (bad object), diff HEAD (unable to read blob),
-      fsck --full (broken link from tree to blob).
-    """
-    src = tmp_path / "integrity_repo"
-    src.mkdir()
-    run_git_command(["init"], cwd=src)
-    run_git_command(["config", "user.name", "Integrity Test"], cwd=src)
-    run_git_command(["config", "user.email", "integrity@test.local"], cwd=src)
-
-    (src / "README.md").write_text("ordinary content\n", encoding="utf-8")
-    (src / ".env").write_text("SENSITIVE_KEY=12345\n", encoding="utf-8")
-    run_git_command(["add", "."], cwd=src)
-    run_git_command(["commit", "-m", "Commit 1"], cwd=src)
-
-    src_dir = src / "src"
-    src_dir.mkdir()
-    (src_dir / "app.py").write_text("print('app')\n", encoding="utf-8")
-    (src / "contacts.json").write_text('{"name": "Secret"}\n', encoding="utf-8")
-    run_git_command(["add", "."], cwd=src)
-    run_git_command(["commit", "-m", "Commit 2"], cwd=src)
-
-    # Repack into packfile to test unpacked loose blob purge
-    run_git_command(["repack", "-a", "-d"], cwd=src)
-    expected_head = run_git_command(["rev-parse", "HEAD"], cwd=src).stdout.strip()
-
-    # Copy to workspace and purge
-    ws = tmp_path / "integrity_workspace"
-    shutil.copytree(src, ws)
-    purge_protected_paths_from_workspace(ws)
-    purged_count = purge_protected_git_metadata(ws)
-    assert purged_count >= 2
-
-    # 1. Supported operations
-    res_rev = run_git_command(["rev-parse", "HEAD"], cwd=ws)
-    assert res_rev.returncode == 0
-    assert res_rev.stdout.strip() == expected_head, "Commit identity must be preserved"
-
-    res_status = run_git_command(["status", "--porcelain"], cwd=ws)
-    assert res_status.returncode == 0
-
-    res_lstree = run_git_command(["ls-tree", "HEAD"], cwd=ws)
-    assert res_lstree.returncode == 0
-    assert "README.md" in res_lstree.stdout
-    assert "contacts.json" in res_lstree.stdout
-
-    res_show_ord = run_git_command(["show", "HEAD:src/app.py"], cwd=ws)
-    assert res_show_ord.returncode == 0
-    assert "print('app')" in res_show_ord.stdout
-
-    res_branch = run_git_command(["checkout", "-b", "feature_branch"], cwd=ws)
-    assert res_branch.returncode == 0
-
-    # 2. Failing operations (by design: protected blob is physically absent)
-    res_show_prot = run_git_command(["show", "HEAD:contacts.json"], cwd=ws)
-    assert res_show_prot.returncode != 0
-    assert "bad object" in res_show_prot.stderr or "fatal" in res_show_prot.stderr
-
-    res_show_env = run_git_command(["show", "HEAD:.env"], cwd=ws)
-    assert res_show_env.returncode != 0
-    assert "bad object" in res_show_env.stderr or "fatal" in res_show_env.stderr
-
-    res_diff_head = run_git_command(["diff", "HEAD"], cwd=ws)
-    assert res_diff_head.returncode != 0
-    assert "unable to read" in res_diff_head.stderr
-
-    res_fsck = run_git_command(["fsck", "--full"], cwd=ws)
-    assert res_fsck.returncode != 0, "fsck must report broken links for purged blobs"
-    assert "broken link from" in res_fsck.stdout or "broken link from" in res_fsck.stderr
-
-
-def test_git_metadata_purge_rejects_alternates(tmp_path: Path):
-    """Git alternates pointing to external object stores must be rejected immediately."""
-    ws = tmp_path / "workspace_alternates"
+def test_purge_protected_file_successfully_removed(tmp_path: Path):
+    """purge_protected_paths_from_workspace successfully unlinks protected files and preserves ordinary files."""
+    ws = tmp_path / "ws_purge_files"
     ws.mkdir()
-    run_git_command(["init"], cwd=ws)
     (ws / "main.py").write_text("print('hello')", encoding="utf-8")
+    (ws / ".env").write_text("SECRET=123", encoding="utf-8")
+    (ws / "contacts.json").write_text("{}", encoding="utf-8")
+    (ws / "test.db").write_text("sqlite", encoding="utf-8")
+    (ws / "run.log").write_text("log", encoding="utf-8")
 
-    info_dir = ws / ".git" / "objects" / "info"
-    info_dir.mkdir(parents=True, exist_ok=True)
-    (info_dir / "alternates").write_text("/external/path/to/objects\n", encoding="utf-8")
+    removed_count = purge_protected_paths_from_workspace(ws)
+    assert removed_count == 4
+    assert (ws / "main.py").exists()
+    assert not (ws / ".env").exists()
+    assert not (ws / "contacts.json").exists()
+    assert not (ws / "test.db").exists()
+    assert not (ws / "run.log").exists()
 
-    with pytest.raises(GitMetadataProtectionError, match="Git alternates file detected"):
-        purge_protected_git_metadata(ws)
 
-
-def test_git_metadata_purge_cleans_dangling_blobs(tmp_path: Path):
-    """Dangling unreachable blobs in object store must be purged via git prune."""
-    ws = tmp_path / "workspace_dangling"
+def test_purge_protected_directory_successfully_removed(tmp_path: Path):
+    """purge_protected_paths_from_workspace successfully removes directories matching protected patterns."""
+    ws = tmp_path / "ws_purge_dir"
     ws.mkdir()
-    run_git_command(["init"], cwd=ws)
-    run_git_command(["config", "user.name", "Dangling Test"], cwd=ws)
-    run_git_command(["config", "user.email", "dangling@test.local"], cwd=ws)
+    (ws / "app.py").write_text("pass", encoding="utf-8")
 
-    (ws / "app.py").write_text("print('app')", encoding="utf-8")
+    protected_dir = ws / ".env.backup"
+    protected_dir.mkdir()
+    (protected_dir / "secret.txt").write_text("super_secret", encoding="utf-8")
+
+    logs_dir = ws / "trace.log"
+    logs_dir.mkdir()
+    (logs_dir / "trace.txt").write_text("trace", encoding="utf-8")
+
+    removed_count = purge_protected_paths_from_workspace(ws)
+    assert removed_count >= 2
+    assert (ws / "app.py").exists()
+    assert not protected_dir.exists()
+    assert not logs_dir.exists()
+
+
+def test_purge_protected_file_deletion_raises_permission_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """PermissionError during file unlinking raises GitMetadataProtectionError (fail-closed)."""
+    ws = tmp_path / "ws_perm_error"
+    ws.mkdir()
+    env_file = ws / ".env"
+    env_file.write_text("SECRET=abc", encoding="utf-8")
+
+    orig_unlink = Path.unlink
+
+    def faulty_unlink(self, *args, **kwargs):
+        if self.name == ".env":
+            raise PermissionError("Access denied")
+        return orig_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", faulty_unlink)
+
+    with pytest.raises(GitMetadataProtectionError, match="unable to delete protected file"):
+        purge_protected_paths_from_workspace(ws)
+
+
+def test_purge_protected_directory_deletion_raises_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """OSError during protected directory removal raises GitMetadataProtectionError (fail-closed)."""
+    ws = tmp_path / "ws_os_error"
+    ws.mkdir()
+    protected_dir = ws / ".env.dir"
+    protected_dir.mkdir()
+    (protected_dir / "key").write_text("val", encoding="utf-8")
+
+    def faulty_rmtree(path, *args, **kwargs):
+        raise OSError("I/O error during directory deletion")
+
+    monkeypatch.setattr(shutil, "rmtree", faulty_rmtree)
+
+    with pytest.raises(GitMetadataProtectionError, match="unable to delete protected directory"):
+        purge_protected_paths_from_workspace(ws)
+
+
+def test_purge_protected_path_remains_after_attempted_deletion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """If a protected file remains present after unlinking, raise GitMetadataProtectionError."""
+    ws = tmp_path / "ws_remains"
+    ws.mkdir()
+    env_file = ws / ".env"
+    env_file.write_text("SECRET=abc", encoding="utf-8")
+
+    # Mock unlink to be a no-op so .env remains on disk
+    monkeypatch.setattr(Path, "unlink", lambda self, *args, **kwargs: None)
+
+    with pytest.raises(GitMetadataProtectionError, match="remains in workspace after deletion attempt"):
+        purge_protected_paths_from_workspace(ws)
+
+
+def test_post_purge_verification_detects_remaining_protected_path(tmp_path: Path):
+    """verify_workspace_sanitized raises GitMetadataProtectionError if any protected path exists."""
+    ws = tmp_path / "ws_verify_detects"
+    ws.mkdir()
+    (ws / "main.py").write_text("code", encoding="utf-8")
+    (ws / "contacts.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(GitMetadataProtectionError, match="Post-purge verification failed"):
+        verify_workspace_sanitized(ws)
+
+
+def test_purge_symlink_to_protected_file_handled_safely(tmp_path: Path):
+    """purge_protected_paths_from_workspace unlinks symlinks without following target."""
+    ws = tmp_path / "ws_symlink_safe"
+    ws.mkdir()
+    target_outside = tmp_path / "outside_target.txt"
+    target_outside.write_text("external content", encoding="utf-8")
+
+    symlink_path = ws / ".env"
+    try:
+        symlink_path.symlink_to(target_outside)
+    except OSError:
+        pytest.skip("Symlinks not supported in environment")
+
+    removed = purge_protected_paths_from_workspace(ws)
+    assert removed == 1
+    assert not symlink_path.exists()
+    # Verify the external target was NOT touched or deleted
+    assert target_outside.exists()
+    assert target_outside.read_text(encoding="utf-8") == "external content"
+
+
+def test_purge_symlink_escaping_workspace_rejected(tmp_path: Path):
+    """verify_workspace_sanitized detects and rejects symlinks that escape the workspace or symlinked .git."""
+    ws = tmp_path / "ws_symlink_escape"
+    ws.mkdir()
+    outside_dir = tmp_path / "outside_directory"
+    outside_dir.mkdir()
+    (outside_dir / "data.txt").write_text("data", encoding="utf-8")
+
+    escaping_link = ws / "symlink_escape"
+    try:
+        escaping_link.symlink_to(outside_dir)
+    except OSError:
+        pytest.skip("Symlinks not supported in environment")
+
+    with pytest.raises(GitMetadataProtectionError, match="Post-purge verification failed"):
+        verify_workspace_sanitized(ws)
+
+    # Also verify .git symlink rejection
+    ws_symlink_git = tmp_path / "ws_symlink_git"
+    ws_symlink_git.mkdir()
+    try:
+        (ws_symlink_git / ".git").symlink_to(outside_dir)
+    except OSError:
+        pytest.skip("Symlinks not supported in environment")
+
+    with pytest.raises(GitMetadataProtectionError, match="cannot be a symlink in analysis workspace"):
+        verify_workspace_sanitized(ws_symlink_git)
+
+
+def test_verification_traversal_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """verify_workspace_sanitized fails closed with GitMetadataProtectionError if directory traversal fails."""
+    ws = tmp_path / "ws_traversal_fail"
+    ws.mkdir()
+    (ws / "main.py").write_text("print(1)", encoding="utf-8")
+
+    orig_walk = os.walk
+
+    def faulty_walk(top, **kwargs):
+        onerror = kwargs.get("onerror")
+        if onerror:
+            onerror(PermissionError("Simulated traversal permission error"))
+        return orig_walk(top, **kwargs)
+
+    monkeypatch.setattr(os, "walk", faulty_walk)
+
+    with pytest.raises(GitMetadataProtectionError, match="Post-purge verification traversal failed"):
+        verify_workspace_sanitized(ws)
+
+
+def test_acquisition_fails_closed_across_all_pathways(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """All 3 acquisition pathways (remote Git, local committed Git, local uncommitted/non-Git) fail closed on sanitization error."""
+    ws_parent = tmp_path / "workspaces_pathways"
+    ws_parent.mkdir()
+
+    # Pathway 1: Remote Git
+    remote_src = tmp_path / "pathway1_remote"
+    remote_src.mkdir()
+    run_git_command(["init"], cwd=remote_src)
+    run_git_command(["config", "user.name", "Tester"], cwd=remote_src)
+    run_git_command(["config", "user.email", "test@test.local"], cwd=remote_src)
+    (remote_src / "code.py").write_text("pass", encoding="utf-8")
+    run_git_command(["add", "."], cwd=remote_src)
+    run_git_command(["commit", "-m", "init"], cwd=remote_src)
+
+    monkeypatch.setattr(
+        "forge.repository.acquisition.validate_target",
+        lambda target, allow_local=True: TargetValidationResult(
+            is_valid=True,
+            raw_target=target,
+            target_type=TargetType.REMOTE_GIT,
+            sanitized_target=str(remote_src),
+        ),
+    )
+
+    def fail_purge(p):
+        raise GitMetadataProtectionError("Simulated sanitization failure")
+
+    monkeypatch.setattr("forge.repository.acquisition.purge_protected_paths_from_workspace", fail_purge)
+
+    with pytest.raises(AcquisitionError, match="Failed to export sanitized repository workspace"):
+        acquire_repository("https://github.com/example/repo.git", custom_workspace=ws_parent)
+
+    # Pathway 2: Local committed Git
+    local_git = tmp_path / "pathway2_local_git"
+    local_git.mkdir()
+    run_git_command(["init"], cwd=local_git)
+    run_git_command(["config", "user.name", "Tester"], cwd=local_git)
+    run_git_command(["config", "user.email", "test@test.local"], cwd=local_git)
+    (local_git / "code.py").write_text("pass", encoding="utf-8")
+    run_git_command(["add", "."], cwd=local_git)
+    run_git_command(["commit", "-m", "init"], cwd=local_git)
+
+    monkeypatch.setattr(
+        "forge.repository.acquisition.validate_target",
+        lambda target, allow_local=True: TargetValidationResult(
+            is_valid=True,
+            raw_target=target,
+            target_type=TargetType.LOCAL_DIRECTORY,
+            sanitized_target=str(local_git),
+        ),
+    )
+
+    with pytest.raises(AcquisitionError, match="Failed to export sanitized repository workspace"):
+        acquire_repository(str(local_git), custom_workspace=ws_parent, allow_local=True)
+
+    # Pathway 3: Local uncommitted / non-Git directory
+    local_nongit = tmp_path / "pathway3_nongit"
+    local_nongit.mkdir()
+    (local_nongit / "code.py").write_text("pass", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "forge.repository.acquisition.validate_target",
+        lambda target, allow_local=True: TargetValidationResult(
+            is_valid=True,
+            raw_target=target,
+            target_type=TargetType.LOCAL_DIRECTORY,
+            sanitized_target=str(local_nongit),
+        ),
+    )
+
+    with pytest.raises(AcquisitionError, match="Failed to acquire uncommitted or non-git directory"):
+        acquire_repository(str(local_nongit), custom_workspace=ws_parent, allow_local=True)
+
+
+def test_acquisition_cleanup_verified_on_sanitization_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Sanitization failure in acquisition cleans up any partial workspace or trusted mirror across all 3 pathways."""
+    ws_parent = tmp_path / "workspaces_cleanup"
+    ws_parent.mkdir()
+
+    def fail_purge(p):
+        raise GitMetadataProtectionError("Purge failed")
+
+    monkeypatch.setattr("forge.repository.acquisition.purge_protected_paths_from_workspace", fail_purge)
+
+    # Pathway 1: Remote Git
+    remote_src = tmp_path / "clean_remote"
+    remote_src.mkdir()
+    run_git_command(["init"], cwd=remote_src)
+    run_git_command(["config", "user.name", "Tester"], cwd=remote_src)
+    run_git_command(["config", "user.email", "test@test.local"], cwd=remote_src)
+    (remote_src / "code.py").write_text("pass", encoding="utf-8")
+    run_git_command(["add", "."], cwd=remote_src)
+    run_git_command(["commit", "-m", "init"], cwd=remote_src)
+
+    monkeypatch.setattr(
+        "forge.repository.acquisition.validate_target",
+        lambda target, allow_local=True: TargetValidationResult(
+            is_valid=True,
+            raw_target=target,
+            target_type=TargetType.REMOTE_GIT,
+            sanitized_target=str(remote_src),
+        ),
+    )
+
+    with pytest.raises(AcquisitionError):
+        acquire_repository("https://github.com/example/clean.git", custom_workspace=ws_parent)
+
+    assert not any(ws_parent.glob("repo_*")), "repo_* should be cleaned up for remote git"
+    assert not any(ws_parent.glob("trusted_*")), "trusted_* should be cleaned up for remote git"
+
+    # Pathway 2: Local committed Git
+    local_git = tmp_path / "clean_local_git"
+    local_git.mkdir()
+    run_git_command(["init"], cwd=local_git)
+    run_git_command(["config", "user.name", "Tester"], cwd=local_git)
+    run_git_command(["config", "user.email", "test@test.local"], cwd=local_git)
+    (local_git / "code.py").write_text("pass", encoding="utf-8")
+    run_git_command(["add", "."], cwd=local_git)
+    run_git_command(["commit", "-m", "init"], cwd=local_git)
+
+    monkeypatch.setattr(
+        "forge.repository.acquisition.validate_target",
+        lambda target, allow_local=True: TargetValidationResult(
+            is_valid=True,
+            raw_target=target,
+            target_type=TargetType.LOCAL_DIRECTORY,
+            sanitized_target=str(local_git),
+        ),
+    )
+
+    with pytest.raises(AcquisitionError):
+        acquire_repository(str(local_git), custom_workspace=ws_parent, allow_local=True)
+
+    assert not any(ws_parent.glob("repo_*")), "repo_* should be cleaned up for local git"
+    assert not any(ws_parent.glob("trusted_*")), "trusted_* should be cleaned up for local git"
+
+    # Pathway 3: Local uncommitted / non-Git
+    local_nongit = tmp_path / "clean_local_nongit"
+    local_nongit.mkdir()
+    (local_nongit / "code.py").write_text("pass", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "forge.repository.acquisition.validate_target",
+        lambda target, allow_local=True: TargetValidationResult(
+            is_valid=True,
+            raw_target=target,
+            target_type=TargetType.LOCAL_DIRECTORY,
+            sanitized_target=str(local_nongit),
+        ),
+    )
+
+    with pytest.raises(AcquisitionError):
+        acquire_repository(str(local_nongit), custom_workspace=ws_parent, allow_local=True)
+
+    assert not any(ws_parent.glob("repo_*")), "repo_* should be cleaned up for non-git"
+    assert not any(ws_parent.glob("trusted_*")), "trusted_* should be cleaned up for non-git"
+
+
+def test_ordinary_files_and_sanitized_git_metadata_remain_intact(tmp_path: Path):
+    """purge_protected_paths_from_workspace and verify_workspace_sanitized preserve ordinary files and .git directory."""
+    ws = tmp_path / "ws_intact"
+    ws.mkdir()
+    (ws / "main.py").write_text("print('hello')", encoding="utf-8")
+    nested = ws / "pkg" / "sub"
+    nested.mkdir(parents=True)
+    (nested / "mod.py").write_text("x = 1", encoding="utf-8")
+
+    # Initialize a clean git repository in ws
+    run_git_command(["init"], cwd=ws)
+    run_git_command(["config", "user.name", "Tester"], cwd=ws)
+    run_git_command(["config", "user.email", "test@test.local"], cwd=ws)
     run_git_command(["add", "."], cwd=ws)
     run_git_command(["commit", "-m", "init"], cwd=ws)
 
-    # Inject an unreachable loose object directly via hash-object
-    import subprocess
-    p = subprocess.Popen(
-        ["git", "hash-object", "-w", "--stdin"],
-        cwd=ws,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        text=True,
+    # Add a protected file to purge
+    (ws / ".env").write_text("SECRET=123", encoding="utf-8")
+
+    removed = purge_protected_paths_from_workspace(ws)
+    assert removed == 1
+    assert not (ws / ".env").exists()
+
+    # Ordinary files intact
+    assert (ws / "main.py").read_text(encoding="utf-8") == "print('hello')"
+    assert (nested / "mod.py").read_text(encoding="utf-8") == "x = 1"
+
+    # .git metadata intact and functional
+    assert (ws / ".git").is_dir()
+    st = run_git_command(["status", "--porcelain"], cwd=ws)
+    assert st.returncode == 0
+    head = run_git_command(["rev-parse", "HEAD"], cwd=ws)
+    assert head.returncode == 0
+
+    # Independent verification passes
+    verify_workspace_sanitized(ws)
+
+
+def test_root_analysis_git_is_preserved(tmp_path: Path):
+    """The root analysis workspace .git directory is preserved and not deleted or rejected."""
+    ws = tmp_path / "ws_root_git"
+    ws.mkdir()
+    (ws / "main.py").write_text("print('hello')", encoding="utf-8")
+
+    run_git_command(["init"], cwd=ws)
+    run_git_command(["config", "user.name", "Tester"], cwd=ws)
+    run_git_command(["config", "user.email", "test@test.local"], cwd=ws)
+    run_git_command(["add", "."], cwd=ws)
+    run_git_command(["commit", "-m", "init"], cwd=ws)
+
+    assert (ws / ".git").is_dir()
+
+    # Sanitization purge must preserve root .git
+    purge_protected_paths_from_workspace(ws)
+    assert (ws / ".git").is_dir()
+
+    # Verification must pass with root .git present
+    verify_workspace_sanitized(ws)
+
+    # Git commands continue working
+    st = run_git_command(["status", "--porcelain"], cwd=ws)
+    assert st.returncode == 0
+
+
+def test_nested_git_directory_is_rejected(tmp_path: Path):
+    """Nested .git directories in subdirectories must be detected and rejected."""
+    ws = tmp_path / "ws_nested_git_dir"
+    ws.mkdir()
+    (ws / "main.py").write_text("print('hello')", encoding="utf-8")
+
+    sub_dir = ws / "modules" / "submodule"
+    sub_dir.mkdir(parents=True)
+    nested_git = sub_dir / ".git"
+    nested_git.mkdir()
+    (nested_git / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+
+    with pytest.raises(GitMetadataProtectionError, match="nested Git"):
+        verify_workspace_sanitized(ws)
+
+    with pytest.raises(GitMetadataProtectionError, match="nested Git"):
+        purge_protected_paths_from_workspace(ws)
+
+
+def test_nested_git_file_is_rejected(tmp_path: Path):
+    """Nested .git files (such as git submodules with gitfile pointers) must be rejected."""
+    ws = tmp_path / "ws_nested_git_file"
+    ws.mkdir()
+    (ws / "main.py").write_text("print('hello')", encoding="utf-8")
+
+    sub_dir = ws / "sub"
+    sub_dir.mkdir()
+    gitfile = sub_dir / ".git"
+    gitfile.write_text("gitdir: ../.git/modules/sub\n", encoding="utf-8")
+
+    with pytest.raises(GitMetadataProtectionError, match="nested Git file"):
+        verify_workspace_sanitized(ws)
+
+    with pytest.raises(GitMetadataProtectionError, match="nested Git file"):
+        purge_protected_paths_from_workspace(ws)
+
+
+def test_symlinked_nested_git_is_rejected(tmp_path: Path):
+    """Symlinked nested .git paths must be detected and rejected."""
+    ws = tmp_path / "ws_symlinked_nested_git"
+    ws.mkdir()
+    (ws / "main.py").write_text("print('hello')", encoding="utf-8")
+
+    sub_dir = ws / "vendor" / "dep"
+    sub_dir.mkdir(parents=True)
+
+    target_git = tmp_path / "external_git_dir"
+    target_git.mkdir()
+
+    nested_symlink = sub_dir / ".git"
+    try:
+        nested_symlink.symlink_to(target_git)
+    except OSError:
+        pytest.skip("Symlinks not supported in environment")
+
+    with pytest.raises(GitMetadataProtectionError, match="nested Git"):
+        verify_workspace_sanitized(ws)
+
+    with pytest.raises(GitMetadataProtectionError, match="nested Git"):
+        purge_protected_paths_from_workspace(ws)
+
+
+def test_protected_files_inside_nested_git_metadata_cannot_bypass_verification(tmp_path: Path):
+    """Protected files placed inside nested Git directories cannot bypass verification or sanitization."""
+    ws = tmp_path / "ws_nested_bypass"
+    ws.mkdir()
+    (ws / "main.py").write_text("print('hello')", encoding="utf-8")
+
+    nested_git = ws / "deep" / "submodule" / ".git"
+    nested_git.mkdir(parents=True)
+    (nested_git / ".env").write_text("HIDDEN_SECRET=123\n", encoding="utf-8")
+    (nested_git / "contacts.json").write_text('{"leak": true}\n', encoding="utf-8")
+
+    # verify_workspace_sanitized must fail closed and reject
+    with pytest.raises(GitMetadataProtectionError, match="nested Git"):
+        verify_workspace_sanitized(ws)
+
+    # purge_protected_paths_from_workspace must also fail closed and reject
+    with pytest.raises(GitMetadataProtectionError, match="nested Git"):
+        purge_protected_paths_from_workspace(ws)
+
+
+def test_purge_deletion_traversal_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """purge_protected_paths_from_workspace fails closed when os.walk encounters a traversal error."""
+    ws = tmp_path / "ws_purge_walk_fail"
+    ws.mkdir()
+    (ws / "main.py").write_text("print(1)", encoding="utf-8")
+
+    orig_walk = os.walk
+
+    def faulty_walk(top, **kwargs):
+        onerror = kwargs.get("onerror")
+        if onerror:
+            onerror(PermissionError("Simulated permission denied accessing directory"))
+        return orig_walk(top, **kwargs)
+
+    monkeypatch.setattr(os, "walk", faulty_walk)
+
+    with pytest.raises(GitMetadataProtectionError, match="Workspace traversal failed during sanitization purge"):
+        purge_protected_paths_from_workspace(ws)
+
+
+def test_acquisition_cleans_up_on_traversal_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Acquisition cleans up workspace and trusted mirror when traversal fails during sanitization."""
+    ws_parent = tmp_path / "workspaces_traversal_fail"
+    ws_parent.mkdir()
+
+    src = tmp_path / "source_repo"
+    src.mkdir()
+    run_git_command(["init"], cwd=src)
+    run_git_command(["config", "user.name", "Tester"], cwd=src)
+    run_git_command(["config", "user.email", "test@test.local"], cwd=src)
+    (src / "code.py").write_text("pass", encoding="utf-8")
+    run_git_command(["add", "."], cwd=src)
+    run_git_command(["commit", "-m", "init"], cwd=src)
+
+    orig_walk = os.walk
+
+    def faulty_walk(top, **kwargs):
+        onerror = kwargs.get("onerror")
+        if onerror:
+            onerror(PermissionError("Simulated directory permission denied"))
+        return orig_walk(top, **kwargs)
+
+    monkeypatch.setattr(os, "walk", faulty_walk)
+
+    with pytest.raises(AcquisitionError):
+        acquire_repository(str(src), custom_workspace=ws_parent, allow_local=True)
+
+    # Both repo_* and trusted_* must be cleaned up
+    assert not any(ws_parent.glob("repo_*")), "repo_* should be cleaned up on traversal failure"
+    assert not any(ws_parent.glob("trusted_*")), "trusted_* should be cleaned up on traversal failure"
+
+
+# =============================================================================
+# 12. Fail-Closed Acquisition Cleanup & Uncommitted .git Removal Regression Tests
+# =============================================================================
+
+def test_uncommitted_source_git_deletion_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """If removing copied source .git in non-git/uncommitted local acquisition fails, fail closed."""
+    ws_parent = tmp_path / "workspaces_uncommitted_fail"
+    ws_parent.mkdir()
+
+    src = tmp_path / "uncommitted_src"
+    src.mkdir()
+    (src / "main.py").write_text("print('hello')", encoding="utf-8")
+    (src / ".git").mkdir()
+    (src / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "forge.repository.acquisition.validate_target",
+        lambda target, allow_local=True: TargetValidationResult(
+            is_valid=True,
+            raw_target=target,
+            target_type=TargetType.LOCAL_DIRECTORY,
+            sanitized_target=str(src),
+        ),
     )
-    dangling_sha, _ = p.communicate("unreachable_loose_secret_token\n")
-    dangling_sha = dangling_sha.strip()
-    dangling_path = ws / ".git" / "objects" / dangling_sha[:2] / dangling_sha[2:]
-    assert dangling_path.exists(), "Dangling blob must exist before purge"
 
-    # Purge Git metadata
-    purge_protected_git_metadata(ws)
+    orig_rmtree = shutil.rmtree
 
-    # Dangling blob must be pruned
-    assert not dangling_path.exists(), "Dangling unreachable blob should be pruned from .git/objects"
+    def faulty_rmtree(path, *args, **kwargs):
+        p = Path(path)
+        if p.name == ".git":
+            raise PermissionError("Simulated permission error deleting source .git")
+        return orig_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", faulty_rmtree)
+
+    with pytest.raises(AcquisitionError) as exc_info:
+        acquire_repository(str(src), custom_workspace=ws_parent, allow_local=True)
+
+    assert "Failed to acquire uncommitted or non-git directory" in str(exc_info.value)
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, GitMetadataProtectionError)
+    assert "Failed to remove uncommitted source .git metadata" in str(cause)
+    assert isinstance(cause.__cause__, PermissionError)
+    assert not any(ws_parent.glob("repo_*"))
+
+
+def test_uncommitted_source_git_symlink_deletion_failure_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """If unlinking copied source .git file or symlink fails, fail closed with GitMetadataProtectionError."""
+    ws_parent = tmp_path / "workspaces_symlink_git_fail"
+    ws_parent.mkdir()
+
+    src = tmp_path / "symlink_src"
+    src.mkdir()
+    (src / "main.py").write_text("print('hello')", encoding="utf-8")
+    (src / ".git").write_text("gitdir: /some/path\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "forge.repository.acquisition.validate_target",
+        lambda target, allow_local=True: TargetValidationResult(
+            is_valid=True,
+            raw_target=target,
+            target_type=TargetType.LOCAL_DIRECTORY,
+            sanitized_target=str(src),
+        ),
+    )
+
+    orig_unlink = Path.unlink
+
+    def faulty_unlink(self, *args, **kwargs):
+        if self.name == ".git":
+            raise PermissionError("Simulated permission error unlinking .git")
+        return orig_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", faulty_unlink)
+
+    with pytest.raises(AcquisitionError) as exc_info:
+        acquire_repository(str(src), custom_workspace=ws_parent, allow_local=True)
+
+    assert "Failed to acquire uncommitted or non-git directory" in str(exc_info.value)
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, GitMetadataProtectionError)
+    assert "Failed to remove uncommitted source .git metadata" in str(cause)
+    assert isinstance(cause.__cause__, PermissionError)
+    assert not any(ws_parent.glob("repo_*"))
+
+
+def test_uncommitted_source_git_verified_absent_before_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """If copied source .git remains present after attempted removal, fail closed before git init."""
+    ws_parent = tmp_path / "workspaces_git_remains"
+    ws_parent.mkdir()
+
+    src = tmp_path / "git_remains_src"
+    src.mkdir()
+    (src / "main.py").write_text("print('hello')", encoding="utf-8")
+    (src / ".git").mkdir()
+    (src / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "forge.repository.acquisition.validate_target",
+        lambda target, allow_local=True: TargetValidationResult(
+            is_valid=True,
+            raw_target=target,
+            target_type=TargetType.LOCAL_DIRECTORY,
+            sanitized_target=str(src),
+        ),
+    )
+
+    orig_rmtree = shutil.rmtree
+
+    def noop_rmtree_on_git(path, *args, **kwargs):
+        p = Path(path)
+        if p.name == ".git":
+            return
+        return orig_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", noop_rmtree_on_git)
+
+    with pytest.raises(AcquisitionError) as exc_info:
+        acquire_repository(str(src), custom_workspace=ws_parent, allow_local=True)
+
+    assert "Failed to acquire uncommitted or non-git directory" in str(exc_info.value)
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, GitMetadataProtectionError)
+    assert "Uncommitted source .git metadata remains present after attempted removal" in str(cause)
+    assert not any(ws_parent.glob("repo_*"))
+
+
+def test_acquisition_cleanup_failure_reports_clearly_remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """When remote acquisition encounters an export error and cleanup fails, both errors are clearly visible."""
+    ws_parent = tmp_path / "workspaces_remote_cleanup_fail"
+    ws_parent.mkdir()
+
+    remote_src = tmp_path / "remote_src"
+    remote_src.mkdir()
+    run_git_command(["init"], cwd=remote_src)
+    run_git_command(["config", "user.name", "Tester"], cwd=remote_src)
+    run_git_command(["config", "user.email", "test@test.local"], cwd=remote_src)
+    (remote_src / "code.py").write_text("pass", encoding="utf-8")
+    run_git_command(["add", "."], cwd=remote_src)
+    run_git_command(["commit", "-m", "init"], cwd=remote_src)
+
+    monkeypatch.setattr(
+        "forge.repository.acquisition.validate_target",
+        lambda target, allow_local=True: TargetValidationResult(
+            is_valid=True,
+            raw_target=target,
+            target_type=TargetType.REMOTE_GIT,
+            sanitized_target=str(remote_src),
+        ),
+    )
+
+    def fail_export(self, dest_dir, ref=None):
+        raise GitMetadataProtectionError("Export stream failure")
+
+    monkeypatch.setattr("forge.repository.acquisition.GitMediator.export_sanitized_workspace", fail_export)
+
+    orig_rmtree = shutil.rmtree
+
+    def faulty_rmtree(path, *args, **kwargs):
+        p = Path(path)
+        if p.name.startswith("repo_"):
+            raise PermissionError("Simulated permission denied deleting repo dir")
+        return orig_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", faulty_rmtree)
+
+    with pytest.raises(AcquisitionError) as exc_info:
+        acquire_repository("https://github.com/example/repo.git", custom_workspace=ws_parent)
+
+    err_str = str(exc_info.value)
+    assert "Failed to export sanitized repository workspace: Export stream failure" in err_str
+    assert "Additionally, workspace cleanup failed:" in err_str
+    assert "Simulated permission denied deleting repo dir" in err_str
+    assert isinstance(exc_info.value.__cause__, GitMetadataProtectionError)
+
+
+def test_acquisition_trusted_mirror_cleanup_failure_reports_clearly_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """When local committed acquisition fails and trusted mirror cleanup fails, both errors are clearly visible."""
+    ws_parent = tmp_path / "workspaces_local_mirror_cleanup_fail"
+    ws_parent.mkdir()
+
+    local_src = tmp_path / "local_src"
+    local_src.mkdir()
+    run_git_command(["init"], cwd=local_src)
+    run_git_command(["config", "user.name", "Tester"], cwd=local_src)
+    run_git_command(["config", "user.email", "test@test.local"], cwd=local_src)
+    (local_src / "code.py").write_text("pass", encoding="utf-8")
+    run_git_command(["add", "."], cwd=local_src)
+    run_git_command(["commit", "-m", "init"], cwd=local_src)
+
+    monkeypatch.setattr(
+        "forge.repository.acquisition.validate_target",
+        lambda target, allow_local=True: TargetValidationResult(
+            is_valid=True,
+            raw_target=target,
+            target_type=TargetType.LOCAL_DIRECTORY,
+            sanitized_target=str(local_src),
+        ),
+    )
+
+    def fail_export(self, dest_dir, ref=None):
+        raise GitMetadataProtectionError("Export failed")
+
+    monkeypatch.setattr("forge.repository.acquisition.GitMediator.export_sanitized_workspace", fail_export)
+
+    orig_rmtree = shutil.rmtree
+
+    def faulty_rmtree(path, *args, **kwargs):
+        p = Path(path)
+        if p.name.startswith("trusted_"):
+            raise PermissionError("Simulated permission denied deleting trusted mirror")
+        return orig_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", faulty_rmtree)
+
+    with pytest.raises(AcquisitionError) as exc_info:
+        acquire_repository(str(local_src), custom_workspace=ws_parent, allow_local=True)
+
+    err_str = str(exc_info.value)
+    assert "Failed to export sanitized repository workspace: Export failed" in err_str
+    assert "Additionally, workspace cleanup failed:" in err_str
+    assert "Simulated permission denied deleting trusted mirror" in err_str
+    assert isinstance(exc_info.value.__cause__, GitMetadataProtectionError)
+
+
+def test_acquisition_never_returns_workspace_on_sanitization_or_cleanup_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Acquisition never returns an AcquiredRepository when sanitization or cleanup fails across all 3 pathways."""
+    ws_parent = tmp_path / "workspaces_never_returns"
+    ws_parent.mkdir()
+
+    def fail_purge(p):
+        raise GitMetadataProtectionError("Sanitization failed")
+
+    monkeypatch.setattr("forge.repository.acquisition.purge_protected_paths_from_workspace", fail_purge)
+
+    def fail_rmtree(path, *args, **kwargs):
+        raise PermissionError("Cleanup deletion failed")
+
+    monkeypatch.setattr(shutil, "rmtree", fail_rmtree)
+
+    # Pathway 1: Remote Git
+    remote_src = tmp_path / "never_remote"
+    remote_src.mkdir()
+    run_git_command(["init"], cwd=remote_src)
+    run_git_command(["config", "user.name", "Tester"], cwd=remote_src)
+    run_git_command(["config", "user.email", "test@test.local"], cwd=remote_src)
+    (remote_src / "code.py").write_text("pass", encoding="utf-8")
+    run_git_command(["add", "."], cwd=remote_src)
+    run_git_command(["commit", "-m", "init"], cwd=remote_src)
+
+    monkeypatch.setattr(
+        "forge.repository.acquisition.validate_target",
+        lambda target, allow_local=True: TargetValidationResult(
+            is_valid=True,
+            raw_target=target,
+            target_type=TargetType.REMOTE_GIT,
+            sanitized_target=str(remote_src),
+        ),
+    )
+
+    with pytest.raises(AcquisitionError):
+        acquire_repository("https://github.com/example/repo.git", custom_workspace=ws_parent)
+
+    # Pathway 2: Local committed Git
+    local_src = tmp_path / "never_local"
+    local_src.mkdir()
+    run_git_command(["init"], cwd=local_src)
+    run_git_command(["config", "user.name", "Tester"], cwd=local_src)
+    run_git_command(["config", "user.email", "test@test.local"], cwd=local_src)
+    (local_src / "code.py").write_text("pass", encoding="utf-8")
+    run_git_command(["add", "."], cwd=local_src)
+    run_git_command(["commit", "-m", "init"], cwd=local_src)
+
+    monkeypatch.setattr(
+        "forge.repository.acquisition.validate_target",
+        lambda target, allow_local=True: TargetValidationResult(
+            is_valid=True,
+            raw_target=target,
+            target_type=TargetType.LOCAL_DIRECTORY,
+            sanitized_target=str(local_src),
+        ),
+    )
+
+    with pytest.raises(AcquisitionError):
+        acquire_repository(str(local_src), custom_workspace=ws_parent, allow_local=True)
+
+    # Pathway 3: Non-Git / uncommitted
+    non_git_src = tmp_path / "never_nongit"
+    non_git_src.mkdir()
+    (non_git_src / "code.py").write_text("pass", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "forge.repository.acquisition.validate_target",
+        lambda target, allow_local=True: TargetValidationResult(
+            is_valid=True,
+            raw_target=target,
+            target_type=TargetType.LOCAL_DIRECTORY,
+            sanitized_target=str(non_git_src),
+        ),
+    )
+
+    with pytest.raises(AcquisitionError):
+        acquire_repository(str(non_git_src), custom_workspace=ws_parent, allow_local=True)
+
+
+def test_cleanup_repository_reports_deletion_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """cleanup_repository raises AcquisitionError with details when deletion fails."""
+    ws = tmp_path / "ws_cleanup_fail"
+    ws.mkdir()
+    repo_dir = ws / "repo_dummy"
+    repo_dir.mkdir()
+    trusted_dir = ws / "trusted_dummy.git"
+    trusted_dir.mkdir()
+
+    from forge.repository.acquisition import AcquiredRepository
+
+    dummy_repo = AcquiredRepository(
+        target="dummy",
+        workspace_path=repo_dir,
+        base_workspace=ws,
+        is_temporary=True,
+        resolved_commit_sha="a" * 40,
+        target_branch="main",
+        is_local_copy=True,
+        trusted_git_path=trusted_dir,
+    )
+
+    def faulty_rmtree(path, *args, **kwargs):
+        raise PermissionError("Simulated permission denied in cleanup_repository")
+
+    monkeypatch.setattr(shutil, "rmtree", faulty_rmtree)
+
+    with pytest.raises(AcquisitionError) as exc_info:
+        cleanup_repository(dummy_repo, allowed_base=ws)
+
+    assert "Failed to clean up repository workspace" in str(exc_info.value)
+    assert "Simulated permission denied in cleanup_repository" in str(exc_info.value)
+
+
+def test_cleanup_repository_normal_trusted_mirror_directory(tmp_path: Path):
+    """cleanup_repository removes ordinary trusted mirror directory and analysis workspace cleanly."""
+    ws = tmp_path / "workspaces_normal"
+    ws.mkdir()
+    repo_dir = ws / "repo_normal_01"
+    repo_dir.mkdir()
+    (repo_dir / "app.py").write_text("print('hello')", encoding="utf-8")
+    trusted_dir = ws / "trusted_normal_01.git"
+    trusted_dir.mkdir()
+    (trusted_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    from forge.repository.acquisition import AcquiredRepository
+
+    repo = AcquiredRepository(
+        target="normal_target",
+        workspace_path=repo_dir,
+        base_workspace=ws,
+        is_temporary=True,
+        resolved_commit_sha="a" * 40,
+        target_branch="main",
+        is_local_copy=True,
+        trusted_git_path=trusted_dir,
+    )
+
+    cleanup_repository(repo, allowed_base=ws)
+
+    assert not repo_dir.exists()
+    assert not trusted_dir.exists()
+
+
+def test_cleanup_repository_dangling_trusted_mirror_symlink(tmp_path: Path):
+    """cleanup_repository removes dangling trusted mirror symlinks using is_symlink() without error."""
+    ws = tmp_path / "workspaces_dangling"
+    ws.mkdir()
+    repo_dir = ws / "repo_dangling_02"
+    repo_dir.mkdir()
+
+    dangling_target = ws / "nonexistent_target_directory"
+    trusted_symlink = ws / "trusted_dangling_02.git"
+    try:
+        trusted_symlink.symlink_to(dangling_target)
+    except OSError:
+        pytest.skip("Symlinks not supported in environment")
+
+    assert trusted_symlink.is_symlink()
+    assert not trusted_symlink.exists()
+
+    from forge.repository.acquisition import AcquiredRepository
+
+    repo = AcquiredRepository(
+        target="dangling_target",
+        workspace_path=repo_dir,
+        base_workspace=ws,
+        is_temporary=True,
+        resolved_commit_sha="b" * 40,
+        target_branch="main",
+        is_local_copy=True,
+        trusted_git_path=trusted_symlink,
+    )
+
+    cleanup_repository(repo, allowed_base=ws)
+
+    assert not repo_dir.exists()
+    assert not trusted_symlink.is_symlink()
+    assert not trusted_symlink.exists()
+
+
+def test_cleanup_repository_symlink_pointing_outside_workspace(tmp_path: Path):
+    """cleanup_repository unlinks symlinks pointing outside workspace without following them or deleting external target."""
+    ws = tmp_path / "workspaces_symlink_outside"
+    ws.mkdir()
+    repo_dir = ws / "repo_symlink_03"
+    repo_dir.mkdir()
+
+    outside_dir = tmp_path / "external_sensitive_folder"
+    outside_dir.mkdir()
+    outside_file = outside_dir / "confidential.txt"
+    outside_file.write_text("SENSITIVE_CONFIDENTIAL_PAYLOAD\n", encoding="utf-8")
+
+    trusted_symlink = ws / "trusted_outside_03.git"
+    try:
+        trusted_symlink.symlink_to(outside_dir)
+    except OSError:
+        pytest.skip("Symlinks not supported in environment")
+
+    assert trusted_symlink.is_symlink()
+    assert trusted_symlink.exists()
+
+    from forge.repository.acquisition import AcquiredRepository
+
+    repo = AcquiredRepository(
+        target="outside_target",
+        workspace_path=repo_dir,
+        base_workspace=ws,
+        is_temporary=True,
+        resolved_commit_sha="c" * 40,
+        target_branch="main",
+        is_local_copy=True,
+        trusted_git_path=trusted_symlink,
+    )
+
+    cleanup_repository(repo, allowed_base=ws)
+
+    # Symlink in workspace must be removed
+    assert not repo_dir.exists()
+    assert not trusted_symlink.is_symlink()
+    assert not trusted_symlink.exists()
+
+    # External target directory and its contents must NEVER be deleted or modified
+    assert outside_dir.exists()
+    assert outside_file.exists()
+    assert outside_file.read_text(encoding="utf-8") == "SENSITIVE_CONFIDENTIAL_PAYLOAD\n"
+
+
+def test_cleanup_repository_symlink_outside_workspace_rejected(tmp_path: Path):
+    """cleanup_repository refuses to delete a symlink located outside the allowed base workspace directory."""
+    ws = tmp_path / "workspaces_boundary"
+    ws.mkdir()
+    outside_symlink = tmp_path / "outside_symlink_mirror.git"
+    outside_target = tmp_path / "some_data"
+    outside_target.mkdir()
+    try:
+        outside_symlink.symlink_to(outside_target)
+    except OSError:
+        pytest.skip("Symlinks not supported in environment")
+
+    from forge.repository.acquisition import AcquiredRepository
+    from forge.repository.validation import SecurityError
+
+    repo = AcquiredRepository(
+        target="outside_symlink_target",
+        workspace_path=ws / "repo_stub",
+        base_workspace=ws,
+        is_temporary=True,
+        trusted_git_path=outside_symlink,
+    )
+
+    with pytest.raises(SecurityError, match="Refusing to delete path outside permitted workspace root"):
+        cleanup_repository(repo, allowed_base=ws)
+
+    # Outside symlink must not have been deleted
+    assert outside_symlink.is_symlink()

@@ -183,64 +183,96 @@ def create_copytree_ignore(
     return ignore_callable
 
 
-def purge_protected_paths_from_workspace(workspace_dir: Path) -> int:
+def verify_workspace_sanitized(workspace_dir: Union[str, Path]) -> None:
+    """Independently walk the workspace and verify that zero protected paths remain.
+
+    Invariants:
+    - Never follows symlinks outside the workspace (followlinks=False).
+    - Preserves only the analysis workspace's root .git directory.
+    - Rejects any nested .git directories, nested .git files, or nested .git symlinks.
+    - Rejects a symlinked or regular-file root .git.
+    - Detects protected regular files, directories, and symlinks.
+    - Detects paths whose symlink resolution escapes the workspace or points to protected files.
+    - Fails closed on any traversal or resolution error.
+    - Never reads or hashes protected file contents.
+    - Preserves legitimate ordinary files and directories.
+    """
+    if workspace_dir is None:
+        raise GitMetadataProtectionError("Workspace directory cannot be None for sanitization verification.")
+
+    ws_path = Path(workspace_dir).resolve()
+    if not ws_path.is_dir():
+        raise GitMetadataProtectionError(f"Workspace directory does not exist or is not a directory: '{ws_path}'")
+
+    root_git = ws_path / ".git"
+    if root_git.is_symlink():
+        raise GitMetadataProtectionError(
+            f"Security violation: .git cannot be a symlink in analysis workspace: '{root_git}'"
+        )
+    if root_git.is_file():
+        raise GitMetadataProtectionError(
+            f"Security violation: root .git cannot be a file in analysis workspace: '{root_git}'"
+        )
+
+    def _on_walk_error(err: OSError):
+        raise GitMetadataProtectionError(f"Post-purge verification traversal failed: {err}") from err
+
+    for root, dirs, files in os.walk(ws_path, topdown=True, followlinks=False, onerror=_on_walk_error):
+        current_path = Path(root).resolve()
+        is_root = (current_path == ws_path)
+
+        if is_root:
+            if ".git" in dirs:
+                # Legitimate root analysis .git directory: preserve and do not descend into it
+                dirs.remove(".git")
+            if ".git" in files:
+                raise GitMetadataProtectionError(
+                    f"Security violation: root .git cannot be a file in analysis workspace: '{ws_path / '.git'}'"
+                )
+        else:
+            rel_root = current_path.relative_to(ws_path)
+            if ".git" in rel_root.parts:
+                raise GitMetadataProtectionError(
+                    f"Security violation: nested Git metadata directory detected in workspace: '{root}'"
+                )
+
+            if ".git" in dirs:
+                nested_git = Path(root) / ".git"
+                raise GitMetadataProtectionError(
+                    f"Security violation: nested Git directory detected in workspace: '{nested_git}'"
+                )
+
+            if ".git" in files:
+                nested_git = Path(root) / ".git"
+                raise GitMetadataProtectionError(
+                    f"Security violation: nested Git file detected in workspace: '{nested_git}'"
+                )
+
+        for d in dirs:
+            d_path = Path(root) / d
+            if is_protected_name(d) or is_protected_path(d_path, base_dir=ws_path):
+                raise GitMetadataProtectionError(
+                    f"Post-purge verification failed: protected directory or symlink '{d}' detected in workspace."
+                )
+
+        for f in files:
+            f_path = Path(root) / f
+            if is_protected_name(f) or is_protected_path(f_path, base_dir=ws_path):
+                raise GitMetadataProtectionError(
+                    f"Post-purge verification failed: protected file or symlink '{f}' detected in workspace."
+                )
+
+
+def purge_protected_paths_from_workspace(workspace_dir: Union[str, Path]) -> int:
     """Post-acquisition purge pass removing any protected files that entered a workspace.
 
     Applies to both local copies and remote git clones as defense-in-depth.
-    Preserves .git metadata unless specifically requested. Returns count of purged items.
-    """
-    if not workspace_dir.exists() or not workspace_dir.is_dir():
-        return 0
-
-    resolved_ws = workspace_dir.resolve()
-    purged_count = 0
-
-    # Walk bottom-up so directories can be safely unlinked/removed after contents
-    for root, dirs, files in os.walk(resolved_ws, topdown=False):
-        # Do not purge inside .git itself unless the entire .git is flagged (which it isn't)
-        rel_root = Path(root).relative_to(resolved_ws)
-        if ".git" in rel_root.parts:
-            continue
-
-        for filename in files:
-            file_path = Path(root) / filename
-            if is_protected_path(file_path, base_dir=resolved_ws):
-                try:
-                    file_path.unlink(missing_ok=True)
-                    purged_count += 1
-                except OSError:
-                    pass
-
-        for dirname in dirs:
-            dir_path = Path(root) / dirname
-            if dirname == ".git":
-                continue
-            if is_protected_path(dir_path, base_dir=resolved_ws):
-                try:
-                    shutil.rmtree(dir_path, ignore_errors=True)
-                    purged_count += 1
-                except OSError:
-                    pass
-
-    return purged_count
-
-
-def purge_protected_git_metadata(workspace_dir: Union[str, Path]) -> int:
-    """Purge sensitive file contents from Git objects, packs, logs, and index within workspace.
-
-    Invariants:
-    - Never modifies source repository (operates strictly inside workspace_dir).
-    - Preserves commit identity (HEAD commit SHA, branch).
-    - Removes all packfiles and unpacks objects into loose objects when protected files exist.
-    - Permanently deletes loose blob objects corresponding to protected paths across all history.
-    - Removes protected paths from Git index.
-    - Purges reflogs (.git/logs), stashes (.git/refs/stash), and commit-graphs.
-    - Fails closed if .git is a symlink or points outside workspace_dir.
-    - Fails closed if any purge, unpack, or containment operation fails.
-    - Recursively processes any nested .git repositories.
+    Preserves only the analysis workspace's root .git directory.
+    Fails closed if any deletion fails, if traversal fails, if nested Git metadata
+    is encountered, or if protected paths remain post-purge.
 
     Returns:
-        Count of purged protected Git blobs.
+        Count of purged items.
     """
     if workspace_dir is None:
         return 0
@@ -249,252 +281,105 @@ def purge_protected_git_metadata(workspace_dir: Union[str, Path]) -> int:
     if not ws_path.is_dir():
         return 0
 
-    # Discover all .git entries within workspace
-    git_entries: List[Path] = []
     root_git = ws_path / ".git"
-    if root_git.exists() or root_git.is_symlink():
-        git_entries.append(root_git)
+    if root_git.is_symlink():
+        raise GitMetadataProtectionError(
+            f"Security violation: .git cannot be a symlink in analysis workspace: '{root_git}'"
+        )
+    if root_git.is_file():
+        raise GitMetadataProtectionError(
+            f"Security violation: root .git cannot be a file in analysis workspace: '{root_git}'"
+        )
 
-    for root, dirs, files in os.walk(ws_path):
-        if Path(root).resolve() == ws_path:
+    purged_count = 0
+
+    def _on_walk_error(err: OSError):
+        raise GitMetadataProtectionError(f"Workspace traversal failed during sanitization purge: {err}") from err
+
+    # Walk bottom-up (followlinks=False) so child files and subdirectories are removed before parent directories
+    for root, dirs, files in os.walk(ws_path, topdown=False, followlinks=False, onerror=_on_walk_error):
+        current_path = Path(root).resolve()
+        rel_root = current_path.relative_to(ws_path)
+
+        # If inside the root analysis .git directory (rel_root.parts[0] == ".git"), preserve it
+        if rel_root.parts and rel_root.parts[0] == ".git":
             continue
-        if ".git" in Path(root).parts:
-            continue
-        for d in dirs:
-            if d == ".git":
-                git_entries.append(Path(root) / d)
-        for f in files:
-            if f == ".git":
-                git_entries.append(Path(root) / f)
 
-    total_purged = 0
-
-    for git_entry in git_entries:
-        # Enforce symlink safety on .git entry
-        if git_entry.is_symlink():
+        # If inside a nested .git directory, fail closed immediately
+        if ".git" in rel_root.parts:
             raise GitMetadataProtectionError(
-                f"Security violation: .git cannot be a symlink: '{git_entry}'"
+                f"Security violation: nested Git metadata directory detected in workspace: '{root}'"
             )
 
-        # Handle submodule .git file pointers
-        if git_entry.is_file():
-            try:
-                content = git_entry.read_text(encoding="utf-8").strip()
-                if content.startswith("gitdir:"):
-                    target_gitdir = content.split(":", 1)[1].strip()
-                    resolved_gitdir = (git_entry.parent / target_gitdir).resolve()
-                    resolved_gitdir.relative_to(ws_path)
+        is_root = (current_path == ws_path)
+
+        for filename in files:
+            file_path = Path(root) / filename
+            if filename == ".git":
+                if is_root:
+                    raise GitMetadataProtectionError(
+                        f"Security violation: root .git cannot be a file in analysis workspace: '{file_path}'"
+                    )
                 else:
-                    raise GitMetadataProtectionError(f"Malformed .git file reference: '{git_entry}'")
-            except Exception as e:
-                raise GitMetadataProtectionError(f"Security violation in .git reference '{git_entry}': {e}")
-            continue
+                    raise GitMetadataProtectionError(
+                        f"Security violation: nested Git file detected in workspace: '{file_path}'"
+                    )
 
-        # Verify directory containment
-        try:
-            git_entry.resolve().relative_to(ws_path)
-        except (ValueError, OSError, RuntimeError):
-            raise GitMetadataProtectionError(
-                f"Security violation: .git path escapes workspace: '{git_entry}'"
-            )
-
-        # Verify no symlinks inside .git point outside workspace
-        for sub_root, sub_dirs, sub_files in os.walk(git_entry):
-            for item in list(sub_dirs) + list(sub_files):
-                item_path = Path(sub_root) / item
-                if item_path.is_symlink():
-                    try:
-                        item_resolved = item_path.resolve()
-                        item_resolved.relative_to(ws_path)
-                    except (ValueError, OSError, RuntimeError):
-                        raise GitMetadataProtectionError(
-                            f"Security violation: escaping symlink inside .git: '{item_path}'"
-                        )
-
-        # Security check: Disallow external Git object borrowing via alternates
-        alternates_path = git_entry / "objects" / "info" / "alternates"
-        if alternates_path.exists():
-            raise GitMetadataProtectionError(
-                f"Security violation: Git alternates file detected in '{git_entry}': external object borrowing is forbidden"
-            )
-        http_alternates_path = git_entry / "objects" / "info" / "http-alternates"
-        if http_alternates_path.exists():
-            raise GitMetadataProtectionError(
-                f"Security violation: Git http-alternates file detected in '{git_entry}': external object borrowing is forbidden"
-            )
-
-        repo_root = git_entry.parent
-        cmd_base = [
-            "git",
-            "-c", "core.hooksPath=/dev/null",
-            "-c", f"safe.directory={repo_root.resolve()}",
-        ]
-
-        # 1. Identify all objects associated with protected paths across the entire history
-        try:
-            res_rev = subprocess.run(
-                cmd_base + ["rev-list", "--objects", "--all"],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-            )
-        except Exception as e:
-            raise GitMetadataProtectionError(f"Failed to query Git objects in '{repo_root}': {e}")
-
-        if res_rev.returncode != 0:
-            err = res_rev.stderr or res_rev.stdout
-            if "does not have any commits yet" in err or "fatal: your current branch" in err:
-                continue
-            raise GitMetadataProtectionError(f"Git rev-list failed in '{repo_root}': {err}")
-
-        protected_blobs: Set[str] = set()
-        for line in res_rev.stdout.splitlines():
-            parts = line.strip().split(maxsplit=1)
-            if len(parts) == 2:
-                sha, pth = parts[0], parts[1]
-                fn = Path(pth).name
-                if is_protected_name(fn) or is_protected_path(pth, base_dir=repo_root):
-                    protected_blobs.add(sha)
-
-        # 2. Inspect all tree objects to discover dangling or unreferenced protected blobs
-        try:
-            res_cat = subprocess.run(
-                cmd_base + ["cat-file", "--batch-all-objects", "--batch-check"],
-                cwd=repo_root,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-            )
-            if res_cat.returncode == 0:
-                for line in res_cat.stdout.splitlines():
-                    items = line.split()
-                    if len(items) >= 2 and items[1] == "tree":
-                        tsha = items[0]
-                        t_res = subprocess.run(
-                            cmd_base + ["cat-file", "-p", tsha],
-                            cwd=repo_root,
-                            capture_output=True,
-                            text=True,
-                            timeout=10,
-                            check=False,
-                        )
-                        if t_res.returncode == 0:
-                            for entry in t_res.stdout.splitlines():
-                                e_parts = entry.split(maxsplit=3)
-                                if len(e_parts) == 4 and e_parts[1] == "blob":
-                                    bsha, bname = e_parts[2], e_parts[3]
-                                    if is_protected_name(bname):
-                                        protected_blobs.add(bsha)
-        except Exception as e:
-            raise GitMetadataProtectionError(f"Failed to inspect Git tree objects in '{repo_root}': {e}")
-
-        # Always purge reflogs and stashes as hygiene
-        shutil.rmtree(git_entry / "logs", ignore_errors=True)
-        (git_entry / "refs" / "stash").unlink(missing_ok=True)
-        cg_path = git_entry / "objects" / "info" / "commit-graphs"
-        if cg_path.is_dir():
-            shutil.rmtree(cg_path, ignore_errors=True)
-        else:
-            cg_path.unlink(missing_ok=True)
-        (git_entry / "objects" / "info" / "commit-graph").unlink(missing_ok=True)
-
-        # Always prune unreachable dangling objects as hygiene
-        subprocess.run(
-            cmd_base + ["prune", "--expire=now"],
-            cwd=repo_root,
-            capture_output=True,
-            timeout=30,
-        )
-
-        if not protected_blobs:
-            subprocess.run(
-                cmd_base + ["config", "core.hooksPath", "/dev/null"],
-                cwd=repo_root,
-                capture_output=True,
-                timeout=10,
-            )
-            continue
-
-        # 3. Unpack all packfiles so protected blobs can be individually purged
-        pack_dir = git_entry / "objects" / "pack"
-        if pack_dir.exists() and any(pack_dir.glob("*.pack")):
-            temp_pack_dir = git_entry / "_temp_forge_packs"
-            temp_pack_dir.mkdir(exist_ok=True)
-            try:
-                for pfile in pack_dir.glob("*"):
-                    shutil.move(str(pfile), str(temp_pack_dir / pfile.name))
-                for pack in temp_pack_dir.glob("*.pack"):
-                    with open(pack, "rb") as f_in:
-                        res_unpack = subprocess.run(
-                            cmd_base + ["unpack-objects", "-r"],
-                            stdin=f_in,
-                            cwd=repo_root,
-                            capture_output=True,
-                            timeout=120,
-                        )
-                        if res_unpack.returncode != 0:
-                            err_msg = res_unpack.stderr.decode("utf-8", errors="replace")
-                            raise GitMetadataProtectionError(
-                                f"Failed to unpack Git packfile during metadata purge: {err_msg}"
-                            )
-            finally:
-                shutil.rmtree(temp_pack_dir, ignore_errors=True)
-                if pack_dir.exists():
-                    for leftover in pack_dir.glob("*"):
-                        try:
-                            leftover.unlink(missing_ok=True)
-                        except OSError:
-                            pass
-
-        # 4. Permanently delete loose blob objects for protected files
-        for bsha in protected_blobs:
-            bf = git_entry / "objects" / bsha[:2] / bsha[2:]
-            if bf.exists():
+            if is_protected_path(file_path, base_dir=ws_path):
                 try:
-                    bf.unlink()
-                    total_purged += 1
-                    if bf.parent.exists() and not any(bf.parent.iterdir()):
-                        try:
-                            bf.parent.rmdir()
-                        except OSError:
-                            pass
+                    file_path.unlink()
+                    purged_count += 1
                 except Exception as e:
-                    raise GitMetadataProtectionError(f"Failed to delete protected Git object '{bsha}': {e}")
+                    raise GitMetadataProtectionError(
+                        f"Security failure: unable to delete protected file '{file_path.name}' from workspace: {e}"
+                    ) from e
+                if file_path.exists() or file_path.is_symlink():
+                    raise GitMetadataProtectionError(
+                        f"Security failure: protected file '{file_path.name}' remains in workspace after deletion attempt."
+                    )
 
-        # 5. Remove protected paths from Git index
-        subprocess.run(
-            cmd_base + ["rm", "--cached", "-r", "--ignore-unmatch", ".env*", "*.db*", "contacts.json", "*.log"],
-            cwd=repo_root,
-            capture_output=True,
-            timeout=30,
-        )
+        for dirname in dirs:
+            dir_path = Path(root) / dirname
+            if dirname == ".git":
+                if is_root:
+                    if dir_path.is_symlink():
+                        raise GitMetadataProtectionError(
+                            f"Security violation: .git cannot be a symlink in analysis workspace: '{dir_path}'"
+                        )
+                    # Legitimate root analysis .git directory: preserved
+                    continue
+                else:
+                    raise GitMetadataProtectionError(
+                        f"Security violation: nested Git directory detected in workspace: '{dir_path}'"
+                    )
 
-        # Prune unreachable loose objects
-        subprocess.run(
-            cmd_base + ["prune", "--expire=now"],
-            cwd=repo_root,
-            capture_output=True,
-            timeout=30,
-        )
+            if dir_path.is_symlink():
+                if is_protected_path(dir_path, base_dir=ws_path):
+                    try:
+                        dir_path.unlink()
+                        purged_count += 1
+                    except Exception as e:
+                        raise GitMetadataProtectionError(
+                            f"Security failure: unable to delete protected directory symlink '{dir_path.name}' from workspace: {e}"
+                        ) from e
+                    if dir_path.exists() or dir_path.is_symlink():
+                        raise GitMetadataProtectionError(
+                            f"Security failure: protected directory symlink '{dir_path.name}' remains in workspace after deletion attempt."
+                        )
+            elif is_protected_path(dir_path, base_dir=ws_path):
+                try:
+                    shutil.rmtree(dir_path)
+                    purged_count += 1
+                except Exception as e:
+                    raise GitMetadataProtectionError(
+                        f"Security failure: unable to delete protected directory '{dir_path.name}' from workspace: {e}"
+                    ) from e
+                if dir_path.exists() or dir_path.is_symlink():
+                    raise GitMetadataProtectionError(
+                        f"Security failure: protected directory '{dir_path.name}' remains in workspace after deletion attempt."
+                    )
 
-        # 6. Fail-closed verification
-        for bsha in protected_blobs:
-            bf = git_entry / "objects" / bsha[:2] / bsha[2:]
-            if bf.exists():
-                raise GitMetadataProtectionError(
-                    f"Purge integrity check failed: protected blob '{bsha}' remains in object database"
-                )
-        if pack_dir.exists() and any(pack_dir.glob("*.pack")):
-            raise GitMetadataProtectionError("Purge integrity check failed: packfiles still present after unpacking")
+    # Independent post-purge verification pass
+    verify_workspace_sanitized(ws_path)
 
-        subprocess.run(
-            cmd_base + ["config", "core.hooksPath", "/dev/null"],
-            cwd=repo_root,
-            capture_output=True,
-            timeout=10,
-        )
-
-    return total_purged
+    return purged_count
