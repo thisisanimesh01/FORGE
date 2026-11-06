@@ -38,11 +38,11 @@ Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (M
 Phase 7: Evidence-Driven Investigation Engine ── [COMPLETED] (Cross-File Evidence, Contradiction Detection, Investigation Orchestration)
 Phase 9: Safe Git Publication & Upstream Integration ── [COMPLETED] (Milestones 1–4 Complete — Phase 9 Complete)
 Phase 10: Protected-File Boundary Enforcement ── [COMPLETED] (Centralized Boundary Policy, Acquisition Filter, Ingestion Guard, Context Hardening, Git Metadata Remediation)
-Phase 11: Intelligent Repository Understanding ── [IN PROGRESS] (M1 Architecture Audit Complete, M2 Symbol Graph & Call-Graph Engine Complete, M3 Module Dependency Graph & Cycle Detection Complete, M4 Change-Impact Analysis Complete)
+Phase 11: Intelligent Repository Understanding ── [IN PROGRESS] (M1 Architecture Audit Complete, M2 Symbol Graph & Call-Graph Engine Complete, M3 Module Dependency Graph & Cycle Detection Complete, M4 Change-Impact Analysis Complete, M5 Incremental Indexing & Caching Complete)
 ```
 
 ### Phase 11: Intelligent Repository Understanding (In Progress)
-- **Objective & Scope**: Enable comprehensive static understanding of software repositories by introducing qualified symbol naming, cross-file import resolution, forward and reverse call graphs, module dependency DAGs, cycle detection, and change-impact analysis without dynamic execution or compromising Phase 10 isolation boundaries.
+- **Objective & Scope**: Enable comprehensive static understanding of software repositories by introducing qualified symbol naming, cross-file import resolution, forward and reverse call graphs, module dependency DAGs, cycle detection, change-impact analysis, and incremental caching without dynamic execution or compromising Phase 10 isolation boundaries.
 - **Milestone 1: Architecture Audit (`[COMPLETED]`)**: Completed read-only architecture assessment classifying 13 repository understanding capabilities and defining modular architecture for Milestones 2–6.
 - **Milestone 2: Symbol Graph & Cross-File Call-Graph Engine (`[COMPLETED]`)**:
   - *Data Models & Schemas (`forge.repository.graph_schemas`)*: Implemented `GraphNode`, `CallEdge`, `CallGraphSummary`, `NodeKind`, `EdgeKind`, and `CallResolutionStatus` (`RESOLVED_INTERNAL`, `RESOLVED_EXTERNAL`, `UNRESOLVED`, `AMBIGUOUS`, `DYNAMIC`).
@@ -66,7 +66,15 @@ Phase 11: Intelligent Repository Understanding ── [IN PROGRESS] (M1 Architec
   - *Traversal Budgets & Performance*: Enforces configurable `max_depth` and `max_nodes` caps with explicit truncation warnings and deduplication. Delivers ~0.07s to 0.10s warm impact propagation query latency across 269 workspace modules.
   - *Dedicated Milestone Documentation*: Created [`docs/milestones/phase-11-m4-change-impact-analysis.md`](docs/milestones/phase-11-m4-change-impact-analysis.md).
   - *Verification Suite*: 31 dedicated unit tests in `tests/unit/test_change_impact.py` and 91 total Phase 11 unit tests passing with zero regressions.
-- **Milestone 5: Incremental Indexing & Caching (`[PLANNED]`)**
+- **Milestone 5: Incremental Indexing & Caching (`[COMPLETED]`)**:
+  - *Data Models & Schemas (`forge.repository.cache_schemas`)*: Implemented `FileIndexRecord`, `CacheEntry`, `CacheStats`, `IncrementalUpdateSummary`, and `RepositoryIndexState` with schema versioning (`1.0.0`) and parser versioning (`1.0.0`).
+  - *Cache Storage Engine (`forge.repository.cache`)*: Implemented `IndexCacheManager` executing atomic disk writes (`.tmp.{pid}.{uuid}` + `os.replace`), automated SHA-256 payload checksums, corruption recovery, orphaned temp file cleanup, and LRU eviction under bounded storage (`max_entries = 5000`, `max_bytes = 50 MB`).
+  - *Incremental Graph Coordinator (`forge.repository.incremental`)*: Implemented `IncrementalRepositoryIndex` detecting deltas across added, modified, deleted, renamed, and unchanged files via SHA-256 content hashes. Dynamically invalidates downstream dependents and safely falls back to clean full rebuilds on untrusted cache states.
+  - *Syntax Error Resilience*: Safely records and caches empty index envelopes for unparseable files, guaranteeing consistent module node representation across full and incremental builds.
+  - *Exact Semantic Equivalence*: Enforced 100% semantic identity with clean full rebuilds via `IncrementalRepositoryIndex.verify_equivalence()` across all 14 graph invariants and M4 change-impact analysis.
+  - *Empirical Performance on 279 Files*: Delivers 2.32s warm build latency (**100.0% cache hit rate**, 279 hits, 0 misses, **3.19x speedup** vs 7.38s cold build) with 19.35 MB disk footprint.
+  - *Dedicated Milestone Documentation*: Created [`docs/milestones/phase-11-m5-incremental-indexing-and-caching.md`](docs/milestones/phase-11-m5-incremental-indexing-and-caching.md).
+  - *Verification Suite*: 19 dedicated unit tests in `tests/unit/test_incremental_indexing.py` and 110 total Phase 11 unit tests passing with zero regressions.
 - **Milestone 6: LLM Tooling & Context Integration (`[PLANNED]`)**
 
 

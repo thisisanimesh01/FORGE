@@ -7,7 +7,7 @@ or functions without executing code or compromising Phase 10 isolation boundarie
 
 from collections import deque
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from forge.analysis.impact.extractor import (
     extract_changeset_from_diff,
@@ -66,10 +66,12 @@ class ChangeImpactAnalyzer:
         module_graph: Optional[ModuleDependencyGraph] = None,
         max_depth: int = 5,
         max_nodes: int = 500,
+        incremental_index: Optional[Any] = None,
     ):
         self.repo_root = repo_root.resolve()
         self.max_depth = max(1, max_depth)
         self.max_nodes = max(1, max_nodes)
+        self.incremental_index = incremental_index
 
         # Lazy / eager graph initialization
         self._call_graph = call_graph
@@ -79,14 +81,20 @@ class ChangeImpactAnalyzer:
     def call_graph(self) -> CallGraph:
         """Lazily build or return the symbol call graph."""
         if self._call_graph is None:
-            self._call_graph = build_call_graph(self.repo_root)
+            if self.incremental_index is not None:
+                self._call_graph = self.incremental_index.get_call_graph()
+            else:
+                self._call_graph = build_call_graph(self.repo_root)
         return self._call_graph
 
     @property
     def module_graph(self) -> ModuleDependencyGraph:
         """Lazily build or return the module dependency graph."""
         if self._module_graph is None:
-            self._module_graph = build_module_dependency_graph(self.repo_root)
+            if self.incremental_index is not None:
+                self._module_graph = self.incremental_index.get_module_graph()
+            else:
+                self._module_graph = build_module_dependency_graph(self.repo_root)
         return self._module_graph
 
     def analyze_diff(self, diff_text: str) -> ImpactReport:

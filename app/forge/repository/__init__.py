@@ -80,6 +80,29 @@ from forge.repository.module_graph import (
     ModuleDependencyGraph,
     build_module_dependency_graph,
 )
+from forge.repository.cache_schemas import (
+    INDEX_SCHEMA_VERSION,
+    INDEXER_PARSER_VERSION,
+    FileIndexRecord,
+    CacheEntry,
+    CacheStats,
+    IncrementalUpdateSummary,
+    RepositoryIndexState,
+)
+from forge.repository.cache import (
+    IndexCacheManager,
+)
+from forge.repository.incremental import (
+    IncrementalRepositoryIndex,
+    visitor_to_file_record,
+    parse_file_to_record,
+    build_symbol_index_from_records,
+    build_call_graph_from_records,
+    build_module_graph_from_records,
+    get_incremental_index,
+    build_incremental_call_graph,
+    build_incremental_module_graph,
+)
 
 __all__ = [
     "TargetType",
@@ -138,4 +161,21 @@ __all__ = [
     "build_call_graph",
     "ModuleDependencyGraph",
     "build_module_dependency_graph",
+    "INDEX_SCHEMA_VERSION",
+    "INDEXER_PARSER_VERSION",
+    "FileIndexRecord",
+    "CacheEntry",
+    "CacheStats",
+    "IncrementalUpdateSummary",
+    "RepositoryIndexState",
+    "IndexCacheManager",
+    "IncrementalRepositoryIndex",
+    "visitor_to_file_record",
+    "parse_file_to_record",
+    "build_symbol_index_from_records",
+    "build_call_graph_from_records",
+    "build_module_graph_from_records",
+    "get_incremental_index",
+    "build_incremental_call_graph",
+    "build_incremental_module_graph",
 ]
