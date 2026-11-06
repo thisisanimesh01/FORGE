@@ -86,7 +86,12 @@ class ImpactedEntity(BaseModel):
     path_steps: List[ImpactPathStep] = Field(default_factory=list, description="Structured step records along impact path")
     trigger_changes: List[str] = Field(default_factory=list, description="IDs of changes that triggered this impact")
     relationship_type: str = Field(..., description="Primary relationship type, e.g. 'direct_caller', 'transitive_caller', 'module_dependent'")
-    confidence: float = Field(1.0, ge=0.0, le=1.0, description="Deterministic confidence (1.0 for confirmed static edges, lower for potential/dynamic)")
+    confidence: float = Field(
+        1.0,
+        ge=0.0,
+        le=1.0,
+        description="Deterministic heuristic confidence score (ranking weight, not calibrated probability; 1.0 for confirmed static edges, lower for potential/dynamic)",
+    )
     explanation: str = Field(..., description="Deterministic explanation of why this entity is impacted")
 
 
