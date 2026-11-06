@@ -6,7 +6,7 @@ Builds deterministic, cycle-safe call graphs across workspace Python files witho
 from collections import deque
 import builtins
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from pydantic import BaseModel, Field
 
 from forge.repository.graph_schemas import (
@@ -213,18 +213,34 @@ def build_call_graph(
             rel_str = str(resolved.relative_to(root))
             parsed_files[rel_str] = visitor
 
-            for node in visitor.nodes:
-                all_nodes[node.node_id] = node
-
-            for cls_name, bases in visitor.class_bases.items():
-                class_bases_map[f"{rel_str}:{cls_name}"] = bases
-
         processed_count += 1
         if processed_count >= max_python_files:
             break
 
+    return resolve_call_graph_from_records(parsed_files, root, resolver=resolver)
+
+
+def resolve_call_graph_from_records(
+    parsed_files: Dict[str, Any],
+    repo_root: Path,
+    resolver: Optional[WorkspaceImportResolver] = None,
+) -> CallGraph:
+    """Resolve call graph nodes and invocation edges across pre-parsed files or cached records."""
+    root = repo_root.resolve()
+    if resolver is None:
+        resolver = WorkspaceImportResolver(root)
+
+    all_nodes: Dict[str, GraphNode] = {}
+    class_bases_map: Dict[str, List[str]] = {}
+
+    for rel_str, visitor in parsed_files.items():
+        for node in visitor.nodes:
+            all_nodes[node.node_id] = node
+        for cls_name, bases in visitor.class_bases.items():
+            class_bases_map[f"{rel_str}:{cls_name}"] = bases
+
     # Step 2: Precompute resolved imports for each file
-    file_resolved_imports: Dict[str, Dict[str, any]] = {}
+    file_resolved_imports: Dict[str, Dict[str, Any]] = {}
     file_star_imports: Dict[str, List[str]] = {}
 
     for rel_path, visitor in parsed_files.items():
@@ -260,7 +276,7 @@ def build_call_graph(
             status: CallResolutionStatus = CallResolutionStatus.UNRESOLVED
             reason: str = ""
 
-            caller_locals = visitor.callable_local_vars.get(cs.caller_id, set())
+            caller_locals = set(visitor.callable_local_vars.get(cs.caller_id, []))
 
             # Case A: Dynamic call
             if cs.receiver_kind == "dynamic":

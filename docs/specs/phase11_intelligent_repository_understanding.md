@@ -34,7 +34,12 @@ Phase 11 equips FORGE with semantic understanding of target software repositorie
   - Dynamic dispatch and star-import impact identification.
   - Cycle-safe bounded traversal with `max_depth` and `max_nodes` budgeting.
   - Dedicated milestone documentation in [`docs/milestones/phase-11-m4-change-impact-analysis.md`](../milestones/phase-11-m4-change-impact-analysis.md).
-- **Milestone 5**: Incremental Indexing & Caching `[PLANNED]`
+- **Milestone 5**: Incremental Indexing & Caching `[COMPLETED]`
+  - Deterministic content-hash based caching engine (`IndexCacheManager`) with atomic writes, LRU eviction, and corruption recovery.
+  - Delta detection across additions, modifications, deletions, renames, and unchanged files.
+  - Full semantic equivalence validation (`verify_equivalence()`) matching clean full rebuilds 100%.
+  - Syntax error resilience caching unparseable files as empty records for module graph consistency.
+  - Dedicated milestone documentation in [`docs/milestones/phase-11-m5-incremental-indexing-and-caching.md`](../milestones/phase-11-m5-incremental-indexing-and-caching.md).
 - **Milestone 6**: LLM Tooling & Context Integration `[PLANNED]`
 
 ---
@@ -257,11 +262,45 @@ Tested on the full FORGE codebase (269 Python modules, modifying `app/forge/repo
   - Changeset extraction & line correlation: 0.003s.
   - Impact propagation traversal: **~0.07s to 0.10s (warm in-memory)**; **~5.35s (cold end-to-end execution)**.
 - **Unit Test Suite**: `tests/unit/test_change_impact.py`: **31 passed in 0.50s (100% pass rate)**.
-- **Phase 11 Total Unit Tests**: **91 passed (100% pass rate)**.
+- **Phase 11 Total Unit Tests**: **110 passed (100% pass rate)**.
 
 ---
 
-## 5. Remaining Project Roadmap & Final Release Plan
+## 5. Milestone 5 Architecture: Incremental Indexing & Caching
+
+### 1. Data Models & Schemas (`forge.repository.cache_schemas`)
+- `FileIndexRecord`: Complete AST-extracted representation of a source file (`symbols`, `nodes`, `call_sites`, `imports`, `class_bases`, `callable_local_vars`, `docstring`, `total_lines`).
+- `CacheEntry`: Envelope holding `schema_version` (`INDEX_SCHEMA_VERSION = "1.0.0"`), `parser_version` (`INDEXER_PARSER_VERSION = "1.0.0"`), `payload`, and SHA-256 payload `checksum`.
+- `CacheStats`: Real-time cache performance counters (`cache_hits`, `cache_misses`, `invalidations`, `corrupted_entries_recovered`, `evicted_entries`).
+- `IncrementalUpdateSummary`: Comprehensive operation audit record with scan counts, lifecycle changes, hit metrics, and fallback tracking.
+- `RepositoryIndexState`: Fingerprint-verified repository snapshot mapping relative file paths to SHA-256 hashes.
+
+### 2. Cache Storage Engine (`forge.repository.cache.IndexCacheManager`)
+- **Atomic Operations**: Atomic write sequence (`.tmp.{pid}.{uuid}` $\rightarrow$ `os.fsync` $\rightarrow$ `os.replace`).
+- **Integrity Validation**: Automated SHA-256 checksum checks detecting payload corruption.
+- **Fail-Secure Protection**: Strict upfront filtering rejecting `.env*`, `*.db*`, `contacts.json`, `*.log`, `.git/`, and escaping symlinks.
+- **LRU Eviction**: Bounded cache sizes (`max_entries = 5000`, `max_bytes = 50 MB`) with deterministic LRU pruning.
+- **Cleanup**: Proactive deletion of abandoned temporary files and obsolete deleted-file records.
+
+### 3. Incremental Graph Coordinator (`forge.repository.incremental.IncrementalRepositoryIndex`)
+- **Delta Computation**: Detects `added`, `modified`, `deleted`, `renamed`, and `unchanged` files using content hashes.
+- **Cross-File Resolution**: Shared deterministic graph resolution (`resolve_call_graph_from_records`, `build_module_graph_from_records`, `build_symbol_index_from_records`).
+- **Syntax Error Resilience**: Unparseable files are cached as empty records, guaranteeing consistent module node representation across full and incremental builds.
+- **Rebuild Fallback**: Any resolution or cache exception automatically triggers a safe clean full rebuild (`rebuild_fallback_triggered = True`).
+- **Critical Equivalence**: `IncrementalRepositoryIndex.verify_equivalence()` enforces exact semantic equality across all 14 graph invariants between full rebuilds and incremental builds.
+
+### 4. Empirical Performance
+- Full FORGE repository (279 Python files):
+  - Cold full rebuild: **7.38s**
+  - Cold incremental build: **16.66s** (includes disk write)
+  - Warm incremental build: **2.32s** (**100% hit rate**, 279 hits, 0 misses, **3.19x speedup**)
+  - Single-file delta build: **2.37s**
+  - Storage size: **19.35 MB** (279 JSON entries)
+  - Equivalence verified: **100% semantic identity (`True`)**
+
+---
+
+## 6. Remaining Project Roadmap & Final Release Plan
 
 The remaining FORGE project roadmap is strictly bounded to three phases:
 
@@ -270,7 +309,7 @@ The remaining FORGE project roadmap is strictly bounded to three phases:
   - M2: Symbol Graph & Cross-File Call-Graph Engine `[COMPLETED]`
   - M3: Module Dependency Graph & Cycle Detection `[COMPLETED]`
   - M4: Change-Impact Analysis `[COMPLETED]`
-  - M5: Incremental Indexing & Caching `[REMAINING]`
+  - M5: Incremental Indexing & Caching `[COMPLETED]`
   - M6: LLM Tooling & Context Integration `[REMAINING]`
 - **Phase 12: Advanced Intelligence and Autonomous Repair** `[REMAINING]`
 - **Phase 13: Complete Engineering Agent and Final Release** `[REMAINING]`
