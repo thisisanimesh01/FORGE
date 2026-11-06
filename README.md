@@ -38,7 +38,21 @@ Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (M
 Phase 7: Evidence-Driven Investigation Engine ── [COMPLETED] (Cross-File Evidence, Contradiction Detection, Investigation Orchestration)
 Phase 9: Safe Git Publication & Upstream Integration ── [COMPLETED] (Milestones 1–4 Complete — Phase 9 Complete)
 Phase 10: Protected-File Boundary Enforcement ── [COMPLETED] (Centralized Boundary Policy, Acquisition Filter, Ingestion Guard, Context Hardening, Git Metadata Remediation)
+Phase 11: Intelligent Repository Understanding ── [IN PROGRESS] (M1 Architecture Audit Complete, M2 Symbol Graph & Call-Graph Engine Complete)
 ```
+
+### Phase 11: Intelligent Repository Understanding (In Progress)
+- **Objective & Scope**: Enable comprehensive static understanding of software repositories by introducing qualified symbol naming, cross-file import resolution, forward and reverse call graphs, module dependency DAGs, and change-impact analysis without dynamic execution or compromising Phase 10 isolation boundaries.
+- **Milestone 1: Architecture Audit (`[COMPLETED]`)**: Completed read-only architecture assessment classifying 13 repository understanding capabilities and defining modular architecture for Milestones 2–6.
+- **Milestone 2: Symbol Graph & Cross-File Call-Graph Engine (`[COMPLETED]`)**:
+  - *Data Models & Schemas (`forge.repository.graph_schemas`)*: Implemented `GraphNode`, `CallEdge`, `CallGraphSummary`, `NodeKind`, `EdgeKind`, and `CallResolutionStatus` (`RESOLVED_INTERNAL`, `RESOLVED_EXTERNAL`, `UNRESOLVED`, `AMBIGUOUS`, `DYNAMIC`).
+  - *Workspace Import Resolver (`forge.repository.resolver`)*: Implemented `WorkspaceImportResolver` mapping workspace modules, resolving absolute, relative, aliased, and package `__init__.py` imports while rejecting root-escaping traversal fail-closed.
+  - *AST Symbol & Call Extractor (`forge.repository.indexer`)*: Enhanced `ASTSymbolVisitor` to extract stable qualified symbol names, track `<locals>` function scopes, and record call-site expressions from `ast.Call` nodes with complete backward compatibility.
+  - *Call-Graph Engine (`forge.repository.call_graph`)*: Implemented `CallGraph` and `build_call_graph()` resolving direct calls, module-qualified calls, aliased imports, `self.method()`/`cls.method()` inheritance across files, recursion, and mutual recursion.
+  - *Cycle-Safe Bounded Traversal*: Implemented `get_callers()`, `get_callees()`, `get_direct_callers()`, and `get_direct_callees()` with deterministic sorting, `visited` set protection, and `max_depth`/`max_nodes` budgets.
+  - *Dedicated Specification*: Created [`docs/specs/phase11_intelligent_repository_understanding.md`](docs/specs/phase11_intelligent_repository_understanding.md).
+  - *Verification Suite*: 29 dedicated unit tests across `tests/unit/test_repository_resolver.py` (12 tests) and `tests/unit/test_call_graph.py` (17 tests); 1,632 tests passing across full test suite.
+
 
 ### Phase 10: Protected-File Boundary Enforcement & Safe Git Metadata Isolation (Completed)
 - **Objective & Scope**: Centralize and enforce strict protected-file boundaries across all FORGE ingestion, static analysis, dynamic verification, context assembly, and investigation subsystems, ensuring sensitive repository files (`.env*`, `*.db*`, `contacts.json`, `*.log`) are never read, indexed, copied to scratch analysis workspaces, hashed, or included in LLM context. Implement Option C: Safe Git Metadata Isolation to separate trusted Git storage from agent-accessible workspaces, introducing a narrow, path-protected Git mediator while maintaining 100% upstream commit identity, uncorrupted repository integrity (`git fsck --full`), and seamless Phase 9 publication compatibility.
