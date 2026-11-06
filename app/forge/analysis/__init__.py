@@ -50,6 +50,21 @@ from forge.analysis.dependency_manifest import (
     parse_workspace_dependencies,
     find_related_workspace_files,
 )
+from forge.analysis.impact import (
+    ChangeImpactAnalyzer,
+    ChangeSet,
+    ChangeType,
+    EntityType,
+    FileChange,
+    ImpactClassification,
+    ImpactPathStep,
+    ImpactReport,
+    ImpactSummary,
+    ImpactedEntity,
+    SymbolChange,
+    extract_changeset_from_diff,
+    extract_changeset_from_files,
+)
 
 __all__ = [
     "create_evidence",
@@ -92,4 +107,17 @@ __all__ = [
     "DependencyManifest",
     "parse_workspace_dependencies",
     "find_related_workspace_files",
+    "ChangeImpactAnalyzer",
+    "ChangeSet",
+    "ChangeType",
+    "EntityType",
+    "FileChange",
+    "ImpactClassification",
+    "ImpactPathStep",
+    "ImpactReport",
+    "ImpactSummary",
+    "ImpactedEntity",
+    "SymbolChange",
+    "extract_changeset_from_diff",
+    "extract_changeset_from_files",
 ]

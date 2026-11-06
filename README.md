@@ -38,7 +38,7 @@ Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (M
 Phase 7: Evidence-Driven Investigation Engine ── [COMPLETED] (Cross-File Evidence, Contradiction Detection, Investigation Orchestration)
 Phase 9: Safe Git Publication & Upstream Integration ── [COMPLETED] (Milestones 1–4 Complete — Phase 9 Complete)
 Phase 10: Protected-File Boundary Enforcement ── [COMPLETED] (Centralized Boundary Policy, Acquisition Filter, Ingestion Guard, Context Hardening, Git Metadata Remediation)
-Phase 11: Intelligent Repository Understanding ── [IN PROGRESS] (M1 Architecture Audit Complete, M2 Symbol Graph & Call-Graph Engine Complete, M3 Module Dependency Graph & Cycle Detection Complete)
+Phase 11: Intelligent Repository Understanding ── [IN PROGRESS] (M1 Architecture Audit Complete, M2 Symbol Graph & Call-Graph Engine Complete, M3 Module Dependency Graph & Cycle Detection Complete, M4 Change-Impact Analysis Complete)
 ```
 
 ### Phase 11: Intelligent Repository Understanding (In Progress)
@@ -59,7 +59,13 @@ Phase 11: Intelligent Repository Understanding ── [IN PROGRESS] (M1 Architec
   - *Query & Traversal APIs*: Implemented `get_dependencies()`, `get_dependents()`, `get_transitive_dependencies()`, `get_transitive_dependents()`, `detect_cycles()`, `get_strongly_connected_components()`, `get_isolated_modules()`, `get_edge()`, `is_in_cycle()`, and `get_dependency_summary()`.
   - *Dedicated Milestone Documentation*: Created [`docs/milestones/phase-11-m3-module-dependency-graph.md`](docs/milestones/phase-11-m3-module-dependency-graph.md).
   - *Verification Suite*: 24 dedicated unit tests in `tests/unit/test_module_graph.py` and 60 total Phase 11 unit tests passing with zero regressions.
-- **Milestone 4: Change-Impact Analysis (`[PLANNED]`)**
+- **Milestone 4: Change-Impact Analysis (`[COMPLETED]`)**:
+  - *Data Models & Schemas (`forge.analysis.impact.schemas`)*: Implemented `ChangeSet`, `FileChange`, `SymbolChange`, `ImpactPathStep`, `ImpactedEntity`, `ImpactSummary`, and `ImpactReport`. Defined 5-tier classification taxonomy: `DIRECT`, `TRANSITIVE`, `POTENTIAL`, `UNRESOLVED`, `UNAFFECTED`.
+  - *Changeset Extraction & Boundary Enforcement (`forge.analysis.impact.extractor`)*: Implemented `extract_changeset_from_diff()` and `extract_changeset_from_files()`. Maps unified diff hunks and modified line numbers to AST symbol boundaries without executing code. Rejects path traversal (`..`), absolute paths, escaping symlinks, and protected paths (`.env*`, `*.db*`, `contacts.json`, `*.log`, `.git/`) fail-closed.
+  - *Reverse Propagation Engine (`forge.analysis.impact.analyzer`)*: Implemented `ChangeImpactAnalyzer` traversing reverse invocation paths via `CallGraph.get_direct_callers()` and reverse module dependency paths via `ModuleDependencyGraph.get_dependents()`. Propagates method changes to enclosing classes, tracks multi-level caller/dependent chains via cycle-safe BFS, classifies dynamic dispatch and star imports as `POTENTIAL`, and classifies broken references to deleted or renamed symbols/modules as `UNRESOLVED`.
+  - *Traversal Budgets & Deduplication*: Enforces configurable `max_depth` and `max_nodes` caps with explicit truncation warnings and deterministically deduplicates multi-path impacts preserving minimal depth and highest severity.
+  - *Dedicated Milestone Documentation*: Created [`docs/milestones/phase-11-m4-change-impact-analysis.md`](docs/milestones/phase-11-m4-change-impact-analysis.md).
+  - *Verification Suite*: 31 dedicated unit tests in `tests/unit/test_change_impact.py` and 91 total Phase 11 unit tests passing with zero regressions.
 - **Milestone 5: Incremental Indexing & Caching (`[PLANNED]`)**
 - **Milestone 6: LLM Tooling & Context Integration (`[PLANNED]`)**
 
