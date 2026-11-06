@@ -59,6 +59,14 @@ from forge.repository.graph_schemas import (
     CallGraphSummary,
     ImportRecord,
     CallSiteRecord,
+    ImportEvidence,
+    ModuleNode,
+    ModuleEdge,
+    ExternalImportRecord,
+    UnresolvedImportRecord,
+    DependencyCycle,
+    StronglyConnectedComponent,
+    ModuleDependencyGraphSummary,
 )
 from forge.repository.resolver import (
     WorkspaceImportResolver,
@@ -67,6 +75,10 @@ from forge.repository.resolver import (
 from forge.repository.call_graph import (
     CallGraph,
     build_call_graph,
+)
+from forge.repository.module_graph import (
+    ModuleDependencyGraph,
+    build_module_dependency_graph,
 )
 
 __all__ = [
@@ -112,8 +124,18 @@ __all__ = [
     "CallGraphSummary",
     "ImportRecord",
     "CallSiteRecord",
+    "ImportEvidence",
+    "ModuleNode",
+    "ModuleEdge",
+    "ExternalImportRecord",
+    "UnresolvedImportRecord",
+    "DependencyCycle",
+    "StronglyConnectedComponent",
+    "ModuleDependencyGraphSummary",
     "WorkspaceImportResolver",
     "ResolvedImport",
     "CallGraph",
     "build_call_graph",
+    "ModuleDependencyGraph",
+    "build_module_dependency_graph",
 ]

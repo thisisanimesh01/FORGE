@@ -136,6 +136,22 @@ class WorkspaceImportResolver:
         )
         return not has_workspace_prefix
 
+    def is_stdlib_module(self, mod_name: str) -> bool:
+        """Check whether a module belongs to the Python standard library."""
+        if not mod_name:
+            return False
+        top_name = mod_name.split(".")[0]
+        return top_name in self._stdlib_modules
+
+    def is_third_party_module(self, mod_name: str) -> bool:
+        """Check whether a module is a third-party external package (not stdlib and not internal)."""
+        if not mod_name:
+            return False
+        top_name = mod_name.split(".")[0]
+        if top_name in self._stdlib_modules:
+            return False
+        return self.is_external_module(mod_name)
+
     def resolve_relative_import_base(self, current_file: str, level: int) -> Tuple[Optional[str], Optional[str]]:
         """Compute the base directory and dotted package for a relative import.
 

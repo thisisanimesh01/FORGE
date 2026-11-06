@@ -195,3 +195,21 @@ def test_resolve_unknown_nonexistent(mock_workspace: Path):
     res = resolver.resolve_import("root_mod.py", imp)
     assert res.resolution_status == CallResolutionStatus.UNRESOLVED
     assert "not found" in res.reason
+
+
+def test_stdlib_and_third_party_classification_methods(mock_workspace: Path):
+    """Verify is_stdlib_module and is_third_party_module classification."""
+    resolver = WorkspaceImportResolver(mock_workspace)
+
+    assert resolver.is_stdlib_module("sys") is True
+    assert resolver.is_stdlib_module("os.path") is True
+    assert resolver.is_stdlib_module("typing") is True
+    assert resolver.is_stdlib_module("pathlib") is True
+
+    assert resolver.is_stdlib_module("pytest") is False
+    assert resolver.is_stdlib_module("pkg_a") is False
+
+    assert resolver.is_third_party_module("pytest") is True
+    assert resolver.is_third_party_module("pydantic") is True
+    assert resolver.is_third_party_module("sys") is False
+    assert resolver.is_third_party_module("pkg_a") is False
