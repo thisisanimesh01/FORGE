@@ -38,11 +38,11 @@ Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (M
 Phase 7: Evidence-Driven Investigation Engine ── [COMPLETED] (Cross-File Evidence, Contradiction Detection, Investigation Orchestration)
 Phase 9: Safe Git Publication & Upstream Integration ── [COMPLETED] (Milestones 1–4 Complete — Phase 9 Complete)
 Phase 10: Protected-File Boundary Enforcement ── [COMPLETED] (Centralized Boundary Policy, Acquisition Filter, Ingestion Guard, Context Hardening, Git Metadata Remediation)
-Phase 11: Intelligent Repository Understanding ── [IN PROGRESS] (M1 Architecture Audit Complete, M2 Symbol Graph & Call-Graph Engine Complete)
+Phase 11: Intelligent Repository Understanding ── [IN PROGRESS] (M1 Architecture Audit Complete, M2 Symbol Graph & Call-Graph Engine Complete, M3 Module Dependency Graph & Cycle Detection Complete)
 ```
 
 ### Phase 11: Intelligent Repository Understanding (In Progress)
-- **Objective & Scope**: Enable comprehensive static understanding of software repositories by introducing qualified symbol naming, cross-file import resolution, forward and reverse call graphs, module dependency DAGs, and change-impact analysis without dynamic execution or compromising Phase 10 isolation boundaries.
+- **Objective & Scope**: Enable comprehensive static understanding of software repositories by introducing qualified symbol naming, cross-file import resolution, forward and reverse call graphs, module dependency DAGs, cycle detection, and change-impact analysis without dynamic execution or compromising Phase 10 isolation boundaries.
 - **Milestone 1: Architecture Audit (`[COMPLETED]`)**: Completed read-only architecture assessment classifying 13 repository understanding capabilities and defining modular architecture for Milestones 2–6.
 - **Milestone 2: Symbol Graph & Cross-File Call-Graph Engine (`[COMPLETED]`)**:
   - *Data Models & Schemas (`forge.repository.graph_schemas`)*: Implemented `GraphNode`, `CallEdge`, `CallGraphSummary`, `NodeKind`, `EdgeKind`, and `CallResolutionStatus` (`RESOLVED_INTERNAL`, `RESOLVED_EXTERNAL`, `UNRESOLVED`, `AMBIGUOUS`, `DYNAMIC`).
@@ -51,7 +51,17 @@ Phase 11: Intelligent Repository Understanding ── [IN PROGRESS] (M1 Architec
   - *Call-Graph Engine (`forge.repository.call_graph`)*: Implemented `CallGraph` and `build_call_graph()` resolving direct calls, module-qualified calls, aliased imports, `self.method()`/`cls.method()` inheritance across files, recursion, and mutual recursion.
   - *Cycle-Safe Bounded Traversal*: Implemented `get_callers()`, `get_callees()`, `get_direct_callers()`, and `get_direct_callees()` with deterministic sorting, `visited` set protection, and `max_depth`/`max_nodes` budgets.
   - *Dedicated Specification*: Created [`docs/specs/phase11_intelligent_repository_understanding.md`](docs/specs/phase11_intelligent_repository_understanding.md).
-  - *Verification Suite*: 29 dedicated unit tests across `tests/unit/test_repository_resolver.py` (12 tests) and `tests/unit/test_call_graph.py` (17 tests); 1,632 tests passing across full test suite.
+  - *Verification Suite*: 35 dedicated unit tests across `tests/unit/test_repository_resolver.py` (12 tests) and `tests/unit/test_call_graph.py` (23 tests); full regression suite passing.
+- **Milestone 3: Module Dependency Graph & Cycle Detection (`[COMPLETED]`)**:
+  - *Data Models & Schemas (`forge.repository.graph_schemas`)*: Implemented `ModuleNode`, `ModuleEdge`, `ImportEvidence`, `ExternalImportRecord`, `UnresolvedImportRecord`, `DependencyCycle`, `StronglyConnectedComponent`, and `ModuleDependencyGraphSummary`. Added `EdgeKind.IMPORTS`.
+  - *Import Coverage & Classification (`forge.repository.resolver`, `forge.repository.module_graph`)*: Supported plain absolute imports, from-module imports, aliased imports (`import x as y`), relative multi-level imports (`.`, `..`), and star imports (`*`). Distinguished internal workspace modules, standard-library packages (`is_stdlib_module`), and third-party packages (`is_third_party_module`). Consolidated multiple imports into single weighted edges with individual statement provenance.
+  - *Deterministic Strongly Connected Components & Cycle Detection (`forge.repository.module_graph`)*: Implemented Tarjan's SCC algorithm to partition the internal module graph into strongly connected components, identifying cyclic components. Engineered canonical elementary cycle detection extracting direct self-dependencies (length 1), 2-module cycles, and multi-module cycles, rotated canonically to start with the lexicographically smallest module.
+  - *Query & Traversal APIs*: Implemented `get_dependencies()`, `get_dependents()`, `get_transitive_dependencies()`, `get_transitive_dependents()`, `detect_cycles()`, `get_strongly_connected_components()`, `get_isolated_modules()`, `get_edge()`, `is_in_cycle()`, and `get_dependency_summary()`.
+  - *Dedicated Milestone Documentation*: Created [`docs/milestones/phase-11-m3-module-dependency-graph.md`](docs/milestones/phase-11-m3-module-dependency-graph.md).
+  - *Verification Suite*: 24 dedicated unit tests in `tests/unit/test_module_graph.py` and 60 total Phase 11 unit tests passing with zero regressions.
+- **Milestone 4: Change-Impact Analysis (`[PLANNED]`)**
+- **Milestone 5: Incremental Indexing & Caching (`[PLANNED]`)**
+- **Milestone 6: LLM Tooling & Context Integration (`[PLANNED]`)**
 
 
 ### Phase 10: Protected-File Boundary Enforcement & Safe Git Metadata Isolation (Completed)
