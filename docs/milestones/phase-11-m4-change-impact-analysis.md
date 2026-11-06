@@ -69,11 +69,14 @@ Milestone 4 builds directly on the static intelligence produced by Milestone 2 (
 - `ChangeType`: `ADDED`, `MODIFIED`, `DELETED`, `RENAMED`.
 - `EntityType`: `FILE`, `MODULE`, `CLASS`, `FUNCTION`, `METHOD`, `VARIABLE`, `UNKNOWN`.
 - `ImpactClassification`:
-  - `DIRECT`: Direct caller of modified symbol or direct importer of modified module (depth = 1, confidence = 1.0).
-  - `TRANSITIVE`: Multi-hop caller or indirect module dependency (depth $\ge$ 2, confidence decayed by distance $0.95^{\text{depth}-1}$).
-  - `POTENTIAL`: Plausible impact through dynamic dispatch (`globals().get()()`, `getattr()`) or star imports (`from mod import *`) where static binding is uncertain (confidence = 0.60–0.75).
-  - `UNRESOLVED`: Dependent component calling a deleted or renamed symbol/module whose static target cannot be resolved (confidence = 0.95).
+  - `DIRECT`: Direct caller of modified symbol or direct importer of modified module (depth = 1, heuristic confidence = 1.0).
+  - `TRANSITIVE`: Multi-hop caller or indirect module dependency (depth $\ge$ 2, heuristic confidence decayed by distance $0.95^{\text{depth}-1}$).
+  - `POTENTIAL`: Plausible impact through dynamic dispatch (`globals().get()()`, `getattr()`) or star imports (`from mod import *`) where static binding is uncertain (heuristic confidence = 0.60–0.75).
+  - `UNRESOLVED`: Dependent component calling a deleted or renamed symbol/module whose static target cannot be resolved (heuristic confidence = 0.95).
   - `UNAFFECTED`: Explicitly classified when verifying non-impacted status.
+
+> [!NOTE]
+> **Heuristic Confidence Scoring**: Confidence scores (1.0 for direct confirmed static edges, $0.95^{\text{depth}-1}$ for transitive chains, 0.95 for broken references to deleted/renamed symbols, 0.75 for star imports, and 0.60 for dynamic call sites) are deterministic heuristic scoring weights designed for ranking and threshold filtering, not empirical or calibrated Bayesian probabilities.
 
 ### Records & Aggregates
 - `FileChange`: Record of changed file path, change type, previous path if renamed, modified line numbers, and deleted line numbers.
@@ -126,17 +129,21 @@ Milestone 4 builds directly on the static intelligence produced by Milestone 2 (
 ## 6. Empirical Verification & Performance Benchmark
 
 ### FORGE Repository Benchmark
-Tested against the FORGE repository itself:
+Tested against the full FORGE repository (269 Python modules):
 - **Analyzed Changed File**: `app/forge/repository/graph_schemas.py`
 - **Total Changed Symbols**: 16
-- **Total Impacted Entities Detected**: 242
+- **Total Impacted Entities Detected**: 254
   - **Direct Impacts**: 32
-  - **Transitive Impacts**: 210
+  - **Transitive Impacts**: 222
+  - **Potential Impacts**: 0
+  - **Unresolved Impacts**: 0
   - **Max Traversal Depth Reached**: 5
-- **Performance**:
-  - Graph Construction & Extraction: 2.78 seconds
-  - Reverse Propagation & Analysis: 2.65 seconds
-  - Total Analysis Execution Time: **< 3.0 seconds**
+- **Performance & Latency Breakdown**:
+  - **Cold Graph Construction**: ~5.24s total (building M2 `CallGraph` ~2.65s and M3 `ModuleDependencyGraph` ~2.59s across all 269 workspace modules from scratch)
+  - **Changeset Extraction & Symbol Correlation**: 0.003s
+  - **Impact Propagation Traversal**:
+    - **Warm Traversal (in-memory graphs)**: **~0.07s to 0.10s** (sub-second query response)
+    - **Cold End-to-End Execution (including one-time graph builds)**: **~5.35s**
 
 ### Unit & Regression Test Suite
 - **31 Dedicated Unit Scenarios** in `tests/unit/test_change_impact.py` covering all required behaviors:

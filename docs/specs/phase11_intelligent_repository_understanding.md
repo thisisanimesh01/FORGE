@@ -225,12 +225,13 @@ Tested against the complete FORGE codebase (269 Python files):
 ### 1. Data Models & Schemas (`forge.analysis.impact.schemas`)
 
 - `ChangeSet`: Structured collection of touched files (`FileChange`) and touched AST symbols (`SymbolChange`).
-- `ImpactClassification`: Strict five-tier taxonomy:
-  - `DIRECT`: Direct caller of modified symbol or direct importer of modified module (depth=1, confidence=1.0).
-  - `TRANSITIVE`: Indirect caller or transitive module dependent (depth $\ge 2$, confidence decayed by distance $0.95^{\text{depth}-1}$).
-  - `POTENTIAL`: Dynamic call site or star-import consumer where static certainty is absent (confidence=0.60–0.75).
-  - `UNRESOLVED`: Dependent calling or importing a deleted/renamed symbol or module (confidence=0.95).
+- `ImpactClassification`: Strict five-tier taxonomy with deterministic heuristic confidence scoring:
+  - `DIRECT`: Direct caller of modified symbol or direct importer of modified module (depth=1, heuristic confidence=1.0).
+  - `TRANSITIVE`: Indirect caller or transitive module dependent (depth $\ge 2$, heuristic confidence decayed by distance $0.95^{\text{depth}-1}$).
+  - `POTENTIAL`: Dynamic call site or star-import consumer where static certainty is absent (heuristic confidence=0.60–0.75).
+  - `UNRESOLVED`: Dependent calling or importing a deleted/renamed symbol or module (heuristic confidence=0.95).
   - `UNAFFECTED`: Explicitly classified when verifying non-impacted status.
+- `Confidence Scoring Semantics`: Confidence scores are deterministic heuristic scoring weights for ranking and threshold filtering, not empirical or calibrated Bayesian probabilities.
 - `ImpactedEntity`: Entity record with `entity_id`, `entity_type`, `file_path`, `classification`, `depth`, `impact_path`, `path_steps`, `trigger_changes`, `confidence`, and `explanation`.
 - `ImpactReport`: Top-level report bundling `changeset`, `impacted_entities`, `summary`, and `warnings`.
 
@@ -248,10 +249,13 @@ Tested against the complete FORGE codebase (269 Python files):
 
 ### 3. Empirical Verification & Performance
 
-Tested on the FORGE codebase (modifying `app/forge/repository/graph_schemas.py`):
+Tested on the full FORGE codebase (269 Python modules, modifying `app/forge/repository/graph_schemas.py`):
 - **16 Changed Symbols** analyzed.
-- **242 Impacted Entities** detected (32 direct, 210 transitive, max depth 5).
-- **Execution Latency**: 2.65 seconds (well within the $< 3.0$ second performance target).
+- **254 Impacted Entities** detected (32 direct, 222 transitive, 0 unresolved, 0 potential, max depth 5).
+- **Performance Breakdown**:
+  - Cold graph construction: ~5.24s (M2 `CallGraph` ~2.65s, M3 `ModuleDependencyGraph` ~2.59s across all 269 modules).
+  - Changeset extraction & line correlation: 0.003s.
+  - Impact propagation traversal: **~0.07s to 0.10s (warm in-memory)**; **~5.35s (cold end-to-end execution)**.
 - **Unit Test Suite**: `tests/unit/test_change_impact.py`: **31 passed in 0.50s (100% pass rate)**.
 - **Phase 11 Total Unit Tests**: **91 passed (100% pass rate)**.
 
