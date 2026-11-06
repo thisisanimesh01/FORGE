@@ -230,7 +230,7 @@ class InvestigationPlanner:
         if self.is_utility_tool(tool_name):
             self.utility_calls_count[tool_name] = self.utility_calls_count.get(tool_name, 0) + 1
 
-        if tool_name == "read_source_excerpt":
+        if tool_name in ("read_source_excerpt", "get_source_context"):
             # Only record inspection if tool output succeeded without bounds error or empty slice notice
             if output and not output.startswith("[File") and not output.startswith('{"error"'):
                 fp = arguments.get("file_path")

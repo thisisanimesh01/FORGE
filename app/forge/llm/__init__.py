@@ -20,6 +20,25 @@ from forge.llm.provider import (
 from forge.llm.fake import FakeLLMProvider
 from forge.llm.openai import OpenAICompatibleProvider
 from forge.llm.factory import get_provider, describe_provider
+from forge.llm.repo_tools import RepositoryIntelligenceTools
+from forge.llm.context import RepositoryContextBuilder, BuiltRepositoryContext
+from forge.llm.evidence_grounding import EvidenceGroundingEngine, GroundingValidationError
+from forge.llm.repo_tool_schemas import (
+    RepositoryOverviewInput,
+    RepositoryOverviewOutput,
+    SymbolSearchInput,
+    SymbolSearchOutput,
+    SymbolDetailsInput,
+    SymbolDetailsOutput,
+    CallGraphExploreInput,
+    CallGraphExploreOutput,
+    ModuleDependencyInput,
+    ModuleDependencyOutput,
+    ChangeImpactInput,
+    ChangeImpactOutput,
+    SourceContextInput,
+    SourceContextOutput,
+)
 
 __all__ = [
     "ChatMessage",
@@ -39,4 +58,23 @@ __all__ = [
     "OpenAICompatibleProvider",
     "get_provider",
     "describe_provider",
+    "RepositoryIntelligenceTools",
+    "RepositoryContextBuilder",
+    "BuiltRepositoryContext",
+    "EvidenceGroundingEngine",
+    "GroundingValidationError",
+    "RepositoryOverviewInput",
+    "RepositoryOverviewOutput",
+    "SymbolSearchInput",
+    "SymbolSearchOutput",
+    "SymbolDetailsInput",
+    "SymbolDetailsOutput",
+    "CallGraphExploreInput",
+    "CallGraphExploreOutput",
+    "ModuleDependencyInput",
+    "ModuleDependencyOutput",
+    "ChangeImpactInput",
+    "ChangeImpactOutput",
+    "SourceContextInput",
+    "SourceContextOutput",
 ]
