@@ -27,7 +27,13 @@ Phase 11 equips FORGE with semantic understanding of target software repositorie
   - Deterministic Strongly Connected Component partitioning via Tarjan's algorithm.
   - Canonical elementary cycle detection identifying self-dependencies, 2-module cycles, and multi-module cycles.
   - Bounded dependency/dependent query APIs with depth and node caps.
-- **Milestone 4**: Change-Impact Analysis `[PLANNED]`
+- **Milestone 4**: Change-Impact Analysis `[COMPLETED]`
+  - Deterministic reverse call-graph and module dependency propagation engine.
+  - Unified diff and explicit file/symbol changeset extraction with Phase 10 boundary enforcement.
+  - Five-tier impact classification: `DIRECT`, `TRANSITIVE`, `POTENTIAL`, `UNRESOLVED`, `UNAFFECTED`.
+  - Dynamic dispatch and star-import impact identification.
+  - Cycle-safe bounded traversal with `max_depth` and `max_nodes` budgeting.
+  - Dedicated milestone documentation in [`docs/milestones/phase-11-m4-change-impact-analysis.md`](../milestones/phase-11-m4-change-impact-analysis.md).
 - **Milestone 5**: Incremental Indexing & Caching `[PLANNED]`
 - **Milestone 6**: LLM Tooling & Context Integration `[PLANNED]`
 
@@ -210,7 +216,44 @@ Tested against the complete FORGE codebase (269 Python files):
   - `tests/unit/test_module_graph.py`: 24 passed.
   - `tests/unit/test_repository_resolver.py`: 13 passed.
   - `tests/unit/test_call_graph.py`: 23 passed.
-  - Phase 11 unit suite: **60 passed in 0.73s (100% pass rate)**.
+  - Phase 11 M2 & M3 unit suite: **60 passed in 0.73s (100% pass rate)**.
+
+---
+
+## 4. Milestone 4 Architecture: Change-Impact Analysis Engine
+
+### 1. Data Models & Schemas (`forge.analysis.impact.schemas`)
+
+- `ChangeSet`: Structured collection of touched files (`FileChange`) and touched AST symbols (`SymbolChange`).
+- `ImpactClassification`: Strict five-tier taxonomy:
+  - `DIRECT`: Direct caller of modified symbol or direct importer of modified module (depth=1, confidence=1.0).
+  - `TRANSITIVE`: Indirect caller or transitive module dependent (depth $\ge 2$, confidence decayed by distance $0.95^{\text{depth}-1}$).
+  - `POTENTIAL`: Dynamic call site or star-import consumer where static certainty is absent (confidence=0.60–0.75).
+  - `UNRESOLVED`: Dependent calling or importing a deleted/renamed symbol or module (confidence=0.95).
+  - `UNAFFECTED`: Explicitly classified when verifying non-impacted status.
+- `ImpactedEntity`: Entity record with `entity_id`, `entity_type`, `file_path`, `classification`, `depth`, `impact_path`, `path_steps`, `trigger_changes`, `confidence`, and `explanation`.
+- `ImpactReport`: Top-level report bundling `changeset`, `impacted_entities`, `summary`, and `warnings`.
+
+### 2. Analysis & Extraction Pipeline
+
+- `extract_changeset_from_diff(diff_text, repo_root, call_graph)`: Extracts file changes and correlates modified line numbers with static AST symbols via `parse_unified_diff()`. Enforces strict Phase 10 protected-file exclusion, traversal rejection, and containment safety.
+- `extract_changeset_from_files(changed_files, repo_root, call_graph)`: Extracts changesets from file paths or dictionaries.
+- `ChangeImpactAnalyzer(repo_root, call_graph, module_graph, max_depth, max_nodes)`:
+  - Propagates symbol changes to callers via `CallGraph.get_direct_callers()` and transitive BFS.
+  - Method modifications propagate to enclosing classes and cross-module method call sites.
+  - Propagates module changes to dependents via `ModuleDependencyGraph.get_dependents()` and transitive BFS.
+  - Detects dynamic dispatch (`globals().get()()`, `getattr()`) and star imports (`from ... import *`).
+  - Identifies breaking changes to deleted or renamed symbols/modules as `UNRESOLVED`.
+  - Enforces traversal budgets (`max_depth`, `max_nodes`) and deduplicates paths preserving minimal depth.
+
+### 3. Empirical Verification & Performance
+
+Tested on the FORGE codebase (modifying `app/forge/repository/graph_schemas.py`):
+- **16 Changed Symbols** analyzed.
+- **242 Impacted Entities** detected (32 direct, 210 transitive, max depth 5).
+- **Execution Latency**: 2.65 seconds (well within the $< 3.0$ second performance target).
+- **Unit Test Suite**: `tests/unit/test_change_impact.py`: **31 passed in 0.50s (100% pass rate)**.
+- **Phase 11 Total Unit Tests**: **91 passed (100% pass rate)**.
 
 ---
 
@@ -222,7 +265,7 @@ The remaining FORGE project roadmap is strictly bounded to three phases:
   - M1: Architecture Audit `[COMPLETED]`
   - M2: Symbol Graph & Cross-File Call-Graph Engine `[COMPLETED]`
   - M3: Module Dependency Graph & Cycle Detection `[COMPLETED]`
-  - M4: Change-Impact Analysis `[REMAINING]`
+  - M4: Change-Impact Analysis `[COMPLETED]`
   - M5: Incremental Indexing & Caching `[REMAINING]`
   - M6: LLM Tooling & Context Integration `[REMAINING]`
 - **Phase 12: Advanced Intelligence and Autonomous Repair** `[REMAINING]`
