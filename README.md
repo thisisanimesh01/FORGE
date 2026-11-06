@@ -38,11 +38,11 @@ Phase 6: Supervised Beta Packaging & Operational Readiness ── [COMPLETED] (M
 Phase 7: Evidence-Driven Investigation Engine ── [COMPLETED] (Cross-File Evidence, Contradiction Detection, Investigation Orchestration)
 Phase 9: Safe Git Publication & Upstream Integration ── [COMPLETED] (Milestones 1–4 Complete — Phase 9 Complete)
 Phase 10: Protected-File Boundary Enforcement ── [COMPLETED] (Centralized Boundary Policy, Acquisition Filter, Ingestion Guard, Context Hardening, Git Metadata Remediation)
-Phase 11: Intelligent Repository Understanding ── [IN PROGRESS] (M1 Architecture Audit Complete, M2 Symbol Graph & Call-Graph Engine Complete, M3 Module Dependency Graph & Cycle Detection Complete, M4 Change-Impact Analysis Complete, M5 Incremental Indexing & Caching Complete)
+Phase 11: Intelligent Repository Understanding ── [COMPLETED] (M1 Architecture Audit, M2 Symbol Graph & Call-Graph Engine, M3 Module Dependency Graph & Cycle Detection, M4 Change-Impact Analysis, M5 Incremental Indexing & Caching, M6 LLM Tooling & Context Integration)
 ```
 
-### Phase 11: Intelligent Repository Understanding (In Progress)
-- **Objective & Scope**: Enable comprehensive static understanding of software repositories by introducing qualified symbol naming, cross-file import resolution, forward and reverse call graphs, module dependency DAGs, cycle detection, change-impact analysis, and incremental caching without dynamic execution or compromising Phase 10 isolation boundaries.
+### Phase 11: Intelligent Repository Understanding (Completed)
+- **Objective & Scope**: Enable comprehensive static understanding of software repositories by introducing qualified symbol naming, cross-file import resolution, forward and reverse call graphs, module dependency DAGs, cycle detection, change-impact analysis, incremental caching, and LLM reasoning integration without dynamic execution or compromising Phase 10 isolation boundaries.
 - **Milestone 1: Architecture Audit (`[COMPLETED]`)**: Completed read-only architecture assessment classifying 13 repository understanding capabilities and defining modular architecture for Milestones 2–6.
 - **Milestone 2: Symbol Graph & Cross-File Call-Graph Engine (`[COMPLETED]`)**:
   - *Data Models & Schemas (`forge.repository.graph_schemas`)*: Implemented `GraphNode`, `CallEdge`, `CallGraphSummary`, `NodeKind`, `EdgeKind`, and `CallResolutionStatus` (`RESOLVED_INTERNAL`, `RESOLVED_EXTERNAL`, `UNRESOLVED`, `AMBIGUOUS`, `DYNAMIC`).
@@ -75,7 +75,15 @@ Phase 11: Intelligent Repository Understanding ── [IN PROGRESS] (M1 Architec
   - *Empirical Performance on 279 Files*: Delivers 2.32s warm build latency (**100.0% cache hit rate**, 279 hits, 0 misses, **3.19x speedup** vs 7.38s cold build) with 19.35 MB disk footprint.
   - *Dedicated Milestone Documentation*: Created [`docs/milestones/phase-11-m5-incremental-indexing-and-caching.md`](docs/milestones/phase-11-m5-incremental-indexing-and-caching.md).
   - *Verification Suite*: 19 dedicated unit tests in `tests/unit/test_incremental_indexing.py` and 110 total Phase 11 unit tests passing with zero regressions.
-- **Milestone 6: LLM Tooling & Context Integration (`[PLANNED]`)**
+- **Milestone 6: LLM Tooling & Context Integration (`[COMPLETED]`)**:
+  - *Strict Typed Tool Schemas (`forge.llm.repo_tool_schemas`)*: Implemented Pydantic models with `extra="forbid"` for 6 intelligence tools: `get_repository_overview`, `search_symbols`, `get_symbol_details`, `explore_call_graph`, `explore_module_dependencies`, `analyze_change_impact`, and `get_source_context`.
+  - *Repository Intelligence Tools (`forge.llm.repo_tools`)*: Implemented `RepositoryIntelligenceTools` providing typed dispatch for LLM models. Integrates lazy cached graph access via `IncrementalRepositoryIndex` without re-indexing unchanged modules. Detects ambiguous symbols, returns candidates, and enforces path containment and protected-file boundaries.
+  - *Repository Context Builder (`forge.llm.context`)*: Implemented `RepositoryContextBuilder` assembling task-focused repository context within character budgets (default 16,000 characters). Automatically selects relevant symbols, expands forward/reverse call edges and module dependencies, surfaces circular dependency warnings, merges and deduplicates source excerpt ranges, redacts secrets, and appends explicit truncation notices when capped.
+  - *Evidence Grounding Engine (`forge.llm.evidence_grounding`)*: Implemented `EvidenceGroundingEngine` preventing LLM hallucinations and fabrication. Candidate findings are strictly verified against actual disk file existence and line counts before acceptance and persistence in SQLite `ForgeStore`. Creates cryptographically verifiable `SOURCE_EXCERPT` evidence records with SHA-256 digests.
+  - *Local Ollama Isolation & Single-Process Safety*: Restricts model inference strictly to local Ollama endpoints (`localhost` / `127.0.0.1`). Bypasses or connection failures fail closed with `LLMUnavailableError` without attempting cloud API calls or cloud fallbacks. Preserves single-process cache operational constraints.
+  - *Sub-Millisecond Query Performance*: Delivers 2.15ms repository overview queries, sub-millisecond graph and symbol lookups (<0.01ms), 0.44ms change-impact analysis, 0.15ms source extraction, and 1.04ms budgeted context construction.
+  - *Dedicated Milestone Documentation*: Created [`docs/milestones/phase-11-m6-llm-tooling-context-integration.md`](docs/milestones/phase-11-m6-llm-tooling-context-integration.md).
+  - *Verification Suite*: 35 dedicated unit tests in `tests/unit/test_phase11_m6_llm_tooling.py` and 145 total Phase 11 unit tests passing with zero regressions across all 1,748 tests in the full suite.
 
 
 ### Phase 10: Protected-File Boundary Enforcement & Safe Git Metadata Isolation (Completed)

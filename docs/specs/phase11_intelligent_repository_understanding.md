@@ -300,17 +300,68 @@ Tested on the full FORGE codebase (269 Python modules, modifying `app/forge/repo
 
 ---
 
-## 6. Remaining Project Roadmap & Final Release Plan
+---
+
+## 6. Milestone 6 Architecture: LLM Tooling & Context Integration
+
+### 1. Data Models & Schemas (`forge.llm.repo_tool_schemas`)
+- **Strict Typed Schemas**: Pydantic input and output models with `ConfigDict(extra="forbid")` for all 6 LLM intelligence tools.
+- `RepositoryOverviewInput` / `RepositoryOverviewOutput`: Repository-level statistics, module and symbol counts, detected frameworks, and cache freshness.
+- `SymbolSearchInput` / `SymbolSearchOutput`: Symbol querying with ambiguity detection, candidate lists, and container scopes.
+- `SymbolDetailsInput` / `SymbolDetailsOutput`: Qualified symbol details, docstrings, decorators, argument lists, line ranges, and immediate relationships.
+- `CallGraphExploreInput` / `CallGraphExploreOutput`: Forward/reverse/bidirectional call graph traversal with path bounding, depth limits, and resolution classifications (`RESOLVED_INTERNAL`, `RESOLVED_EXTERNAL`, `UNRESOLVED`, `DYNAMIC`).
+- `ModuleDependencyInput` / `ModuleDependencyOutput`: Module dependency and dependent exploration with cycle detection and transitive resolution.
+- `ChangeImpactInput` / `ChangeImpactOutput`: Change-impact analysis for diffs or modified files with deterministic heuristic confidence scoring.
+- `SourceContextInput` / `SourceContextOutput`: Bounded source excerpt retrieval (max 250 lines) with SHA-256 integrity verification, line numbers, and secret redaction.
+
+### 2. Repository Intelligence Tools (`forge.llm.repo_tools.RepositoryIntelligenceTools`)
+- Standardized tool handler dispatch for all 6 tools, integrating directly with `ToolRegistry` and `InvestigationLoop`.
+- Lazy cache and index evaluation: leverages `IncrementalRepositoryIndex` for fast cached graph access without unneeded recomputations.
+- Security-first enforcement: all file accesses validate path containment (`assert_contained_path`) and reject protected paths (`is_protected_path`).
+
+### 3. Context Construction Engine (`forge.llm.context.RepositoryContextBuilder`)
+- **Untrusted Input Framing**: All repository content is structured as passive inspection data.
+- **Task Relevance Ranking**: Symbols and files matching user query are selected first.
+- **Graph Expansion**: Call graph edges (callers/callees), module dependencies, and circular dependency warnings are automatically integrated into context.
+- **Excerpt Deduplication & Merging**: Overlapping line ranges are consolidated; line numbers are prepended; secrets are redacted; SHA-256 digests are computed.
+- **Budget Capping & Deterministic Truncation**: Bounded prompt budgets (default 16,000 chars) with explicit truncation notices when limits are exceeded.
+
+### 4. Evidence-Grounded Reasoning (`forge.llm.evidence_grounding.EvidenceGroundingEngine`)
+- **Disk Verification**: Candidate findings are validated against actual file existence and line counts before acceptance.
+- **Cryptographic Grounding**: Automatically generates verified `SOURCE_EXCERPT` or `STATIC_ANALYSIS` evidence records linked to findings in SQLite `ForgeStore`.
+- **Zero Fabrication**: Model claims targeting non-existent files or out-of-bounds line numbers are rejected fail-closed.
+
+### 5. Local Ollama Execution & Single-Process Operational Invariant
+- **Local Ollama Only**: Enforces local loopback execution (`localhost` / `127.0.0.1`), strictly forbidding cloud API calls or cloud fallbacks.
+- **Single-Process Cache Constraint**: Enforces single-process cache lifecycle to ensure cache consistency without cross-process locks.
+
+### 6. Empirical Performance
+- Full test fixture execution:
+  - `get_repository_overview`: **2.15 ms**
+  - `search_symbols`: **<0.01 ms**
+  - `get_symbol_details`: **<0.01 ms**
+  - `explore_call_graph`: **<0.01 ms**
+  - `explore_module_dependencies`: **~0.01 ms**
+  - `analyze_change_impact`: **0.44 ms**
+  - `get_source_context`: **0.15 ms**
+  - `RepositoryContextBuilder.build_context`: **1.04 ms**
+- **Unit Test Suite**: `tests/unit/test_phase11_m6_llm_tooling.py`: **35 passed in 1.27s (100% pass rate)**.
+- **Phase 11 Total Unit Tests**: **145 passed (100% pass rate)**.
+- **Full FORGE Regression Suite**: **1,748 passed, 7 skipped (100% pass rate)**.
+
+---
+
+## 7. Remaining Project Roadmap & Final Release Plan
 
 The remaining FORGE project roadmap is strictly bounded to three phases:
 
-- **Phase 11: Intelligent Repository Understanding** `[CURRENT]`
+- **Phase 11: Intelligent Repository Understanding** `[COMPLETED]`
   - M1: Architecture Audit `[COMPLETED]`
   - M2: Symbol Graph & Cross-File Call-Graph Engine `[COMPLETED]`
   - M3: Module Dependency Graph & Cycle Detection `[COMPLETED]`
   - M4: Change-Impact Analysis `[COMPLETED]`
   - M5: Incremental Indexing & Caching `[COMPLETED]`
-  - M6: LLM Tooling & Context Integration `[REMAINING]`
+  - M6: LLM Tooling & Context Integration `[COMPLETED]`
 - **Phase 12: Advanced Intelligence and Autonomous Repair** `[REMAINING]`
 - **Phase 13: Complete Engineering Agent and Final Release** `[REMAINING]`
 

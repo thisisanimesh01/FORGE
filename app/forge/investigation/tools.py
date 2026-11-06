@@ -28,6 +28,16 @@ from forge.schemas import (
     FindingSeverity,
 )
 from forge.storage.store import ForgeStore
+from forge.llm.repo_tools import RepositoryIntelligenceTools
+from forge.repository.incremental import IncrementalRepositoryIndex
+from forge.llm.repo_tool_schemas import (
+    RepositoryOverviewInput,
+    SymbolDetailsInput,
+    CallGraphExploreInput,
+    ModuleDependencyInput,
+    ChangeImpactInput,
+    SourceContextInput,
+)
 from forge.analysis.dependency_manifest import (
     DependencyManifest,
     parse_workspace_dependencies,
@@ -79,10 +89,12 @@ class ToolRegistry:
         planner: Optional[Any] = None,
         inspected_source_files: Optional[Set[str]] = None,
         inspected_manifests: Optional[Set[str]] = None,
+        incremental_index: Optional[IncrementalRepositoryIndex] = None,
     ):
         self.workspace_path = workspace_path.resolve()
         self.repo_map = repo_map
         self.symbol_index = symbol_index or (repo_map.symbol_index if repo_map else None)
+        self.incremental_index = incremental_index
         self.store = store
         self.run_id = run_id or "run_default"
         self.sandbox = sandbox or DockerSandbox()
@@ -95,6 +107,11 @@ class ToolRegistry:
             inspected_manifests if inspected_manifests is not None else set()
         )
         self.planner = planner
+        self._repo_tools = RepositoryIntelligenceTools(
+            workspace_path=self.workspace_path,
+            incremental_index=self.incremental_index,
+            max_output_chars=self.max_output_chars,
+        )
         if rejected_tracker is not None:
             self.rejected_tracker = rejected_tracker
             if rejection_budget is not None:
@@ -424,9 +441,42 @@ class ToolRegistry:
         )
         self._handlers["find_related_files"] = self._handle_find_related_files
 
+        # Phase 11 M6: Repository Intelligence Tools
+        for tool_def in self._repo_tools.get_tool_definitions():
+            self._definitions.append(tool_def)
+            handler_name = f"_handle_{tool_def.name}"
+            if hasattr(self, handler_name):
+                self._handlers[tool_def.name] = getattr(self, handler_name)
+
     # -------------------------------------------------------------
     # Tool Handlers
     # -------------------------------------------------------------
+
+    def _handle_get_repository_overview(self, args: Dict[str, Any]) -> str:
+        return self._repo_tools.get_repository_overview(args)
+
+    def _handle_get_symbol_details(self, args: Dict[str, Any]) -> str:
+        return self._repo_tools.get_symbol_details(args)
+
+    def _handle_explore_call_graph(self, args: Dict[str, Any]) -> str:
+        return self._repo_tools.explore_call_graph(args)
+
+    def _handle_explore_module_dependencies(self, args: Dict[str, Any]) -> str:
+        return self._repo_tools.explore_module_dependencies(args)
+
+    def _handle_analyze_change_impact(self, args: Dict[str, Any]) -> str:
+        return self._repo_tools.analyze_change_impact(args)
+
+    def _handle_get_source_context(self, args: Dict[str, Any]) -> str:
+        raw_output = self._repo_tools.get_source_context(args)
+        if not raw_output.startswith('{"error"') and '"source_content"' in raw_output:
+            fp = args.get("file_path")
+            if fp:
+                norm = normalize_relative_path(str(fp)) or str(fp).strip().replace("\\", "/").lstrip("/")
+                self.inspected_source_files.add(norm)
+                if self.inspected_files is not None:
+                    self.inspected_files.add(norm)
+        return raw_output
 
     def _handle_get_repository_map(self, args: Dict[str, Any]) -> str:
         if self.repo_map:
@@ -440,10 +490,22 @@ class ToolRegistry:
             raise ToolExecutionError("Query parameter is required")
 
         if not self.symbol_index:
+            try:
+                self.symbol_index = self._repo_tools.get_incremental_index().get_symbol_index()
+            except Exception:
+                pass
+
+        if not self.symbol_index:
             return json.dumps({"symbols": [], "message": "Symbol index unavailable"})
 
         matches = self.symbol_index.query(query, symbol_type=sym_type)
         output = []
+        names_count: Dict[str, int] = {}
+        for s in matches:
+            names_count[s.name] = names_count.get(s.name, 0) + 1
+
+        is_ambiguous = any(count > 1 for count in names_count.values())
+
         for s in matches[:MAX_SEARCH_RESULTS]:
             output.append({
                 "name": s.name,
@@ -458,6 +520,7 @@ class ToolRegistry:
         return json.dumps({
             "total_matches": len(matches),
             "returned_matches": len(output),
+            "is_ambiguous": is_ambiguous,
             "symbols": output,
         }, indent=2)
 
