@@ -2,9 +2,10 @@
 
 import ast
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 from pydantic import BaseModel, Field
 
+from forge.repository.graph_schemas import CallSiteRecord, GraphNode, ImportRecord, NodeKind
 from forge.repository.protection import is_protected_path
 from forge.repository.validation import assert_contained_path
 
@@ -27,6 +28,8 @@ class SymbolRecord(BaseModel):
     parameters: List[str] = Field(default_factory=list)
     parent_class: Optional[str] = None
     is_async: bool = False
+    qualified_name: Optional[str] = None
+    node_id: Optional[str] = None
 
 
 class SymbolIndex(BaseModel):
@@ -49,13 +52,40 @@ class SymbolIndex(BaseModel):
         return results
 
 
-class ASTSymbolVisitor(ast.NodeVisitor):
-    """Walks the AST of a single Python file to extract symbols."""
+def rel_path_to_module_name(rel_path: str) -> str:
+    """Convert a workspace-relative file path to a canonical dotted module name."""
+    parts = list(Path(rel_path).parts)
+    if not parts:
+        return ""
+    if parts[-1] == "__init__.py":
+        parts = parts[:-1]
+    elif parts[-1].endswith(".py"):
+        parts[-1] = parts[-1][:-3]
+    return ".".join(parts)
 
-    def __init__(self, rel_path: str):
+
+class ASTSymbolVisitor(ast.NodeVisitor):
+    """Walks the AST of a single Python file to extract symbols, scopes, imports, and calls."""
+
+    def __init__(self, rel_path: str, module_name: Optional[str] = None):
         self.rel_path = rel_path
+        self.module_name = module_name or rel_path_to_module_name(rel_path)
         self.symbols: List[SymbolRecord] = []
+        self.nodes: List[GraphNode] = []
+        self.call_sites: List[CallSiteRecord] = []
+        self.imports: List[ImportRecord] = []
+        self.class_bases: Dict[str, List[str]] = {}
+        self.callable_local_vars: Dict[str, Set[str]] = {}
+
         self.current_class: Optional[str] = None
+        self._scope_stack: List[str] = []
+        self._enclosing_callable_stack: List[str] = []
+
+    def _get_current_caller_id(self) -> str:
+        """Return the node_id of the currently enclosing function, method, or module."""
+        if self._enclosing_callable_stack:
+            return self._enclosing_callable_stack[-1]
+        return f"{self.rel_path}:<module>"
 
     def visit_Import(self, node: ast.Import):
         for alias in node.names:
@@ -66,6 +96,15 @@ class ASTSymbolVisitor(ast.NodeVisitor):
                     file_path=self.rel_path,
                     start_line=node.lineno,
                     end_line=getattr(node, "end_lineno", node.lineno),
+                )
+            )
+            self.imports.append(
+                ImportRecord(
+                    name=alias.name,
+                    alias=alias.asname,
+                    from_module=None,
+                    level=0,
+                    line=node.lineno,
                 )
             )
         self.generic_visit(node)
@@ -83,10 +122,33 @@ class ASTSymbolVisitor(ast.NodeVisitor):
                     end_line=getattr(node, "end_lineno", node.lineno),
                 )
             )
+            self.imports.append(
+                ImportRecord(
+                    name=alias.name,
+                    alias=alias.asname,
+                    from_module=node.module,
+                    level=node.level or 0,
+                    line=node.lineno,
+                )
+            )
         self.generic_visit(node)
 
     def visit_ClassDef(self, node: ast.ClassDef):
         doc = ast.get_docstring(node)
+        base_names: List[str] = []
+        for b in node.bases:
+            try:
+                base_names.append(ast.unparse(b))
+            except Exception:
+                pass
+        self.class_bases[node.name] = base_names
+
+        # Compute qualified name and node ID
+        scoped_parts = list(self._scope_stack) + [node.name]
+        scoped_str = ".".join(scoped_parts)
+        qual_name = f"{self.module_name}.{scoped_str}" if self.module_name else scoped_str
+        node_id = f"{self.rel_path}:{scoped_str}"
+
         self.symbols.append(
             SymbolRecord(
                 name=node.name,
@@ -95,11 +157,32 @@ class ASTSymbolVisitor(ast.NodeVisitor):
                 start_line=node.lineno,
                 end_line=getattr(node, "end_lineno", node.lineno),
                 docstring=doc.strip() if doc else None,
+                qualified_name=qual_name,
+                node_id=node_id,
             )
         )
+
+        self.nodes.append(
+            GraphNode(
+                node_id=node_id,
+                kind=NodeKind.CLASS,
+                name=node.name,
+                qualified_name=qual_name,
+                file_path=self.rel_path,
+                start_line=node.lineno,
+                end_line=getattr(node, "end_lineno", node.lineno),
+                docstring=doc.strip() if doc else None,
+                parent_scope=".".join(self._scope_stack) if self._scope_stack else None,
+            )
+        )
+
         prev_class = self.current_class
         self.current_class = node.name
+        self._scope_stack.append(node.name)
+
         self.generic_visit(node)
+
+        self._scope_stack.pop()
         self.current_class = prev_class
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
@@ -112,6 +195,22 @@ class ASTSymbolVisitor(ast.NodeVisitor):
         doc = ast.get_docstring(node)
         params = [arg.arg for arg in node.args.args]
         sym_type = SymbolType.METHOD if self.current_class else SymbolType.FUNCTION
+        node_kind = NodeKind.METHOD if self.current_class else NodeKind.FUNCTION
+
+        # Compute scoped name
+        scoped_parts = list(self._scope_stack) + [node.name]
+        scoped_str = ".".join(scoped_parts)
+        qual_name = f"{self.module_name}.{scoped_str}" if self.module_name else scoped_str
+        node_id = f"{self.rel_path}:{scoped_str}"
+
+        # Collect all parameters for local shadowing detection
+        all_params = [arg.arg for arg in getattr(node.args, "posonlyargs", []) + node.args.args]
+        if node.args.vararg:
+            all_params.append(node.args.vararg.arg)
+        all_params.extend([arg.arg for arg in node.args.kwonlyargs])
+        if node.args.kwarg:
+            all_params.append(node.args.kwarg.arg)
+        self.callable_local_vars[node_id] = set(all_params)
 
         self.symbols.append(
             SymbolRecord(
@@ -124,25 +223,187 @@ class ASTSymbolVisitor(ast.NodeVisitor):
                 parameters=params,
                 parent_class=self.current_class,
                 is_async=is_async,
+                qualified_name=qual_name,
+                node_id=node_id,
             )
         )
-        # Visit inner nodes (e.g. nested functions)
+
+        self.nodes.append(
+            GraphNode(
+                node_id=node_id,
+                kind=node_kind,
+                name=node.name,
+                qualified_name=qual_name,
+                file_path=self.rel_path,
+                start_line=node.lineno,
+                end_line=getattr(node, "end_lineno", node.lineno),
+                docstring=doc.strip() if doc else None,
+                parent_scope=".".join(self._scope_stack) if self._scope_stack else None,
+                parameters=params,
+                is_async=is_async,
+            )
+        )
+
+        # Enter callable scope
+        self._scope_stack.append(node.name)
+        self._scope_stack.append("<locals>")
+        self._enclosing_callable_stack.append(node_id)
+
+        # Visit inner nodes (calls, nested functions, assignments, etc.)
         self.generic_visit(node)
 
+        self._enclosing_callable_stack.pop()
+        self._scope_stack.pop()  # Pop "<locals>"
+        self._scope_stack.pop()  # Pop node.name
 
-def index_python_file(file_path: Path, repo_root: Path) -> List[SymbolRecord]:
-    """Parse a single Python file into AST and collect symbols."""
-    # Exclude protected files before containment resolution or content reads
+    def _add_local_var(self, name: str) -> None:
+        if self._enclosing_callable_stack:
+            curr_id = self._enclosing_callable_stack[-1]
+            if curr_id in self.callable_local_vars:
+                self.callable_local_vars[curr_id].add(name)
+
+    def _extract_target_names(self, target: ast.AST) -> List[str]:
+        names = []
+        if isinstance(target, ast.Name):
+            names.append(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                names.extend(self._extract_target_names(elt))
+        elif isinstance(target, ast.Starred):
+            names.extend(self._extract_target_names(target.value))
+        return names
+
+    def visit_Assign(self, node: ast.Assign):
+        for target in node.targets:
+            for name in self._extract_target_names(target):
+                self._add_local_var(name)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign):
+        for name in self._extract_target_names(node.target):
+            self._add_local_var(name)
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign):
+        for name in self._extract_target_names(node.target):
+            self._add_local_var(name)
+        self.generic_visit(node)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr):
+        for name in self._extract_target_names(node.target):
+            self._add_local_var(name)
+        self.generic_visit(node)
+
+    def visit_For(self, node: ast.For):
+        for name in self._extract_target_names(node.target):
+            self._add_local_var(name)
+        self.generic_visit(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor):
+        for name in self._extract_target_names(node.target):
+            self._add_local_var(name)
+        self.generic_visit(node)
+
+    def visit_With(self, node: ast.With):
+        for item in node.items:
+            if item.optional_vars:
+                for name in self._extract_target_names(item.optional_vars):
+                    self._add_local_var(name)
+        self.generic_visit(node)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith):
+        for item in node.items:
+            if item.optional_vars:
+                for name in self._extract_target_names(item.optional_vars):
+                    self._add_local_var(name)
+        self.generic_visit(node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler):
+        if node.name:
+            self._add_local_var(node.name)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call):
+        caller_id = self._get_current_caller_id()
+        callee_expr, receiver_kind, callee_name, receiver_name, is_dynamic = self._analyze_callee(node.func)
+
+        try:
+            raw_expr = ast.unparse(node)
+            if len(raw_expr) > 200:
+                raw_expr = raw_expr[:197] + "..."
+        except Exception:
+            raw_expr = f"{callee_expr}(...)"
+
+        call_site = CallSiteRecord(
+            caller_id=caller_id,
+            callee_expr=callee_expr,
+            raw_expr=raw_expr,
+            line=node.lineno,
+            col_offset=getattr(node, "col_offset", None),
+            receiver_kind=receiver_kind,
+            callee_name=callee_name,
+            receiver_name=receiver_name,
+        )
+        self.call_sites.append(call_site)
+
+        # Crucial: generic_visit visits arguments so nested calls like foo(bar()) are captured
+        self.generic_visit(node)
+
+    def _analyze_callee(self, func_node: ast.AST) -> Tuple[str, str, Optional[str], Optional[str], bool]:
+        """Analyze a call target expression.
+
+        Returns: (callee_expr, receiver_kind, callee_name, receiver_name, is_dynamic)
+        """
+        if isinstance(func_node, ast.Name):
+            return func_node.id, "name", func_node.id, None, False
+
+        if isinstance(func_node, ast.Attribute):
+            attr_name = func_node.attr
+            val = func_node.value
+
+            if isinstance(val, ast.Name):
+                if val.id == "self":
+                    return f"self.{attr_name}", "self", attr_name, "self", False
+                elif val.id == "cls":
+                    return f"cls.{attr_name}", "cls", attr_name, "cls", False
+                else:
+                    return f"{val.id}.{attr_name}", "module_or_instance", attr_name, val.id, False
+
+            # Check for getattr-based call: getattr(obj, "method")()
+            if isinstance(val, ast.Call) and isinstance(val.func, ast.Name) and val.func.id == "getattr":
+                return "getattr(...)", "dynamic", attr_name, None, True
+
+            # Chained attribute access (e.g. a.b.c())
+            try:
+                unparsed = ast.unparse(func_node)
+            except Exception:
+                unparsed = f"...{attr_name}"
+            return unparsed, "chained", attr_name, None, False
+
+        # Direct getattr call: getattr(obj, "method")()
+        if isinstance(func_node, ast.Call) and isinstance(func_node.func, ast.Name) and func_node.func.id == "getattr":
+            return "getattr(...)", "dynamic", None, None, True
+
+        # Any other complex expression (lambdas, subscripts, factory calls)
+        try:
+            unparsed = ast.unparse(func_node)
+        except Exception:
+            unparsed = "dynamic_call"
+        return unparsed, "dynamic", None, None, True
+
+
+def parse_python_file_details(file_path: Path, repo_root: Path) -> Optional[ASTSymbolVisitor]:
+    """Parse a single Python file into AST and return the populated ASTSymbolVisitor."""
     if is_protected_path(file_path, base_dir=repo_root):
-        return []
+        return None
 
     try:
         resolved_file = assert_contained_path(file_path, repo_root)
     except Exception:
-        return []
+        return None
 
     if is_protected_path(resolved_file, base_dir=repo_root):
-        return []
+        return None
 
     rel_path = str(resolved_file.relative_to(repo_root))
 
@@ -150,12 +411,31 @@ def index_python_file(file_path: Path, repo_root: Path) -> List[SymbolRecord]:
         content = resolved_file.read_text(encoding="utf-8", errors="ignore")
         tree = ast.parse(content, filename=rel_path)
     except Exception:
-        # Syntax error or unparseable file; return empty symbol list
-        return []
+        return None
 
     visitor = ASTSymbolVisitor(rel_path)
+
+    # Register top-level module node
+    end_line = getattr(tree, "end_lineno", 1) or len(content.splitlines()) or 1
+    module_node = GraphNode(
+        node_id=f"{rel_path}:<module>",
+        kind=NodeKind.MODULE,
+        name=Path(rel_path).stem,
+        qualified_name=visitor.module_name,
+        file_path=rel_path,
+        start_line=1,
+        end_line=max(end_line, 1),
+    )
+    visitor.nodes.append(module_node)
+
     visitor.visit(tree)
-    return visitor.symbols
+    return visitor
+
+
+def index_python_file(file_path: Path, repo_root: Path) -> List[SymbolRecord]:
+    """Parse a single Python file into AST and collect symbols (backward-compatible API)."""
+    visitor = parse_python_file_details(file_path, repo_root)
+    return visitor.symbols if visitor else []
 
 
 def build_symbol_index(
@@ -163,7 +443,7 @@ def build_symbol_index(
     max_python_files: int = 500,
     max_file_size_bytes: int = 500_000,
 ) -> SymbolIndex:
-    """Index all Python files in the repository."""
+    """Index all Python files in the repository (backward-compatible API)."""
     root = repo_root.resolve()
     all_symbols: List[SymbolRecord] = []
     file_map: Dict[str, List[SymbolRecord]] = {}
@@ -178,7 +458,6 @@ def build_symbol_index(
         if is_protected_path(py_file, base_dir=root):
             continue
 
-        # Prevent traversal outside root
         try:
             resolved = assert_contained_path(py_file, root)
         except Exception:
@@ -187,9 +466,8 @@ def build_symbol_index(
         if is_protected_path(resolved, base_dir=root):
             continue
 
-        # Skip virtualenvs and caches
         parts = resolved.relative_to(root).parts
-        if any(p in [".venv", "venv", "__pycache__", ".pytest_cache", "build", "dist"] for p in parts):
+        if any(p in [".venv", "venv", "__pycache__", ".pytest_cache", "build", "dist", ".git"] for p in parts):
             continue
 
         if py_file.stat().st_size > max_file_size_bytes:

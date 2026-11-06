@@ -23,6 +23,8 @@ from forge.repository.indexer import (
     SymbolIndex,
     build_symbol_index,
     index_python_file,
+    parse_python_file_details,
+    rel_path_to_module_name,
 )
 from forge.repository.instructions import (
     InstructionFile,
@@ -48,6 +50,24 @@ from forge.repository.git_mediator import (
     GitMediatorError,
     GitMediatorSecurityError,
 )
+from forge.repository.graph_schemas import (
+    NodeKind,
+    EdgeKind,
+    CallResolutionStatus,
+    GraphNode,
+    CallEdge,
+    CallGraphSummary,
+    ImportRecord,
+    CallSiteRecord,
+)
+from forge.repository.resolver import (
+    WorkspaceImportResolver,
+    ResolvedImport,
+)
+from forge.repository.call_graph import (
+    CallGraph,
+    build_call_graph,
+)
 
 __all__ = [
     "TargetType",
@@ -66,6 +86,8 @@ __all__ = [
     "SymbolIndex",
     "build_symbol_index",
     "index_python_file",
+    "parse_python_file_details",
+    "rel_path_to_module_name",
     "InstructionFile",
     "load_instruction_files",
     "format_instructions_for_context",
@@ -82,4 +104,16 @@ __all__ = [
     "GitMediator",
     "GitMediatorError",
     "GitMediatorSecurityError",
+    "NodeKind",
+    "EdgeKind",
+    "CallResolutionStatus",
+    "GraphNode",
+    "CallEdge",
+    "CallGraphSummary",
+    "ImportRecord",
+    "CallSiteRecord",
+    "WorkspaceImportResolver",
+    "ResolvedImport",
+    "CallGraph",
+    "build_call_graph",
 ]
