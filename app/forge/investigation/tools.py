@@ -29,6 +29,7 @@ from forge.schemas import (
 )
 from forge.storage.store import ForgeStore
 from forge.causality.tools import CausalityTools
+from forge.repair_planning.tools import RepairPlanningTools
 from forge.llm.repo_tools import RepositoryIntelligenceTools
 from forge.repository.incremental import IncrementalRepositoryIndex
 from forge.llm.repo_tool_schemas import (
@@ -114,6 +115,11 @@ class ToolRegistry:
             max_output_chars=self.max_output_chars,
         )
         self._causality_tools = CausalityTools(
+            workspace_path=self.workspace_path,
+            incremental_index=self.incremental_index,
+            max_output_chars=self.max_output_chars,
+        )
+        self._repair_planning_tools = RepairPlanningTools(
             workspace_path=self.workspace_path,
             incremental_index=self.incremental_index,
             max_output_chars=self.max_output_chars,
@@ -461,9 +467,34 @@ class ToolRegistry:
             if hasattr(self, handler_name):
                 self._handlers[tool_def.name] = getattr(self, handler_name)
 
+        # Phase 12 M3: Repair Planning Tools
+        for tool_def in self._repair_planning_tools.get_tool_definitions():
+            self._definitions.append(tool_def)
+            handler_name = f"_handle_{tool_def.name}"
+            if hasattr(self, handler_name):
+                self._handlers[tool_def.name] = getattr(self, handler_name)
+
     # -------------------------------------------------------------
     # Tool Handlers
     # -------------------------------------------------------------
+
+    def _handle_create_repair_plan(self, args: Dict[str, Any]) -> str:
+        return self._repair_planning_tools.create_repair_plan(args)
+
+    def _handle_compare_repair_strategies(self, args: Dict[str, Any]) -> str:
+        return self._repair_planning_tools.compare_repair_strategies(args)
+
+    def _handle_assess_repair_risk(self, args: Dict[str, Any]) -> str:
+        return self._repair_planning_tools.assess_repair_risk(args)
+
+    def _handle_explain_repair_plan(self, args: Dict[str, Any]) -> str:
+        return self._repair_planning_tools.explain_repair_plan(args)
+
+    def _handle_validate_repair_plan(self, args: Dict[str, Any]) -> str:
+        return self._repair_planning_tools.validate_repair_plan(args)
+
+    def _handle_generate_verification_plan(self, args: Dict[str, Any]) -> str:
+        return self._repair_planning_tools.generate_verification_plan(args)
 
     def _handle_analyze_root_cause(self, args: Dict[str, Any]) -> str:
         return self._causality_tools.analyze_root_cause(args)
