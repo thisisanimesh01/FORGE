@@ -283,3 +283,63 @@ class EvidenceGroundingEngine:
         )
 
         return finding
+
+    def verify_evidence_freshness(self, evidence: EvidenceRecord) -> Tuple[bool, Optional[str]]:
+        """Verify whether an evidence record still accurately reflects current disk state.
+
+        Returns:
+            Tuple[is_fresh: bool, reason_if_stale: Optional[str]]
+        """
+        if not evidence.file_path:
+            return True, None
+
+        norm_path = normalize_relative_path(evidence.file_path)
+        if not norm_path:
+            return False, f"Invalid file path in evidence: '{evidence.file_path}'"
+
+        if is_protected_path(norm_path, base_dir=self.workspace_path):
+            return False, f"Evidence references protected path: '{norm_path}'"
+
+        try:
+            abs_path = assert_contained_path(self.workspace_path / norm_path, self.workspace_path)
+        except SecurityError as e:
+            return False, f"Path security violation: {e}"
+
+        if not abs_path.exists() or not abs_path.is_file():
+            return False, f"File '{norm_path}' no longer exists on disk"
+
+        try:
+            content = abs_path.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return False, f"Failed to read file '{norm_path}': {e}"
+
+        lines = content.splitlines()
+        total_lines = len(lines)
+
+        if evidence.start_line is not None and evidence.end_line is not None:
+            if evidence.start_line > total_lines:
+                return False, f"Evidence start_line ({evidence.start_line}) exceeds current line count ({total_lines})"
+
+            clamped_end = min(total_lines, evidence.end_line)
+            slice_lines = lines[evidence.start_line - 1 : clamped_end]
+            current_sha = hashlib.sha256("\n".join(slice_lines).encode("utf-8")).hexdigest()
+
+            saved_sha = (evidence.details or {}).get("source_sha256") or (evidence.details or {}).get("content_hash")
+            if saved_sha and current_sha != saved_sha:
+                return False, f"Source content has changed since evidence was gathered (current hash: {current_sha[:8]}..., saved hash: {saved_sha[:8]}...)"
+
+        return True, None
+
+
+def verify_evidence_freshness(workspace_path: Path, evidence: EvidenceRecord) -> Tuple[bool, Optional[str]]:
+    """Verify whether an evidence record still accurately reflects current disk state.
+
+    Args:
+        workspace_path: Repository root directory.
+        evidence: Evidence record to audit.
+
+    Returns:
+        Tuple[is_fresh: bool, reason_if_stale: Optional[str]]
+    """
+    engine = EvidenceGroundingEngine(workspace_path=workspace_path)
+    return engine.verify_evidence_freshness(evidence)
