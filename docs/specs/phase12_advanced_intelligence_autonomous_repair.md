@@ -21,10 +21,15 @@ Phase 12 builds upon FORGE's foundational repository understanding (Phase 11) to
   - Strict defect confirmation rules requiring grounded source evidence, verified disk lines, failure signals, and zero unrefuted contradictions.
   - Persistent storage integration in SQLite via `ForgeStore` and `EvidenceGroundingEngine`.
   - Dedicated milestone documentation in [`docs/milestones/phase-12-m1-evidence-driven-diagnosis.md`](../milestones/phase-12-m1-evidence-driven-diagnosis.md).
-- **Milestone 2**: Autonomous Repair Planning & Strategy Formulation `[PLANNED]`
-- **Milestone 3**: Deterministic Patch Synthesis & Verification `[PLANNED]`
-- **Milestone 4**: Regression Testing & Safety Gate Validation `[PLANNED]`
-- **Milestone 5**: Operator Approval & Controlled Publication `[PLANNED]`
+- **Milestone 2**: Root-Cause Analysis Engine `[COMPLETED]`
+  - Backward causal tracing and forward failure propagation over cross-file call and module dependency graphs.
+  - AST-based semantic contradiction and guard inspection for conditional guards and exception handlers.
+  - Strict certainty semantics: PROVEN, PLAUSIBLE, MULTIPLE_PLAUSIBLE_ROOT_CAUSES, INSUFFICIENT_EVIDENCE, UNRESOLVED.
+  - Dedicated milestone documentation in [`docs/milestones/phase-12-m2-root-cause-analysis.md`](../milestones/phase-12-m2-root-cause-analysis.md).
+- **Milestone 3**: Repair Planning Engine `[PENDING]`
+- **Milestone 4**: Controlled Autonomous Repair `[PENDING]`
+- **Milestone 5**: Repair Verification `[PENDING]`
+- **Milestone 6**: Repair Quality & Reliability `[PENDING]`
 
 ---
 
@@ -81,3 +86,47 @@ Coordinates the entire pipeline:
    - `SUSPECTED`: Plausible hypothesis backed by partial evidence or presence of competing hypotheses.
    - `UNRESOLVED`: Inconclusive, unverified, or missing failure signals.
 4. Persists findings and attaches evidence records in `ForgeStore` when enabled.
+
+---
+
+## Milestone 2 Architecture: Root-Cause Analysis Engine
+
+### 1. Causal Data Contracts (`forge.causality.schemas`)
+- **Causal Roles**: `ROOT_CAUSE`, `CAUSAL_MECHANISM`, `CONTRIBUTING_FACTOR`, `PROPAGATOR`, `SYMPTOM`.
+- **Semantic Relationships**: `CALLS`, `DEPENDS_ON`, `PASSES_INVALID_DATA`, `VIOLATES_PRECONDITION`, `MISUSES_RESOURCE`, `PROPAGATES_EXCEPTION`, `INVALIDATES_STATE`, `TRIGGERS_FAILURE`, `CONTRIBUTES_TO`, `UNKNOWN`.
+- **Causal Nodes & Edges**: `CausalNode` and `CausalEdge` tracking disk verification, line bounds, and supporting evidence references.
+- **Linear Causal Chains**: `CausalChain` models ordered paths from origin cause to symptom with deterministic confidence scores.
+- **Status Classification**:
+  - `PROVEN`: All steps in primary chain directly verified with exact source evidence.
+  - `PLAUSIBLE`: Plausible chain backed by grounded evidence but containing inferred links.
+  - `MULTIPLE_PLAUSIBLE_ROOT_CAUSES`: Multiple distinct candidate causes supported by evidence without differentiating signals.
+  - `INSUFFICIENT_EVIDENCE`: Missing, ungrounded, or stale evidence.
+  - `UNRESOLVED`: Conflicting or contradictory evidence.
+
+---
+
+### 2. AST Contradiction & Semantic Guard Inspector (`forge.causality.contradiction`)
+- Inspects executable Python AST structures within the innermost enclosing function scope.
+- Identifies `ast.If` validation guards, `ast.Assert` statements, and `ast.Try`/`ast.ExceptHandler` blocks.
+- Disregards comments and string literals, preventing false-positive contradictions from text mentioning validation.
+
+---
+
+### 3. Backward Causal Tracer & Forward Propagation (`forge.causality.tracer`)
+- Traverses backward callers via `CallGraph.get_call_edges(target_id=...)` and module dependents via `ModuleDependencyGraph.get_dependents()`.
+- Traces downstream effect propagation from suspected root causes to symptoms.
+- Enforces maximum depth and node count bounds, guaranteeing cycle safety and recursion termination.
+- Distinguishes directly verified call edges (`is_directly_verified = True`, 0.90 confidence) from inferred data/state edges (0.65 confidence).
+
+---
+
+### 4. Root-Cause Analysis Engine (`forge.causality.engine`)
+- Ingests verified M1 `DiagnosisResult`, `TestFailureReport`, or direct symbol/location inputs.
+- Audits evidence freshness with `verify_evidence_freshness()`.
+- Synthesizes linear causal chains and determines root-cause status without forcing a single cause when multiple are plausible.
+- Optionally enriches narratives via local Ollama inference, failing closed if unavailable.
+
+---
+
+### 5. Causality Tools & ToolRegistry Integration (`forge.causality.tools`)
+- Exposes 5 structured read-only tools to `ToolRegistry`: `analyze_root_cause`, `trace_causal_chain`, `inspect_contributing_factors`, `compare_root_cause_hypotheses`, `explain_failure_propagation`.
