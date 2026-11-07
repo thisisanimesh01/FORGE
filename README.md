@@ -39,7 +39,29 @@ Phase 7: Evidence-Driven Investigation Engine ── [COMPLETED] (Cross-File Evi
 Phase 9: Safe Git Publication & Upstream Integration ── [COMPLETED] (Milestones 1–4 Complete — Phase 9 Complete)
 Phase 10: Protected-File Boundary Enforcement ── [COMPLETED] (Centralized Boundary Policy, Acquisition Filter, Ingestion Guard, Context Hardening, Git Metadata Remediation)
 Phase 11: Intelligent Repository Understanding ── [COMPLETED] (M1 Architecture Audit, M2 Symbol Graph & Call-Graph Engine, M3 Module Dependency Graph & Cycle Detection, M4 Change-Impact Analysis, M5 Incremental Indexing & Caching, M6 LLM Tooling & Context Integration)
+Phase 12: Advanced Intelligence & Autonomous Defect Repair ── [IN PROGRESS] (M1 Evidence-Driven Defect Diagnosis [COMPLETED], M2 Autonomous Repair Planning [PLANNED])
 ```
+
+### Phase 12: Advanced Intelligence & Autonomous Defect Repair (In Progress)
+- **Objective & Scope**: Advance FORGE from read-only static repository understanding into autonomous, evidence-driven software engineering intelligence. Synthesize diagnostic hypotheses, perform multi-source failure localization, evaluate code contradictions, and enforce strict defect confirmation invariants before orchestrating autonomous repair workflows.
+- **Milestone 1: Evidence-Driven Defect Diagnosis (`[COMPLETED]`)**:
+  - *Data Contracts & Input Budgeting (`forge.diagnosis.schemas`)*: Implemented strict Pydantic models (`extra="forbid"`) for `DiagnosisInput`, `TestFailureReport` (with `__test__ = False` to prevent pytest collection conflicts), `StaticFindingReport`, `CandidateLocation`, `DiagnosisHypothesis`, and `DiagnosisResult`. Enforces strict character budgets across user descriptions (10,000 chars), stack traces (15,000 chars), diffs (50,000 chars), and error messages (5,000 chars).
+  - *Defect Classification Taxonomy*: Established a deterministic 12-category taxonomy (`LOGIC_ERROR`, `INCORRECT_DATA_HANDLING`, `INPUT_VALIDATION_FAILURE`, `EXCEPTION_HANDLING_DEFECT`, `RESOURCE_MANAGEMENT_ISSUE`, `DEPENDENCY_INTEGRATION_DEFECT`, `CONCURRENCY_ISSUE`, `SECURITY_VULNERABILITY`, `PERFORMANCE_DEFECT`, `CONFIGURATION_DEFECT`, `TEST_BUILD_FAILURE`, `UNKNOWN`).
+  - *Failure Localization Engine (`forge.diagnosis.localization`)*: Implemented `FailureLocalizer` extracting and ranking candidate locations from traceback crash frames (0.90 confidence weight), inline error message references (0.85 weight), failing test callee invocations via `CallGraph.get_direct_callees()` (0.80 weight), explicit target symbols via `SymbolIndex`, and change-impact analysis via `ChangeImpactAnalyzer`. Enforces Phase 10 security boundaries fail-closed, dropping directory traversal attempts and protected files. Automatically discounts and sorts test files behind production source code.
+  - *Hypothesis Formulation & Scope-Confined Contradiction Detection (`forge.diagnosis.hypothesis`)*: Evaluates candidate locations against repository facts. Inspects code within enclosing function scopes without bleeding across `def ` boundaries. Generates contradicting evidence records when hypotheses claim missing checks or guards but source code on disk already contains explicit validation or exception handlers. Automatically zeroes confidence (`0.0`, `FindingConfidence.LOW`) for unverified disk locations.
+  - *Defect Confirmation vs Suspicion Invariant (`forge.diagnosis.engine`)*: Enforces the core invariant that model-generated suspicions never automatically become confirmed defects. Confirmation strictly requires:
+    1. Candidate location is verified against current disk content and line bounds.
+    2. Direct grounded source evidence is attached.
+    3. Direct failure signal exists (runtime crash traceback frame, test assertion failure, or error message).
+    4. Top hypothesis confidence is `HIGH` (numeric score $\ge 0.75$).
+    5. Zero unrefuted contradicting evidence on disk.
+    6. Defect category is classified into a known deterministic category (not `UNKNOWN`).
+    7. Zero competing unrefuted hypotheses with confidence score $\ge 0.70$.
+  - *Storage Integration & Stale Evidence Detection*: Integrates with SQLite `ForgeStore` and `EvidenceGroundingEngine` to persist findings and linked evidence records atomically. Exposes `verify_evidence_freshness()` to detect source drift and stale evidence via SHA-256 slice digests.
+  - *Local Ollama Isolation & Safety*: Restricts model reasoning strictly to local Ollama endpoints (`localhost` / `127.0.0.1`), failing closed with structured heuristic evaluation without attempting cloud API calls or cloud fallbacks.
+  - *Empirical Performance*: Warmup latency of 2,955 ms (full repository index and call-graph resolution) and subsequent incremental diagnosis query latency of **2.05 ms** across the FORGE repository.
+  - *Dedicated Milestone Documentation*: Created [`docs/milestones/phase-12-m1-evidence-driven-diagnosis.md`](docs/milestones/phase-12-m1-evidence-driven-diagnosis.md).
+  - *Verification Suite*: 24 dedicated unit tests in `tests/unit/test_phase12_m1_diagnosis.py` and 1,772 tests passing with zero regressions across the entire test suite.
 
 ### Phase 11: Intelligent Repository Understanding (Completed)
 - **Objective & Scope**: Enable comprehensive static understanding of software repositories by introducing qualified symbol naming, cross-file import resolution, forward and reverse call graphs, module dependency DAGs, cycle detection, change-impact analysis, incremental caching, and LLM reasoning integration without dynamic execution or compromising Phase 10 isolation boundaries.
