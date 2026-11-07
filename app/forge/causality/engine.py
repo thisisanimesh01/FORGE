@@ -188,7 +188,8 @@ class RootCauseAnalysisEngine:
 
         if symptom_node is None or not symptom_node.is_verified_on_disk:
             # Cannot locate verified failure symptom
-            report_id = f"rc_{hashlib.sha256(f'{self.run_id}:{diag_id or file_path}'.encode()).hexdigest()[:8]}"
+            rep_key = f"{self.run_id}:{diag_id or file_path}".encode()
+            report_id = f"rc_{hashlib.sha256(rep_key).hexdigest()[:8]}"
             limitations.append("Failure symptom could not be verified against current repository source on disk.")
             unresolved_questions.append("Where is the precise execution point of failure?")
             return RootCauseReport(
@@ -242,7 +243,9 @@ class RootCauseAnalysisEngine:
                 if contradiction:
                     # AST directly refutes a defect claim in this location
                     refuted_nodes.add(node.node_id)
-                    alt_id = f"alt_{hashlib.sha256(f'{node.node_id}:{contradiction.get('line')}'.encode()).hexdigest()[:8]}"
+                    contra_line = contradiction.get("line")
+                    alt_hash_key = f"{node.node_id}:{contra_line}".encode()
+                    alt_id = f"alt_{hashlib.sha256(alt_hash_key).hexdigest()[:8]}"
                     alt = AlternativeExplanation(
                         explanation_id=alt_id,
                         suspected_root_cause=f"Defect at {node.file_path}:{node.start_line}",
@@ -379,7 +382,8 @@ class RootCauseAnalysisEngine:
             evidence_refs.extend(cedge.evidence_references)
 
         evidence_refs = sorted(list(set(evidence_refs)))
-        report_id = f"rc_{hashlib.sha256(f'{self.run_id}:{symptom_node.node_id}:{status.value}'.encode()).hexdigest()[:8]}"
+        report_key = f"{self.run_id}:{symptom_node.node_id}:{status.value}".encode()
+        report_id = f"rc_{hashlib.sha256(report_key).hexdigest()[:8]}"
 
         report = RootCauseReport(
             report_id=report_id,
