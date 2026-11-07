@@ -771,3 +771,323 @@ class TestToolRegistryIntegration:
         assert "existing_targeted_tests" in res
         assert "recommended_new_tests" in res
         assert len(res["recommended_new_tests"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# 8. Audit Findings Remediation: Immutability and Copy Safety
+# ---------------------------------------------------------------------------
+
+class TestRepairPlanImmutabilityAndCopySafety:
+    """Verifies that RepairPlan is immutable, assignment-validated, and protected against copy bypass."""
+
+    def test_direct_assignment_execution_permitted_rejected(
+        self,
+        repo_fixture: Path,
+        proven_root_cause_report: RootCauseReport,
+    ):
+        from pydantic import ValidationError
+        engine = RepairPlanningEngine(workspace_path=repo_fixture)
+        plan = engine.plan_repair(root_cause_report=proven_root_cause_report)
+
+        with pytest.raises(ValidationError, match="frozen_instance|Instance is frozen"):
+            plan.execution_permitted = True
+
+    def test_direct_assignment_approval_required_rejected(
+        self,
+        repo_fixture: Path,
+        proven_root_cause_report: RootCauseReport,
+    ):
+        from pydantic import ValidationError
+        engine = RepairPlanningEngine(workspace_path=repo_fixture)
+        plan = engine.plan_repair(root_cause_report=proven_root_cause_report)
+
+        with pytest.raises(ValidationError, match="frozen_instance|Instance is frozen"):
+            plan.approval_required = False
+
+    def test_model_copy_update_execution_permitted_rejected(
+        self,
+        repo_fixture: Path,
+        proven_root_cause_report: RootCauseReport,
+    ):
+        from pydantic import ValidationError
+        engine = RepairPlanningEngine(workspace_path=repo_fixture)
+        plan = engine.plan_repair(root_cause_report=proven_root_cause_report)
+
+        with pytest.raises(ValidationError, match="execution_permitted must always be False"):
+            plan.model_copy(update={"execution_permitted": True})
+
+    def test_model_copy_update_approval_required_rejected(
+        self,
+        repo_fixture: Path,
+        proven_root_cause_report: RootCauseReport,
+    ):
+        from pydantic import ValidationError
+        engine = RepairPlanningEngine(workspace_path=repo_fixture)
+        plan = engine.plan_repair(root_cause_report=proven_root_cause_report)
+
+        with pytest.raises(ValidationError, match="approval_required must always be True"):
+            plan.model_copy(update={"approval_required": False})
+
+    def test_revalidation_of_invalid_copied_plan(
+        self,
+        repo_fixture: Path,
+        proven_root_cause_report: RootCauseReport,
+    ):
+        from pydantic import ValidationError
+        engine = RepairPlanningEngine(workspace_path=repo_fixture)
+        plan = engine.plan_repair(root_cause_report=proven_root_cause_report)
+
+        raw = plan.model_dump()
+        raw["execution_permitted"] = True
+        with pytest.raises(ValidationError, match="execution_permitted must always be False"):
+            RepairPlan.model_validate(raw)
+
+        validator = RepairPlanValidator(workspace_path=repo_fixture)
+        # Even if someone constructs a tampered plan using low-level bypass, validate_plan catches it
+        object.__setattr__(plan, "execution_permitted", True)
+        is_valid, errors, checked = validator.validate_plan(plan)
+        assert is_valid is False
+        assert any("execution_permitted must be False" in err for err in errors)
+        # Reset to safe value
+        object.__setattr__(plan, "execution_permitted", False)
+
+    def test_json_serialization_and_deserialization(
+        self,
+        repo_fixture: Path,
+        proven_root_cause_report: RootCauseReport,
+    ):
+        from pydantic import ValidationError
+        engine = RepairPlanningEngine(workspace_path=repo_fixture)
+        plan = engine.plan_repair(root_cause_report=proven_root_cause_report)
+
+        # Serialize
+        plan_json = plan.model_dump_json()
+        assert "execution_permitted" in plan_json
+        assert "approval_required" in plan_json
+
+        # Deserialize
+        restored = RepairPlan.model_validate_json(plan_json)
+        assert restored.plan_id == plan.plan_id
+        assert restored.execution_permitted is False
+        assert restored.approval_required is True
+
+        # Restored plan must also be frozen
+        with pytest.raises(ValidationError, match="frozen_instance|Instance is frozen"):
+            restored.execution_permitted = True
+
+    def test_tool_input_containing_tampered_plan(
+        self,
+        repo_fixture: Path,
+        proven_root_cause_report: RootCauseReport,
+    ):
+        tools = RepairPlanningTools(workspace_path=repo_fixture)
+        engine = tools.get_engine()
+        plan = engine.plan_repair(root_cause_report=proven_root_cause_report)
+
+        # Tamper JSON
+        tampered_dict = plan.model_dump()
+        tampered_dict["execution_permitted"] = True
+        tampered_json = json.dumps(tampered_dict)
+
+        val_raw = tools.validate_repair_plan({"plan_json": tampered_json})
+        res = json.loads(val_raw)
+
+        assert res["is_valid"] is False
+        assert len(res["validation_errors"]) >= 1
+        assert any("execution_permitted must always be False" in err for err in res["validation_errors"])
+
+    def test_nested_strategy_data_attempting_to_weaken_constraints(
+        self,
+        repo_fixture: Path,
+        proven_root_cause_report: RootCauseReport,
+    ):
+        from pydantic import ValidationError
+        engine = RepairPlanningEngine(workspace_path=repo_fixture)
+        plan = engine.plan_repair(root_cause_report=proven_root_cause_report)
+
+        # 1. Extra fields on nested strategy are forbidden
+        strat_dict = plan.candidate_strategies[0].model_dump()
+        strat_dict["bypass_sandbox"] = True
+        with pytest.raises(ValidationError, match="extra_forbidden|Extra inputs are not permitted"):
+            RepairStrategy.model_validate(strat_dict)
+
+        # 2. Non-actionable plan with required code changes is forbidden
+        plan_dict = plan.model_dump()
+        plan_dict["status"] = RepairPlanStatus.INSUFFICIENT_EVIDENCE
+        # required_changes is non-empty from proven report
+        assert len(plan_dict["required_changes"]) > 0
+        with pytest.raises(ValidationError, match="cannot contain required code changes"):
+            RepairPlan.model_validate(plan_dict)
+
+
+# ---------------------------------------------------------------------------
+# 9. Audit Findings Remediation: Stale Evidence Status Downgrade
+# ---------------------------------------------------------------------------
+
+class TestStaleEvidenceDowngradeRemediation:
+    """Verifies that pre-constructed reports cannot override current on-disk source evidence."""
+
+    def test_fresh_proven_report_produces_actionable_plan(
+        self,
+        repo_fixture: Path,
+        proven_root_cause_report: RootCauseReport,
+    ):
+        engine = RepairPlanningEngine(workspace_path=repo_fixture)
+        plan = engine.plan_repair(root_cause_report=proven_root_cause_report)
+
+        assert plan.status == RepairPlanStatus.ACTIONABLE
+        assert plan.confidence == FindingConfidence.HIGH
+        assert plan.selected_strategy_id is not None
+        assert len(plan.required_changes) > 0
+
+    def test_stale_preconstructed_proven_report_becomes_non_actionable(
+        self,
+        repo_fixture: Path,
+    ):
+        # Create a report claiming PROVEN status, but referencing out-of-bounds line numbers
+        stale_report = RootCauseReport(
+            report_id="rc_stale_001",
+            run_id="run_stale_001",
+            status=CausalStatus.PROVEN,
+            primary_root_cause=CausalNode(
+                node_id="cnode_calc_stale",
+                symbol_id="pkg_c.calculator.compute_metric",
+                file_path="pkg_c/calculator.py",
+                start_line=9999,
+                end_line=9999,
+                node_type=CausalNodeType.FUNCTION,
+                role=CausalRole.ROOT_CAUSE,
+                description="Stale root cause line that does not exist",
+                is_verified_on_disk=True,
+            ),
+            confidence=FindingConfidence.HIGH,
+            confidence_score=0.95,
+        )
+
+        engine = RepairPlanningEngine(workspace_path=repo_fixture)
+        plan = engine.plan_repair(root_cause_report=stale_report)
+
+        # Must be downgraded to INSUFFICIENT_EVIDENCE
+        assert plan.status == RepairPlanStatus.INSUFFICIENT_EVIDENCE
+        assert plan.confidence == FindingConfidence.LOW
+        assert plan.selected_strategy_id is None
+        assert len(plan.required_changes) == 0
+        assert "Stale evidence detected during planning" in (plan.limitations or "")
+        assert "exceeds file line count" in (plan.limitations or "")
+
+    def test_source_modification_between_evidence_collection_and_final_validation(
+        self,
+        repo_fixture: Path,
+        proven_root_cause_report: RootCauseReport,
+    ):
+        engine = RepairPlanningEngine(workspace_path=repo_fixture)
+
+        # Hook evidence collector to simulate race condition: file modified on disk after initial collect
+        orig_verify = engine._evidence_collector.verify_file_location
+        call_count = 0
+
+        def race_condition_verify(file_path, start_line=None, end_line=None):
+            nonlocal call_count
+            call_count += 1
+            is_valid, curr_hash, err = orig_verify(file_path, start_line, end_line)
+            # On second check (pre-assembly re-verify), report content drift
+            if call_count > 2:
+                return True, "corrupted_hash_simulating_race_condition", None
+            return is_valid, curr_hash, err
+
+        engine._evidence_collector.verify_file_location = race_condition_verify
+
+        plan = engine.plan_repair(root_cause_report=proven_root_cause_report)
+        assert plan.status == RepairPlanStatus.INSUFFICIENT_EVIDENCE
+        assert plan.confidence == FindingConfidence.LOW
+        assert plan.selected_strategy_id is None
+        assert "Plan downgraded to INSUFFICIENT_EVIDENCE due to concurrent disk changes" in (plan.limitations or "")
+
+    def test_stale_evidence_prevents_selected_strategy_actionable(
+        self,
+        repo_fixture: Path,
+    ):
+        stale_report = RootCauseReport(
+            report_id="rc_stale_strat",
+            run_id="run_stale_strat",
+            status=CausalStatus.PROVEN,
+            primary_root_cause=CausalNode(
+                node_id="cnode_calc_stale2",
+                symbol_id="pkg_c.calculator.compute_metric",
+                file_path="pkg_c/calculator.py",
+                start_line=5000,
+                end_line=5000,
+                node_type=CausalNodeType.FUNCTION,
+                role=CausalRole.ROOT_CAUSE,
+                description="Stale line",
+            ),
+            confidence=FindingConfidence.HIGH,
+            confidence_score=0.9,
+        )
+
+        engine = RepairPlanningEngine(workspace_path=repo_fixture)
+        plan = engine.plan_repair(root_cause_report=stale_report)
+
+        # All candidate strategies must have is_recommended=False and rejection reasons
+        assert len(plan.candidate_strategies) > 0
+        for s in plan.candidate_strategies:
+            assert s.is_recommended is False
+            assert any("stale" in r.lower() for r in s.rejection_reasons)
+
+    def test_missing_source_files_downgrades_to_insufficient_evidence(
+        self,
+        repo_fixture: Path,
+    ):
+        missing_report = RootCauseReport(
+            report_id="rc_missing_file",
+            run_id="run_missing_file",
+            status=CausalStatus.PROVEN,
+            primary_root_cause=CausalNode(
+                node_id="cnode_missing",
+                symbol_id="nonexistent_module.func",
+                file_path="pkg_nonexistent/deleted_file.py",
+                start_line=1,
+                end_line=10,
+                node_type=CausalNodeType.FUNCTION,
+                role=CausalRole.ROOT_CAUSE,
+                description="File was deleted",
+            ),
+            confidence=FindingConfidence.HIGH,
+            confidence_score=0.95,
+        )
+
+        engine = RepairPlanningEngine(workspace_path=repo_fixture)
+        plan = engine.plan_repair(root_cause_report=missing_report)
+
+        assert plan.status == RepairPlanStatus.INSUFFICIENT_EVIDENCE
+        assert plan.confidence == FindingConfidence.LOW
+        assert "does not exist on disk" in (plan.limitations or "")
+
+    def test_stale_evidence_visible_in_plan_limitations(
+        self,
+        repo_fixture: Path,
+    ):
+        stale_report = RootCauseReport(
+            report_id="rc_stale_visible",
+            run_id="run_stale_visible",
+            status=CausalStatus.PROVEN,
+            primary_root_cause=CausalNode(
+                node_id="cnode_visible",
+                symbol_id="pkg_c.calculator.compute_metric",
+                file_path="pkg_c/calculator.py",
+                start_line=8888,
+                end_line=8888,
+                node_type=CausalNodeType.FUNCTION,
+                role=CausalRole.ROOT_CAUSE,
+                description="Out of range",
+            ),
+            confidence=FindingConfidence.HIGH,
+            confidence_score=0.9,
+        )
+
+        engine = RepairPlanningEngine(workspace_path=repo_fixture)
+        plan = engine.plan_repair(root_cause_report=stale_report)
+
+        assert plan.limitations is not None
+        assert "Stale evidence detected during planning" in plan.limitations
+        assert "start_line (8888) exceeds file line count" in plan.limitations

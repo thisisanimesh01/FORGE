@@ -158,14 +158,35 @@ class RepairPlanningEngine:
         affected_files = [target_file] if target_file != "unknown" else []
         affected_symbols = [target_symbol] if target_symbol != "unknown" else []
 
+        # Audit target file existence and freshness on disk
+        if target_file != "unknown":
+            is_valid_target, _, target_err = self._evidence_collector.verify_file_location(target_file, None, None)
+            if not is_valid_target:
+                target_msg = f"Target file '{target_file}' is invalid or missing on disk: {target_err}"
+                if target_msg not in stale_issues:
+                    stale_issues.append(target_msg)
+
+        # Audit any evidence marked not fresh or with content drift
+        for ev in evidence_list:
+            if not ev.is_fresh:
+                ev_msg = f"Evidence '{ev.evidence_id}' referencing '{ev.file_path}' is marked not fresh."
+                if ev_msg not in stale_issues:
+                    stale_issues.append(ev_msg)
+
         # 5. Determine Certainty & Plan Status
         causal_status = root_cause_report.status if root_cause_report else CausalStatus.INSUFFICIENT_EVIDENCE
         limitations: List[str] = []
 
         if stale_issues:
             limitations.append(f"Stale evidence detected during planning: {'; '.join(stale_issues)}")
-
-        if causal_status == CausalStatus.PROVEN:
+            # Mandatory downgrade: a pre-constructed PROVEN report cannot override stale source evidence on disk
+            plan_status = RepairPlanStatus.INSUFFICIENT_EVIDENCE
+            confidence = FindingConfidence.LOW
+            limitations.append(
+                "Plan downgraded to INSUFFICIENT_EVIDENCE: supporting repository evidence is stale, "
+                "drifted, or unverified against current workspace disk state."
+            )
+        elif causal_status == CausalStatus.PROVEN:
             plan_status = RepairPlanStatus.ACTIONABLE
             confidence = FindingConfidence.HIGH
         elif causal_status == CausalStatus.PLAUSIBLE:
@@ -203,14 +224,23 @@ class RepairPlanningEngine:
             error_message=error_message,
         )
 
+        # Disqualify candidate strategies if evidence is stale
+        if stale_issues:
+            for s in strategies:
+                s.is_recommended = False
+                if "Supporting evidence is stale" not in " ".join(s.rejection_reasons):
+                    s.rejection_reasons.append(
+                        "Supporting evidence is stale or unverified against current workspace disk state."
+                    )
+
         # Determine selected strategy
         selected_strat_id: Optional[str] = None
-        if plan_status in (RepairPlanStatus.ACTIONABLE, RepairPlanStatus.CONDITIONAL, RepairPlanStatus.MULTIPLE_CANDIDATES):
+        if plan_status in (RepairPlanStatus.ACTIONABLE, RepairPlanStatus.CONDITIONAL, RepairPlanStatus.MULTIPLE_CANDIDATES) and not stale_issues:
             recommended = next((s for s in strategies if s.is_recommended), None)
             if recommended and not recommended.rejection_reasons:
                 selected_strat_id = recommended.strategy_id
-        elif plan_status in (RepairPlanStatus.INSUFFICIENT_EVIDENCE, RepairPlanStatus.UNRESOLVED):
-            # No actionable strategy permitted
+        else:
+            # No actionable strategy permitted when evidence is stale or insufficient
             selected_strat_id = None
 
         selected_strategy = next((s for s in strategies if s.strategy_id == selected_strat_id), None)
@@ -269,6 +299,43 @@ class RepairPlanningEngine:
             required_changes=required_changes,
             approach=selected_approach,
         )
+
+        # Re-verify freshness immediately before assembly to prevent race conditions
+        pre_assembly_stale: List[str] = []
+        if target_file != "unknown":
+            t_valid, _, t_err = self._evidence_collector.verify_file_location(target_file, None, None)
+            if not t_valid:
+                pre_assembly_stale.append(f"Target file modified/removed during plan synthesis: {t_err}")
+
+        for ev in evidence_list:
+            if ev.file_path and ev.file_path != "unknown" and ev.is_fresh:
+                ev_valid, ev_curr_hash, ev_err = self._evidence_collector.verify_file_location(
+                    ev.file_path, ev.start_line, ev.end_line
+                )
+                if not ev_valid:
+                    pre_assembly_stale.append(f"Evidence '{ev.evidence_id}' modified during planning: {ev_err}")
+                elif ev.source_hash and ev_curr_hash and ev.source_hash != ev_curr_hash:
+                    pre_assembly_stale.append(
+                        f"Evidence '{ev.evidence_id}' on '{ev.file_path}' content hash drifted during planning "
+                        f"(current: {ev_curr_hash[:8]}..., recorded: {ev.source_hash[:8]}...)"
+                    )
+
+        if pre_assembly_stale:
+            stale_issues.extend(pre_assembly_stale)
+            plan_status = RepairPlanStatus.INSUFFICIENT_EVIDENCE
+            confidence = FindingConfidence.LOW
+            selected_strat_id = None
+            selected_strategy = None
+            required_changes = []
+            for s in strategies:
+                s.is_recommended = False
+                if "Supporting evidence drifted" not in " ".join(s.rejection_reasons):
+                    s.rejection_reasons.append(
+                        "Supporting evidence drifted during planning synthesis."
+                    )
+            limitations.append(
+                f"Plan downgraded to INSUFFICIENT_EVIDENCE due to concurrent disk changes: {'; '.join(pre_assembly_stale)}"
+            )
 
         # 11. Assemble Comprehensive RepairPlan
         plan_id = f"plan_{uuid.uuid4().hex[:12]}"
@@ -329,6 +396,25 @@ class RepairPlanningEngine:
         # 13. Cache Plan
         self._plans[plan.plan_id] = plan
         return plan
+
+    def generate_plan(
+        self,
+        root_cause_report: Optional[RootCauseReport] = None,
+        diagnosis: Optional[DiagnosisResult] = None,
+        failing_symbol: Optional[str] = None,
+        file_path: Optional[str] = None,
+        line_number: Optional[int] = None,
+        error_message: Optional[str] = None,
+    ) -> RepairPlan:
+        """Alias for plan_repair."""
+        return self.plan_repair(
+            root_cause_report=root_cause_report,
+            diagnosis=diagnosis,
+            failing_symbol=failing_symbol,
+            file_path=file_path,
+            line_number=line_number,
+            error_message=error_message,
+        )
 
     def _build_verification_tests(
         self,

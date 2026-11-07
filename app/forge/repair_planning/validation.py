@@ -45,6 +45,15 @@ class RepairPlanValidator:
         checked: List[str] = []
 
         # -------------------------------------------------------------------
+        # Trust Boundary: Deep Schema & Safety Invariant Revalidation
+        # -------------------------------------------------------------------
+        checked.append("schema_revalidation_at_trust_boundary")
+        try:
+            _ = RepairPlan.model_validate(plan.model_dump())
+        except Exception as e:
+            errors.append(f"Schema invariant violation on RepairPlan: {e}")
+
+        # -------------------------------------------------------------------
         # Invariant 1: Approval Required is strictly True
         # -------------------------------------------------------------------
         checked.append("approval_required_is_true")
@@ -79,7 +88,8 @@ class RepairPlanValidator:
             try:
                 abs_path = assert_contained_path(self.workspace_path / norm_path, self.workspace_path)
                 if not abs_path.exists() or not abs_path.is_file():
-                    errors.append(f"Target file '{norm_path}' does not exist on disk as a regular file.")
+                    if plan.status == RepairPlanStatus.ACTIONABLE or plan.required_changes:
+                        errors.append(f"Target file '{norm_path}' does not exist on disk as a regular file.")
             except SecurityError as sec_err:
                 errors.append(f"Security violation: path traversal on affected_file '{norm_path}': {sec_err}")
 
@@ -165,6 +175,20 @@ class RepairPlanValidator:
                     errors.append(
                         "Minimality violation: selected strategy is EXTENSIVE when a safe MINIMAL strategy was available."
                     )
+        # -------------------------------------------------------------------
+        # Invariant 8: Evidence Freshness Integrity
+        # -------------------------------------------------------------------
+        checked.append("evidence_freshness_integrity")
+        stale_evs = [ev for ev in plan.supporting_evidence if not ev.is_fresh]
+        if stale_evs:
+            if plan.status == RepairPlanStatus.ACTIONABLE:
+                errors.append(
+                    f"Freshness violation: plan cannot be ACTIONABLE when {len(stale_evs)} supporting evidence item(s) are stale or unverified."
+                )
+            if plan.selected_strategy_id:
+                errors.append(
+                    "Freshness violation: cannot recommend an actionable repair strategy when supporting evidence is stale."
+                )
 
         is_valid = len(errors) == 0
         return is_valid, errors, checked

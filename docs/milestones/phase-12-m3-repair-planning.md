@@ -170,3 +170,25 @@ Measured with `app/forge/benchmarks/benchmark_phase12_m3_repair_planning.py`:
 3. **Execution Blocked**: `execution_permitted` is hardcoded to `False`. Code repair execution is strictly deferred to Phase 12 M4.
 4. **Secret Sanitization**: Tool outputs pass through `redact_secrets` and enforce a 50,000-character budget.
 5. **Path Containment**: Path traversal (`../../`) and protected files (`.env`, `.git`) are strictly rejected.
+
+---
+
+## 6. Audit Findings Remediation & Immutability Guarantees
+
+Following an independent technical audit, two key safety and integrity mechanisms were reinforced:
+
+### 6.1 Immutable `RepairPlan` & Copy Safety
+- **Enforced Immutability**: `RepairPlan.model_config` specifies `validate_assignment=True` and `frozen=True`. Direct in-place mutation of safety flags (`plan.execution_permitted = True` or `plan.approval_required = False`) is intercepted and rejected with a Pydantic `ValidationError`.
+- **Copy Revalidation**: In Pydantic v2, `model_copy(update=...)` bypasses validators by default. `RepairPlan` explicitly overrides `model_copy(update=...)` to revalidate the updated plan against all schema and safety invariants via `model_validate`, prohibiting any attempt to bypass constraints via shallow copying.
+- **Trust Boundary Enforcement**: `RepairPlanValidator.validate_plan()` and `RepairPlanningTools.validate_repair_plan()` perform deep reconstruction and invariant revalidation whenever externally supplied plans or serialized plan JSON is accepted.
+- **Non-Actionable Plan Changes Prohibited**: `validate_safety_invariants` explicitly forbids `required_changes` when plan status is `INSUFFICIENT_EVIDENCE` or `UNRESOLVED`.
+
+### 6.2 Mandatory Stale-Evidence Status Downgrade
+- **Pre-Constructed Report Override Prohibited**: A pre-constructed `RootCauseReport` with `status=PROVEN` cannot override stale, modified, or missing source files on disk.
+- **Freshness Reassessment**: `RepairPlanningEngine` audits evidence freshness, line range bounds ($start\_line \le end\_line \le total\_lines$), and SHA-256 slice digests against current repository files. If any supporting evidence is stale, drifted, or unverified:
+  - `plan_status` is automatically downgraded to `INSUFFICIENT_EVIDENCE`.
+  - `confidence` is capped to `LOW`.
+  - All candidate repair strategies are marked non-recommended (`is_recommended=False`) and assigned explicit rejection reasons.
+  - Active repair strategy selection and required code changes are prohibited (`selected_strategy_id = None`, `required_changes = []`).
+  - Stale evidence details are preserved and detailed in `plan.limitations`.
+- **Race Condition Prevention**: `RepairPlanningEngine` re-evaluates file existence and SHA-256 hashes immediately before assembling the final plan to guard against concurrent disk modifications during plan synthesis.

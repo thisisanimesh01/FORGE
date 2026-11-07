@@ -255,13 +255,38 @@ class RepairPlanningTools:
         plan: Optional[RepairPlan] = None
         if params.plan_id:
             plan = engine.get_cached_plan(params.plan_id)
+            if plan is None:
+                return json.dumps({"error": f"Plan '{params.plan_id}' not found in plan cache."})
+            try:
+                _ = RepairPlan.model_validate(plan.model_dump())
+            except ValidationError as val_err:
+                val_errors = [f"Schema invariant violation: {e.get('msg', str(e))}" for e in val_err.errors()]
+                output = ValidateRepairPlanOutput(
+                    is_valid=False,
+                    validation_errors=val_errors,
+                    checked_invariants=["approval_required_is_true", "execution_permitted_is_false"],
+                    execution_permitted_guarantee=True,
+                    approval_required_guarantee=True,
+                )
+                return output.model_dump_json(indent=2)
         elif params.plan_json:
             try:
-                plan = RepairPlan.model_validate_json(params.plan_json)
-            except Exception as e:
-                return json.dumps({"error": f"Failed to parse plan_json: {e}"})
-
-        if plan is None:
+                raw_dict = json.loads(params.plan_json)
+            except json.JSONDecodeError as json_err:
+                return json.dumps({"error": f"Failed to parse plan_json: {json_err}"})
+            try:
+                plan = RepairPlan.model_validate(raw_dict)
+            except ValidationError as val_err:
+                val_errors = [f"Schema invariant violation: {e.get('msg', str(e))}" for e in val_err.errors()]
+                output = ValidateRepairPlanOutput(
+                    is_valid=False,
+                    validation_errors=val_errors,
+                    checked_invariants=["approval_required_is_true", "execution_permitted_is_false"],
+                    execution_permitted_guarantee=True,
+                    approval_required_guarantee=True,
+                )
+                return output.model_dump_json(indent=2)
+        else:
             return json.dumps({"error": "Either plan_id or valid plan_json must be provided."})
 
         is_valid, errors, checked = validator.validate_plan(plan)
