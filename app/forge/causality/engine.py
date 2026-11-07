@@ -261,15 +261,30 @@ class RootCauseAnalysisEngine:
         # 7. Identify Candidate Root Causes
         candidate_roots: List[CausalNode] = []
 
-        # Find nodes marked as ROOT_CAUSE or that have outgoing edges toward symptom but no incoming callers
-        incoming_targets = {e.target_node_id for e in edges_by_id.values()}
-        for node in nodes_by_id.values():
-            if node.node_id in refuted_nodes or node.node_id == symptom_node.node_id:
-                continue
+        # Find nodes marked as ROOT_CAUSE or origin callers (no incoming production callers), excluding test harnesses
+        incoming_prod_targets = {
+            e.target_node_id
+            for e in edges_by_id.values()
+            if e.source_node_id in nodes_by_id and not self._is_test_file(nodes_by_id[e.source_node_id].file_path)
+        }
+        explicit_roots = [
+            n for n in nodes_by_id.values()
+            if n.node_id not in refuted_nodes
+            and n.node_id != symptom_node.node_id
+            and n.role == CausalRole.ROOT_CAUSE
+            and not self._is_test_file(n.file_path)
+        ]
 
-            # Prioritize: explicitly modified node, or origin caller (no incoming callers to it)
-            if node.role == CausalRole.ROOT_CAUSE or node.node_id not in incoming_targets:
-                candidate_roots.append(node)
+        if explicit_roots:
+            candidate_roots.extend(explicit_roots)
+        else:
+            for node in nodes_by_id.values():
+                if node.node_id in refuted_nodes or node.node_id == symptom_node.node_id:
+                    continue
+                if self._is_test_file(node.file_path):
+                    continue
+                if node.node_id not in incoming_prod_targets:
+                    candidate_roots.append(node)
 
         # If diagnosis provided candidate locations, integrate them if not yet present
         if diagnosis and not candidate_roots:
@@ -344,7 +359,24 @@ class RootCauseAnalysisEngine:
                 if cid in nodes_by_id:
                     contributing_factors.append(nodes_by_id[cid])
 
-            if best_chain.is_fully_verified and primary_root and primary_root.is_verified_on_disk:
+            # Validate that every node and edge in the chain is directly verified
+            chain_edges = [edges_by_id[eid] for eid in best_chain.edge_ids if eid in edges_by_id]
+            has_unverified_edge = any(not e.is_directly_verified for e in chain_edges)
+            has_structural_dep = any(e.relationship == CausalRelationship.DEPENDS_ON for e in chain_edges)
+            all_nodes_verified = all(
+                nodes_by_id[nid].is_verified_on_disk
+                for nid in best_chain.node_ids
+                if nid in nodes_by_id
+            ) and len(best_chain.node_ids) == sum(1 for nid in best_chain.node_ids if nid in nodes_by_id)
+
+            if (
+                best_chain.is_fully_verified
+                and not has_unverified_edge
+                and not has_structural_dep
+                and primary_root
+                and primary_root.is_verified_on_disk
+                and all_nodes_verified
+            ):
                 status = CausalStatus.PROVEN
                 conf_score = round(max(0.85, best_chain.confidence_score), 2)
                 overall_confidence = FindingConfidence.HIGH

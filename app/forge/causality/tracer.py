@@ -228,9 +228,11 @@ class CausalTracer:
                 continue
 
             # 1. Retrieve CallEdges where target is curr_symbol
-            call_edges: List[CallEdge] = []
+            call_edges: List[Tuple[CallEdge, bool]] = []
             try:
-                call_edges = cg.get_call_edges(target_id=curr_symbol)
+                exact_edges = cg.get_call_edges(target_id=curr_symbol)
+                for ee in exact_edges:
+                    call_edges.append((ee, True))
             except Exception:
                 pass
 
@@ -240,27 +242,30 @@ class CausalTracer:
                     for cid in direct_caller_ids:
                         found_edges = cg.get_call_edges(source_id=cid, target_id=curr_symbol)
                         if found_edges:
-                            call_edges.extend(found_edges)
+                            for fe in found_edges:
+                                call_edges.append((fe, True))
                         else:
-                            # Fabricate synthetic CallEdge from node info if edge record missing
+                            # Preserve fallback relationship for exploration without claiming verified call-site evidence
                             node = cg.nodes.get(cid)
                             file_p = node.file_path if node else "unknown.py"
-                            line_n = node.start_line if node else 1
-                            call_edges.append(
+                            start_l = node.start_line if node else 1
+                            call_edges.append((
                                 CallEdge(
                                     source_id=cid,
                                     target_id=curr_symbol,
                                     source_file=file_p,
-                                    line_number=line_n,
-                                    col_offset=0,
-                                    raw_call_expr=cid,
-                                    resolution_status=CallResolutionStatus.INTERNAL_RESOLVED,
-                                )
-                            )
+                                    line_number=start_l,
+                                    col_offset=None,
+                                    raw_call_expr=f"<inferred-caller:{cid}>",
+                                    resolution_status=CallResolutionStatus.RESOLVED_INTERNAL,
+                                    resolution_reason="Synthetic caller fallback (unrecorded call-site line)",
+                                ),
+                                False,  # Synthetic fallback: not directly verified
+                            ))
                 except Exception:
                     pass
 
-            for edge in call_edges:
+            for edge, is_direct_call in call_edges:
                 if len(nodes_by_id) >= max_nodes:
                     break
 
@@ -268,7 +273,7 @@ class CausalTracer:
                 caller_node_info = cg.nodes.get(caller_sym_id)
 
                 file_path = edge.source_file or (caller_node_info.file_path if caller_node_info else "unknown.py")
-                start_l = edge.line_number or (caller_node_info.start_line if caller_node_info else 1)
+                start_l = caller_node_info.start_line if caller_node_info else edge.line_number
                 end_l = caller_node_info.end_line if caller_node_info else start_l
 
                 # Determine role: if caller was changed, candidate root cause
@@ -278,7 +283,10 @@ class CausalTracer:
                     is_changed = any(norm_caller_file == cf.replace("\\", "/").strip().lstrip("/") for cf in changed_files)
 
                 role = CausalRole.ROOT_CAUSE if is_changed else CausalRole.PROPAGATOR
-                desc = f"Caller '{caller_sym_id}' invokes '{curr_symbol}' at line {edge.line_number}"
+                if is_direct_call:
+                    desc = f"Caller '{caller_sym_id}' invokes '{curr_symbol}' at line {edge.line_number}"
+                else:
+                    desc = f"Caller '{caller_sym_id}' is recorded caller of '{curr_symbol}' (inferred call site)"
                 if is_changed:
                     desc += " (modified in recent changeset)"
 
@@ -299,15 +307,26 @@ class CausalTracer:
                 if is_changed:
                     causal_rel = CausalRelationship.PASSES_INVALID_DATA
 
+                if is_direct_call:
+                    explanation = f"Call invocation: {caller_sym_id} calls {curr_symbol} ({edge.raw_call_expr or 'call'})"
+                    conf = FindingConfidence.HIGH
+                    score = 0.90 if not is_changed else 0.85
+                    ev_refs = caller_node.supporting_evidence_ids
+                else:
+                    explanation = f"Inferred call invocation: {caller_sym_id} calls {curr_symbol} (synthetic caller fallback; no exact call-site offset recorded)"
+                    conf = FindingConfidence.MEDIUM
+                    score = 0.65
+                    ev_refs = []
+
                 cedge = self.create_edge(
                     source_node=caller_node,
                     target_node=curr_node,
                     relationship=causal_rel,
-                    explanation=f"Call invocation: {caller_sym_id} calls {curr_symbol} ({edge.raw_call_expr or 'call'})",
-                    is_directly_verified=True,
-                    confidence=FindingConfidence.HIGH,
-                    confidence_score=0.90 if not is_changed else 0.85,
-                    evidence_references=caller_node.supporting_evidence_ids,
+                    explanation=explanation,
+                    is_directly_verified=is_direct_call,
+                    confidence=conf,
+                    confidence_score=score,
+                    evidence_references=ev_refs,
                 )
                 edges_by_id[cedge.edge_id] = cedge
 
@@ -331,7 +350,7 @@ class CausalTracer:
                                 end_line=10,
                                 role=CausalRole.CONTRIBUTING_FACTOR,
                                 node_type=CausalNodeType.MODULE,
-                                description=f"Module '{dep}' depends on '{mod_name}'",
+                                description=f"Module '{dep}' depends on '{mod_name}' (structural import)",
                             )
                             if dep_node.node_id not in nodes_by_id:
                                 nodes_by_id[dep_node.node_id] = dep_node
@@ -340,10 +359,11 @@ class CausalTracer:
                                 source_node=dep_node,
                                 target_node=curr_node,
                                 relationship=CausalRelationship.DEPENDS_ON,
-                                explanation=f"Module dependency: {dep} imports {mod_name}",
-                                is_directly_verified=True,
+                                explanation=f"Module dependency (structural import): {dep} imports {mod_name}",
+                                is_directly_verified=False,
                                 confidence=FindingConfidence.MEDIUM,
-                                confidence_score=0.75,
+                                confidence_score=0.70,
+                                evidence_references=dep_node.supporting_evidence_ids,
                             )
                             edges_by_id[cedge.edge_id] = cedge
                 except Exception:
@@ -383,9 +403,11 @@ class CausalTracer:
             if depth >= depth_limit:
                 continue
 
-            callee_edges: List[CallEdge] = []
+            callee_edges: List[Tuple[CallEdge, bool]] = []
             try:
-                callee_edges = cg.get_call_edges(source_id=curr_symbol)
+                exact_callees = cg.get_call_edges(source_id=curr_symbol)
+                for ee in exact_callees:
+                    callee_edges.append((ee, True))
             except Exception:
                 pass
 
@@ -395,26 +417,29 @@ class CausalTracer:
                     for cid in callee_ids:
                         found_edges = cg.get_call_edges(source_id=curr_symbol, target_id=cid)
                         if found_edges:
-                            callee_edges.extend(found_edges)
+                            for fe in found_edges:
+                                callee_edges.append((fe, True))
                         else:
                             node = cg.nodes.get(cid)
                             file_p = node.file_path if node else "unknown.py"
-                            line_n = node.start_line if node else 1
-                            callee_edges.append(
+                            start_l = node.start_line if node else 1
+                            callee_edges.append((
                                 CallEdge(
                                     source_id=curr_symbol,
                                     target_id=cid,
                                     source_file=file_p,
-                                    line_number=line_n,
-                                    col_offset=0,
-                                    raw_call_expr=cid,
-                                    resolution_status=CallResolutionStatus.INTERNAL_RESOLVED,
-                                )
-                            )
+                                    line_number=start_l,
+                                    col_offset=None,
+                                    raw_call_expr=f"<inferred-callee:{cid}>",
+                                    resolution_status=CallResolutionStatus.RESOLVED_INTERNAL,
+                                    resolution_reason="Synthetic callee fallback (unrecorded call-site line)",
+                                ),
+                                False,  # Synthetic fallback: not directly verified
+                            ))
                 except Exception:
                     pass
 
-            for edge in callee_edges:
+            for edge, is_direct_call in callee_edges:
                 if len(nodes_by_id) >= max_nodes:
                     break
 
@@ -437,14 +462,23 @@ class CausalTracer:
                 if callee_node.node_id not in nodes_by_id:
                     nodes_by_id[callee_node.node_id] = callee_node
 
+                if is_direct_call:
+                    explanation = f"Downstream call: {curr_symbol} calls {callee_sym_id}"
+                    conf = FindingConfidence.HIGH
+                    score = 0.90
+                else:
+                    explanation = f"Inferred downstream call: {curr_symbol} calls {callee_sym_id} (synthetic callee fallback; no exact call-site offset recorded)"
+                    conf = FindingConfidence.MEDIUM
+                    score = 0.65
+
                 cedge = self.create_edge(
                     source_node=curr_node,
                     target_node=callee_node,
                     relationship=CausalRelationship.CALLS,
-                    explanation=f"Downstream call: {curr_symbol} calls {callee_sym_id}",
-                    is_directly_verified=True,
-                    confidence=FindingConfidence.HIGH,
-                    confidence_score=0.90,
+                    explanation=explanation,
+                    is_directly_verified=is_direct_call,
+                    confidence=conf,
+                    confidence_score=score,
                 )
                 edges_by_id[cedge.edge_id] = cedge
 

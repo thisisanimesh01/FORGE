@@ -481,6 +481,121 @@ class TestRootCauseStatusInvariants:
         chains = tracer.synthesize_chains([r1, r2], symptom, [symptom, r1, r2], [e1, e2])
         assert len(chains) == 2
 
+    def test_module_dependency_fallback_chain_cannot_be_proven(self, repo_fixture: Path):
+        """A causal chain relying on module import dependencies cannot receive PROVEN status."""
+        tracer = CausalTracer(workspace_path=repo_fixture)
+        # validator.py has no callers in repo_fixture, but depends on pkg_a
+        symptom = tracer.create_node(
+            file_path="pkg_a/validator.py",
+            start_line=3,
+            end_line=10,
+            role=CausalRole.SYMPTOM,
+            symbol_id="pkg_a.validator.validate_payload",
+        )
+        nodes, edges = tracer.trace_backward(symptom, max_depth=2)
+        dep_edges = [e for e in edges if e.relationship == CausalRelationship.DEPENDS_ON]
+        if dep_edges:
+            # All module dependency fallback edges must NOT be directly verified
+            for de in dep_edges:
+                assert de.is_directly_verified is False
+
+        # Run full engine analysis; must never be PROVEN
+        engine = RootCauseAnalysisEngine(workspace_path=repo_fixture, run_id="run_dep_test")
+        report = engine.analyze(
+            file_path="pkg_a/validator.py",
+            line_number=3,
+            failing_symbol="pkg_a.validator.validate_payload",
+            error_message="ValueError: unhandled payload",
+        )
+        assert report.status != CausalStatus.PROVEN
+        assert report.status in (CausalStatus.PLAUSIBLE, CausalStatus.INSUFFICIENT_EVIDENCE)
+
+    def test_synthetic_call_edge_cannot_be_proven(self, repo_fixture: Path):
+        """Synthetic caller edges with unrecorded call sites cannot establish a PROVEN chain."""
+        tracer = CausalTracer(workspace_path=repo_fixture)
+        cg = tracer.get_call_graph()
+
+        symptom = tracer.create_node("pkg_c/calculator.py", 4, 7, CausalRole.SYMPTOM, symbol_id="pkg_c.calculator.compute_metric")
+
+        # Mock CallGraph.get_call_edges to return empty, forcing synthetic fallback from get_direct_callers
+        from forge.repository.call_graph import CallGraph
+        with patch.object(CallGraph, "get_call_edges", return_value=[]):
+            nodes, edges = tracer.trace_backward(symptom, max_depth=2)
+
+        # Synthetic edges must have is_directly_verified = False
+        assert len(edges) >= 1
+        for edge in edges:
+            assert edge.is_directly_verified is False
+            assert "synthetic" in edge.causal_explanation.lower() or "inferred" in edge.causal_explanation.lower()
+
+        # Chains synthesized with this edge must have is_fully_verified = False
+        candidate_roots = [n for n in nodes if n.node_id != symptom.node_id]
+        chains = tracer.synthesize_chains(candidate_roots, symptom, nodes, edges)
+        assert len(chains) >= 1
+        for chain in chains:
+            assert chain.is_fully_verified is False
+
+    def test_mixed_chain_with_inferred_and_verified_edges_cannot_be_proven(self, repo_fixture: Path):
+        """A chain containing even one unverified link must drop to PLAUSIBLE, not PROVEN."""
+        tracer = CausalTracer(workspace_path=repo_fixture)
+        n1 = tracer.create_node("pkg_a/validator.py", 3, 10, CausalRole.ROOT_CAUSE)
+        n2 = tracer.create_node("pkg_b/processor.py", 4, 8, CausalRole.PROPAGATOR)
+        n3 = tracer.create_node("pkg_c/calculator.py", 4, 7, CausalRole.SYMPTOM)
+
+        # e1 is directly verified, but e2 is inferred
+        e1 = tracer.create_edge(n1, n2, CausalRelationship.CALLS, "Direct call", is_directly_verified=True)
+        e2 = tracer.create_edge(n2, n3, CausalRelationship.PASSES_INVALID_DATA, "Inferred invalid param", is_directly_verified=False)
+
+        chains = tracer.synthesize_chains([n1], n3, [n1, n2, n3], [e1, e2])
+        assert len(chains) == 1
+        assert chains[0].is_fully_verified is False
+        assert chains[0].confidence != FindingConfidence.HIGH
+
+    def test_fully_verified_chain_can_be_proven(self, repo_fixture: Path):
+        """A chain where every link is directly verified against code and call graph receives PROVEN status."""
+        tracer = CausalTracer(workspace_path=repo_fixture)
+        root = tracer.create_node("pkg_b/processor.py", 4, 8, CausalRole.ROOT_CAUSE, symbol_id="pkg_b.processor.process_order")
+        symptom = tracer.create_node("pkg_c/calculator.py", 4, 7, CausalRole.SYMPTOM, symbol_id="pkg_c.calculator.compute_metric")
+
+        e_verified = tracer.create_edge(
+            root, symptom, CausalRelationship.CALLS, "Exact call at line 6", is_directly_verified=True, confidence_score=0.90
+        )
+        chains = tracer.synthesize_chains([root], symptom, [root, symptom], [e_verified])
+        assert len(chains) == 1
+        assert chains[0].is_fully_verified is True
+
+        engine = RootCauseAnalysisEngine(workspace_path=repo_fixture, run_id="run_fully_verified")
+        report = engine.analyze(
+            file_path="pkg_c/calculator.py",
+            line_number=4,
+            failing_symbol="pkg_c.calculator.compute_metric",
+            error_message="ZeroDivisionError",
+            changed_files=["pkg_b/processor.py"],
+        )
+        assert report.status == CausalStatus.PROVEN
+        assert report.confidence == FindingConfidence.HIGH
+        assert report.confidence_score >= 0.85
+
+    def test_inferred_relationships_retained_with_provenance(self, repo_fixture: Path):
+        """Inferred relationships remain fully visible in causal reports with accurate provenance."""
+        tracer = CausalTracer(workspace_path=repo_fixture)
+        symptom = tracer.create_node("pkg_c/calculator.py", 4, 7, CausalRole.SYMPTOM)
+        inferred_root = tracer.create_node("pkg_a/handler.py", 3, 8, CausalRole.ROOT_CAUSE)
+        inferred_edge = tracer.create_edge(
+            inferred_root,
+            symptom,
+            CausalRelationship.TRIGGERS_FAILURE,
+            "Inferred state trigger",
+            is_directly_verified=False,
+            confidence_score=0.60,
+        )
+
+        chains = tracer.synthesize_chains([inferred_root], symptom, [inferred_root, symptom], [inferred_edge])
+        assert len(chains) == 1
+        assert chains[0].is_fully_verified is False
+        assert chains[0].node_ids == [inferred_root.node_id, symptom.node_id]
+        assert chains[0].edge_ids == [inferred_edge.edge_id]
+
 
 # ---------------------------------------------------------------------------
 # 6. Local Ollama & Fail-Closed Tests

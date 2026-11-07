@@ -66,7 +66,11 @@ app/forge/causality/
 - **Backward Tracing**: Starting from the failure symptom, follows reverse call edges via `CallGraph.get_call_edges(target_id=...)` and module dependents via `ModuleDependencyGraph.get_dependents()`. Resolves symbols across qualified names and function identifiers.
 - **Forward Propagation**: Traces downstream effects from suspected root causes through callees and dependents to model failure cascade.
 - **Safety Boundaries**: Enforces maximum traversal depth (`max_depth <= 10`) and node count bounds (`max_nodes <= 200`), guaranteeing cycle safety and recursion termination via visited sets.
-- **Certainty Classification**: Explicit call edges verified against current disk content receive `is_directly_verified = True` (`HIGH` confidence, 0.90); inferred data-passing or state edges receive `is_directly_verified = False` (`MEDIUM` confidence, 0.65).
+- **Certainty Classification & Evidence Distinction**:
+  - **Verified Call Invocations**: Explicit call sites verified against current disk content receive `is_directly_verified = True` (`HIGH` confidence, 0.90) and can support `PROVEN` chains.
+  - **Structural Module Dependencies**: Module import dependencies (`DEPENDS_ON`) prove structural relationships between packages but do not prove causal defect transmission. They are preserved for context and exploration but marked `is_directly_verified = False` (`MEDIUM` confidence, 0.70), ensuring a chain containing module dependency edges can never receive `PROVEN` status.
+  - **Synthetic Caller Fallbacks**: When call sites are missing from recorded call graph edges but caller IDs exist, fallback relationships are preserved for exploration with `is_directly_verified = False` (`MEDIUM` confidence, 0.65) without claiming exact call-site line numbers.
+  - **Inferred Data/State Edges**: Data-passing or state invalidation relationships receive `is_directly_verified = False` (`MEDIUM` confidence, 0.65).
 
 ### 2.4 Root-Cause Analysis Engine (`engine.py`)
 - Ingests verified M1 `DiagnosisResult`, structured `TestFailureReport`, or direct symbol/location inputs.
@@ -105,23 +109,28 @@ Dedicated test suite in `tests/unit/test_phase12_m2_causality.py` (22 unit tests
   - `test_explicit_guard_refutes_missing_validation_claim`: Refutation of false missing-guard claim.
   - `test_comments_and_docstrings_do_not_fool_ast`: Verification that comments do not trigger false contradictions.
   - `test_exception_handler_refutes_unhandled_error_claim`: Enclosing try/except refutation.
-- **Root Cause Status Invariants**:
+- **Root Cause Status Invariants & Refinements**:
   - `test_single_verified_chain_status_proven`: `PROVEN` status on fully verified call chain.
   - `test_missing_symptom_yields_insufficient_evidence`: `INSUFFICIENT_EVIDENCE` on ungrounded path.
   - `test_stale_evidence_blocks_proven_status`: Stale evidence prevents `PROVEN` status.
   - `test_multiple_plausible_causes_not_forced_to_single`: Multi-chain preservation without forced single cause.
+  - `test_module_dependency_fallback_chain_cannot_be_proven`: Structural module import dependencies cannot establish `PROVEN` chains.
+  - `test_synthetic_call_edge_cannot_be_proven`: Synthetic caller edges with unrecorded call sites drop chains to `PLAUSIBLE`.
+  - `test_mixed_chain_with_inferred_and_verified_edges_cannot_be_proven`: Chains containing any unverified link drop to `PLAUSIBLE`.
+  - `test_fully_verified_chain_can_be_proven`: Chains with fully verified direct source evidence achieve `PROVEN` status.
+  - `test_inferred_relationships_retained_with_provenance`: Inferred relationships remain in causal reports with accurate provenance.
 - **Local Ollama Fail-Closed**:
   - `test_ollama_unavailable_graceful_fallback`: Safe fallback when local Ollama is offline.
   - `test_ollama_malformed_json_fallback`: Safe fallback on malformed model output.
 - **ToolRegistry Integration**:
-  - `test_all_m2_tools_registered`: All 5 M2 causality tools present in ToolRegistry (24 total tools).
+  - `test_all_m2_tools_registered`: All 5 M2 causality tools present in ToolRegistry (24 total tool definitions).
   - `test_execute_trace_causal_chain_tool`: Execution via `ToolRegistry.execute_tool()`.
   - `test_execute_inspect_contributing_factors_tool`: Contributing factors tool execution.
   - `test_execute_compare_hypotheses_tool`: Hypotheses comparison tool execution.
 
 ### Test Results
-- **M2 Unit Test Suite**: 22/22 passed in 0.91s.
-- **Full Project Regression Suite**: 1,794 passed, 7 skipped in 213.86s (0:03:33). Zero failures, zero regressions across all 12 phases.
+- **M2 Unit Test Suite**: 27/27 passed in 1.03s.
+- **Full Project Regression Suite**: 1,799 passed, 7 skipped. Zero failures, zero regressions across all 12 phases.
 
 ---
 
