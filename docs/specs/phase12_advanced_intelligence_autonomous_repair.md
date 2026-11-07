@@ -26,7 +26,16 @@ Phase 12 builds upon FORGE's foundational repository understanding (Phase 11) to
   - AST-based semantic contradiction and guard inspection for conditional guards and exception handlers.
   - Strict certainty semantics: PROVEN, PLAUSIBLE, MULTIPLE_PLAUSIBLE_ROOT_CAUSES, INSUFFICIENT_EVIDENCE, UNRESOLVED.
   - Dedicated milestone documentation in [`docs/milestones/phase-12-m2-root-cause-analysis.md`](../milestones/phase-12-m2-root-cause-analysis.md).
-- **Milestone 3**: Repair Planning Engine `[PENDING]`
+- **Milestone 3**: Repair Planning Engine `[COMPLETED]`
+  - Strict Pydantic contracts for `RepairPlan`, `RepairStrategy`, `RepairRiskAssessment`, `VerificationPlan`, `RollbackPlan`.
+  - Deterministic strategy generation prioritizing minimal local corrections over architectural refactoring.
+  - Multi-candidate strategy preservation and ranking across complexity, invasiveness, and reversibility.
+  - Transparent risk analysis assessing file count, dependency reach, public API compatibility, security boundaries, and data integrity.
+  - Verification test identification distinguishing on-disk test suites from proposed new tests.
+  - Explicit rollback procedures defining reverse steps, triggers, and acknowledged limitations.
+  - Hardcoded safety invariants in code: `approval_required = True`, `execution_permitted = False`.
+  - ToolRegistry integration exposing 6 bounded, read-only tools.
+  - Dedicated milestone documentation in [`docs/milestones/phase-12-m3-repair-planning.md`](../milestones/phase-12-m3-repair-planning.md).
 - **Milestone 4**: Controlled Autonomous Repair `[PENDING]`
 - **Milestone 5**: Repair Verification `[PENDING]`
 - **Milestone 6**: Repair Quality & Reliability `[PENDING]`
@@ -130,3 +139,40 @@ Coordinates the entire pipeline:
 
 ### 5. Causality Tools & ToolRegistry Integration (`forge.causality.tools`)
 - Exposes 5 structured read-only tools to `ToolRegistry`: `analyze_root_cause`, `trace_causal_chain`, `inspect_contributing_factors`, `compare_root_cause_hypotheses`, `explain_failure_propagation`.
+
+---
+
+## Milestone 3 Architecture: Repair Planning Engine
+
+### 1. Data Contracts & Safety Invariants (`forge.repair_planning.schemas`)
+- **Strict Pydantic Models**: Governed by `ConfigDict(extra="forbid")` and explicit character budgets.
+- **Mandatory Safety Invariants**:
+  - `approval_required` is hardcoded to `True` and enforced via `model_validator`.
+  - `execution_permitted` is hardcoded to `False` and enforced via `model_validator`.
+- **Certainty Gating**:
+  - `PROVEN` root causes support `ACTIONABLE` repair plans.
+  - `PLAUSIBLE` causes yield `CONDITIONAL` plans with explicit limitations.
+  - `MULTIPLE_PLAUSIBLE_ROOT_CAUSES` preserves separate candidate repair plans.
+  - `INSUFFICIENT_EVIDENCE` and `UNRESOLVED` causes strictly produce non-actionable plans.
+
+### 2. Evidence Collection & Freshness Validation (`forge.repair_planning.evidence`)
+- Gathers grounded evidence from `RootCauseReport`, `DiagnosisResult`, and `ForgeStore`.
+- Validates path containment via `assert_contained_path` and rejects protected files via `is_protected_path`.
+- Audits line ranges against disk files and compares content SHA-256 digests to detect stale evidence.
+
+### 3. Candidate Strategy Generation (`forge.repair_planning.strategies`)
+- Maps defect taxonomy and causal relationships into structured `RepairApproach` categories (`LOCAL_LOGIC_CORRECTION`, `INPUT_VALIDATION`, `ERROR_HANDLING`, `RESOURCE_MANAGEMENT`, `SECURITY_HARDENING`, etc.).
+- Preserves alternative approaches while disfavoring broad rewrites to enforce the minimality principle.
+- Scores candidates deterministically across complexity, invasiveness, and reversibility.
+
+### 4. Deterministic Risk Assessment (`forge.repair_planning.risk`)
+- Evaluates scope (file and symbol counts) and dependency reach (call graph incoming caller count).
+- Audits public API stability, security boundaries, data integrity impacts, and automated test coverage.
+- Assigns explainable risk ratings (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`) and likelihood scores in $[0.0, 1.0]$.
+
+### 5. Verification & Rollback Planning (`forge.repair_planning.rollback` & `planner`)
+- Identifies on-disk test files for target modules; explicitly labels proposed new tests with `[PROPOSED]`.
+- Formulates exact reverse code modifications, dependency pins, cache invalidations, and rollback triggers.
+
+### 6. Repair Planning Tools (`forge.repair_planning.tools`)
+- Exposes 6 typed, read-only tools to `ToolRegistry`: `create_repair_plan`, `compare_repair_strategies`, `assess_repair_risk`, `explain_repair_plan`, `validate_repair_plan`, `generate_verification_plan`.
