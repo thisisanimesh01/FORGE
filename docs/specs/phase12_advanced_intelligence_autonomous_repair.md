@@ -43,8 +43,15 @@ Phase 12 builds upon FORGE's foundational repository understanding (Phase 11) to
   - Workspace integrity verification and automatic rollback restoration to baseline tree digest.
   - Immutable audit event trail with automatic secret redaction.
   - ToolRegistry integration exposing 8 structured, typed repair execution tools.
-  - Dedicated milestone documentation in [`docs/milestones/phase-12-m4-controlled-repair.md`](../milestones/phase-12-m4-controlled-repair.md).
-- **Milestone 5**: Repair Verification `[PENDING]`
+- **Milestone 5**: Repair Verification Engine `[COMPLETED]`
+  - Bounded test discovery mapping modified source files to targeted, regression, and static check vectors.
+  - Fail-closed container sandbox execution with strict binary allowlisting and zero host fallback.
+  - Baseline comparison against immutable pre-repair snapshots distinguishing regressions from pre-existing defects.
+  - Structured test result parser detecting collection errors, abnormal aborts, and exit code contradictions.
+  - Deterministic regression engine categorizing outcomes into NO_REGRESSION_OBSERVED, REGRESSION_DETECTED, PRE_EXISTING_FAILURE, and IMPROVED.
+  - Immutable VerificationResult contract enforcing permanent `requires_human_review = True`.
+  - ToolRegistry integration exposing 9 structured, typed repair verification tools.
+  - Dedicated milestone documentation in [`docs/milestones/phase-12-m5-repair-verification.md`](../milestones/phase-12-m5-repair-verification.md).
 - **Milestone 6**: Repair Quality & Reliability `[PENDING]`
 
 ---
@@ -244,3 +251,36 @@ Coordinates the entire pipeline:
 
 ### 7. Repair Execution Tools (`forge.repair_execution.tools`)
 - Exposes 8 structured, typed tools to `ToolRegistry`: `prepare_repair_workspace`, `validate_repair_approval`, `generate_repair_patch`, `validate_repair_patch`, `apply_approved_repair`, `inspect_repair_execution`, `rollback_repair_workspace`, `get_repair_execution_history`.
+
+---
+
+## Milestone 5 Architecture: Repair Verification Engine
+
+### 1. Data Contracts & Invariants (`forge.repair_verification.schemas`)
+- **Strict Pydantic Contracts**: Governed by `ConfigDict(extra="forbid", validate_assignment=True, frozen=True)`.
+- **Mandatory Human Review Invariant**: `requires_human_review = True` is hardcoded and validated via field and model validators. Revalidation is enforced across `model_copy(update=...)`.
+- **Integrity Validation**: Rejects `PASSED` verification status whenever required checks fail, regressions are detected, or gate decision is not `PASSED`.
+- **Policy Boundaries**: Enforces `network_disabled = True`, execution binary allowlisting (`pytest`, `python`, `python3`, `flake8`, `mypy`), and bounded memory/CPU/PIDs.
+
+### 2. Test Discovery & Selection (`forge.repair_verification.discovery`, `test_selection`)
+- Bounded discovery asserting `assert_contained_path` and rejecting escaping symlinks.
+- Categorizes tests into `TARGETED` (directly verifying modified files), `REGRESSION` (verifying dependent/caller modules), `STATIC_ANALYSIS` (`py_compile`), and `TYPE_CHECK` (`mypy`).
+- Flags `is_partial_verification = True` when unselected tests exist in the repository.
+
+### 3. Baseline Comparison & Deterministic Regression (`forge.repair_verification.baseline`, `regression`)
+- Audits baseline snapshot tree digest against expected digest before execution.
+- Ephemeral execution workspace allocation for baseline check execution with guaranteed cleanup.
+- Deterministic outcome classification into `NO_REGRESSION_OBSERVED`, `REGRESSION_DETECTED`, `PRE_EXISTING_FAILURE`, and `IMPROVED`.
+
+### 4. Container Sandbox Execution (`forge.repair_verification.sandbox`)
+- Strict fail-closed execution: if container sandbox is offline or socket permissions denied, returns `SANDBOX_UNAVAILABLE` without host fallback.
+- Rejects arbitrary shell strings, metacharacters, and disallowed executable binaries.
+- Strips host environment variables, passing only safe minimal variables (`PYTHONPATH`, `PYTEST_DISABLE_PLUGIN_AUTOLOAD`).
+
+### 5. Multi-Stage Integrity & Gatekeeper (`forge.repair_verification.integrity`, `gates`)
+- Verifies original repository immutability before and after verification.
+- Detects unauthorized workspace mutations, escaping symlinks, and special device files (FIFOs, sockets).
+- Transition gates require applied execution status, intact baseline, completed required checks, and zero regressions.
+
+### 6. Verification Tools (`forge.repair_verification.tools`)
+- Exposes 9 structured, typed tools to `ToolRegistry`: `create_repair_verification_plan`, `discover_repair_tests`, `inspect_verification_environment`, `run_repair_verification`, `run_baseline_verification`, `compare_repair_verification`, `inspect_verification_evidence`, `validate_verification_integrity`, `get_repair_verification_summary`.
