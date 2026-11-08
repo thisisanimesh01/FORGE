@@ -68,6 +68,17 @@ class ControlledRepairExecutor:
         self.integrity_checker = WorkspaceIntegrityChecker()
 
         self._executions: Dict[str, RepairExecutionResult] = {}
+        self._consumed_approvals: Dict[str, str] = {}
+        self._revoked_approvals: Dict[str, str] = {}
+
+    def revoke_approval(self, approval_id: str, reason: str = "revoked by human operator") -> bool:
+        """Revoke a human approval, preventing any future execution."""
+        self._revoked_approvals[approval_id] = reason
+        return True
+
+    def is_approval_consumed(self, approval_id: str) -> bool:
+        """Check if an approval has already been used in an execution."""
+        return approval_id in self._consumed_approvals
 
     def _format_limitations(
         self,
@@ -106,7 +117,12 @@ class ControlledRepairExecutor:
         # -------------------------------------------------------------------
         # Step 1: Authorization & Approval Verification
         # -------------------------------------------------------------------
-        approval_check = self.approval_validator.validate_approval(approval, plan)
+        approval_check = self.approval_validator.validate_approval(
+            approval=approval,
+            plan=plan,
+            revoked_approvals=set(self._revoked_approvals.keys()),
+            consumed_approvals=self._consumed_approvals,
+        )
         if not approval_check.is_valid:
             self.event_recorder.record_event(
                 execution_id=execution_id,
@@ -118,10 +134,12 @@ class ControlledRepairExecutor:
             failure_class = FailureClassification.UNAUTHORIZED_EXECUTION
             if approval.approval_status == ApprovalStatus.EXPIRED or approval.is_expired():
                 failure_class = FailureClassification.APPROVAL_EXPIRED
-            elif approval.approval_status == ApprovalStatus.REVOKED:
+            elif approval.approval_status == ApprovalStatus.REVOKED or any("has been revoked" in err for err in approval_check.errors):
                 failure_class = FailureClassification.APPROVAL_REVOKED
             elif any("outside approved" in err for err in approval_check.errors):
                 failure_class = FailureClassification.SCOPE_BREACH
+            elif any("already been consumed" in err for err in approval_check.errors):
+                failure_class = FailureClassification.UNAUTHORIZED_EXECUTION
 
             result = RepairExecutionResult(
                 execution_id=execution_id,
@@ -138,6 +156,9 @@ class ControlledRepairExecutor:
             )
             self._executions[execution_id] = result
             return result
+
+        # Record consumed approval to prevent single-approval replay
+        self._consumed_approvals[approval.approval_id] = execution_id
 
         self.event_recorder.record_event(
             execution_id=execution_id,

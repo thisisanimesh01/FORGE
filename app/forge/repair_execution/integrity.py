@@ -50,7 +50,11 @@ class WorkspaceIntegrityChecker:
             WorkspaceIntegrityReport with detailed findings.
         """
         ws_root = Path(workspace.isolated_workspace_path).resolve()
-        original_repo = Path(workspace.original_repository_reference).resolve()
+        baseline_source = (
+            Path(workspace.baseline_snapshot_path).resolve()
+            if workspace.baseline_snapshot_path and Path(workspace.baseline_snapshot_path).is_dir()
+            else Path(workspace.original_repository_reference).resolve()
+        )
         approved = set(
             p.replace("\\", "/").strip()
             for p in (allowed_paths if allowed_paths is not None else workspace.allowed_paths)
@@ -64,7 +68,7 @@ class WorkspaceIntegrityChecker:
         violations: List[str] = []
 
         # Scan files in isolated workspace
-        for root, dirs, files in os.walk(ws_root):
+        for root, dirs, files in os.walk(ws_root, followlinks=False):
             dirs[:] = [d for d in dirs if d != ".git" and not is_protected_name(d)]
 
             for file_name in files:
@@ -82,8 +86,8 @@ class WorkspaceIntegrityChecker:
                     unexpected_files.append(rel_path)
                     continue
 
-                orig_file = original_repo / rel_path
-                if not orig_file.exists():
+                base_file = baseline_source / rel_path
+                if not base_file.exists():
                     # Newly created file
                     if rel_path in approved:
                         modified_files.append(rel_path)
@@ -91,9 +95,9 @@ class WorkspaceIntegrityChecker:
                         unexpected_files.append(rel_path)
                         violations.append(f"Unauthorized new file created: '{rel_path}'")
                 else:
-                    # Compare content with original
+                    # Compare content with baseline snapshot
                     try:
-                        if file_path.read_bytes() != orig_file.read_bytes():
+                        if file_path.read_bytes() != base_file.read_bytes():
                             if rel_path in approved:
                                 modified_files.append(rel_path)
                             else:
@@ -102,19 +106,19 @@ class WorkspaceIntegrityChecker:
                     except Exception as e:
                         violations.append(f"Failed to read file '{rel_path}': {e}")
 
-        # Check for deleted files from original
-        if original_repo.exists() and original_repo.is_dir():
-            for root, dirs, files in os.walk(original_repo):
+        # Check for deleted files from baseline
+        if baseline_source.exists() and baseline_source.is_dir():
+            for root, dirs, files in os.walk(baseline_source, followlinks=False):
                 dirs[:] = [d for d in dirs if d != ".git" and not is_protected_name(d)]
                 for file_name in files:
                     if is_protected_name(file_name):
                         continue
-                    orig_file = Path(root) / file_name
+                    base_file = Path(root) / file_name
                     try:
-                        rel_path = str(orig_file.relative_to(original_repo)).replace("\\", "/")
+                        rel_path = str(base_file.relative_to(baseline_source)).replace("\\", "/")
                     except ValueError:
                         continue
-                    if is_protected_path(rel_path, base_dir=original_repo):
+                    if is_protected_path(rel_path, base_dir=baseline_source):
                         continue
 
                     ws_file = ws_root / rel_path

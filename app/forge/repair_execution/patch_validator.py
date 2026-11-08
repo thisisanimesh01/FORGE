@@ -137,15 +137,89 @@ class RepairPatchValidator:
         allowed_set = {p.strip().replace("\\", "/") for p in target_allowed if p.strip()}
         lines = unified_diff.splitlines()
 
+        allowed_set = {p.strip().replace("\\", "/") for p in target_allowed if p.strip()}
+        lines = unified_diff.splitlines()
+
         i = 0
         current_file: Optional[str] = None
         has_at_least_one_hunk = False
+        seen_files: Set[str] = set()
+        file_hunks: Dict[str, List[Dict[str, int]]] = {}
+
+        # Hunk tracking state
+        in_hunk = False
+        current_hunk_header_line = 0
+        current_hunk_old_start = 0
+        current_hunk_old_len = 0
+        current_hunk_new_start = 0
+        current_hunk_new_len = 0
+        current_hunk_minus = 0
+        current_hunk_plus = 0
+        current_hunk_space = 0
+
+        def finalize_current_hunk():
+            nonlocal in_hunk, current_hunk_header_line
+            nonlocal current_hunk_old_start, current_hunk_old_len
+            nonlocal current_hunk_new_start, current_hunk_new_len
+            nonlocal current_hunk_minus, current_hunk_plus, current_hunk_space
+            if not in_hunk:
+                return
+
+            total_hunk_lines = current_hunk_minus + current_hunk_plus + current_hunk_space
+            if total_hunk_lines == 0:
+                errors.append(f"Empty hunk with zero modification lines at line {current_hunk_header_line}.")
+                in_hunk = False
+                return
+
+            actual_old = current_hunk_minus + current_hunk_space
+            actual_new = current_hunk_plus + current_hunk_space
+
+            if actual_old != current_hunk_old_len or actual_new != current_hunk_new_len:
+                errors.append(
+                    f"Hunk line count mismatch in '{current_file}' at line {current_hunk_header_line}: "
+                    f"header specified -{current_hunk_old_start},{current_hunk_old_len} +{current_hunk_new_start},{current_hunk_new_len}, "
+                    f"but found {actual_old} old lines and {actual_new} new lines."
+                )
+
+            # Check ordering and overlap within file
+            if current_file:
+                prev_hunks = file_hunks.get(current_file, [])
+                if prev_hunks:
+                    prev = prev_hunks[-1]
+                    if current_hunk_old_start < prev["old_start"]:
+                        errors.append(
+                            f"Reordered hunks detected in '{current_file}': hunk starting at line {current_hunk_old_start} "
+                            f"appears after hunk starting at line {prev['old_start']}."
+                        )
+                    elif prev["old_len"] > 0 and current_hunk_old_start < prev["old_start"] + prev["old_len"]:
+                        errors.append(
+                            f"Overlapping hunks detected in '{current_file}': hunk at line {current_hunk_old_start} "
+                            f"overlaps with preceding hunk ending at line {prev['old_start'] + prev['old_len'] - 1}."
+                        )
+
+                if current_file not in file_hunks:
+                    file_hunks[current_file] = []
+                file_hunks[current_file].append({
+                    "old_start": current_hunk_old_start,
+                    "old_len": current_hunk_old_len,
+                    "new_start": current_hunk_new_start,
+                    "new_len": current_hunk_new_len,
+                })
+
+            in_hunk = False
 
         while i < len(lines):
             line = lines[i]
 
+            # Reject forbidden git metadata lines
+            if line.startswith(("old mode ", "new mode ", "deleted file mode ", "new file mode ", "similarity index ", "rename from ", "rename to ", "copy from ", "copy to ")):
+                errors.append(f"Forbidden git metadata line detected at line {i+1}: '{line}'. Mode changes, renames, and copies are forbidden.")
+                i += 1
+                continue
+
             # Parse file headers: --- a/path and +++ b/path
             if line.startswith("--- "):
+                finalize_current_hunk()
                 if i + 1 >= len(lines) or not lines[i + 1].startswith("+++ "):
                     errors.append(f"Invalid header syntax: '---' without matching '+++' at line {i+1}.")
                     break
@@ -155,12 +229,20 @@ class RepairPatchValidator:
                 to_file = self._parse_file_path(to_line[4:].strip())
                 i += 2
 
+                # Reject renames / copies
+                if from_file is not None and to_file is not None and from_file != to_file:
+                    errors.append(f"File rename or copy detected from '{from_file}' to '{to_file}'. File renames are strictly forbidden.")
+
                 target_file = to_file or from_file
                 if not target_file:
                     errors.append(f"Could not parse valid target file path at diff line {i}.")
                     continue
 
                 norm_target = target_file.replace("\\", "/").strip()
+                if norm_target in seen_files:
+                    errors.append(f"Duplicate file entry in patch: '{norm_target}'. Multiple diff sections targeting the same file are forbidden.")
+                seen_files.add(norm_target)
+
                 if norm_target not in affected_files:
                     affected_files.append(norm_target)
                 current_file = norm_target
@@ -177,8 +259,14 @@ class RepairPatchValidator:
                     )
                 continue
 
+            if line.startswith("+++ "):
+                errors.append(f"Invalid header syntax: '+++' without preceding '---' at line {i+1}.")
+                i += 1
+                continue
+
             # Parse hunk header
             if line.startswith("@@"):
+                finalize_current_hunk()
                 match = HUNK_HEADER_PATTERN.match(line)
                 if not match:
                     errors.append(f"Malformed hunk header at line {i+1}: '{line}'.")
@@ -186,22 +274,43 @@ class RepairPatchValidator:
                     continue
 
                 has_at_least_one_hunk = True
+                in_hunk = True
+                current_hunk_header_line = i + 1
+                current_hunk_old_start = int(match.group(1))
+                current_hunk_old_len = int(match.group(2)) if match.group(2) is not None else 1
+                current_hunk_new_start = int(match.group(3))
+                current_hunk_new_len = int(match.group(4)) if match.group(4) is not None else 1
+                current_hunk_minus = 0
+                current_hunk_plus = 0
+                current_hunk_space = 0
                 i += 1
                 continue
 
             # Parse hunk lines
             if line.startswith("+") and not line.startswith("+++"):
                 added_lines += 1
+                if in_hunk:
+                    current_hunk_plus += 1
             elif line.startswith("-") and not line.startswith("---"):
                 removed_lines += 1
-            elif line.startswith(" ") or line.startswith("\\"):
+                if in_hunk:
+                    current_hunk_minus += 1
+            elif line.startswith(" "):
+                if in_hunk:
+                    current_hunk_space += 1
+            elif line.startswith("\\"):
+                # "\ No newline at end of file"
                 pass
             elif line.strip() == "":
-                pass
+                # Empty line in diff (treated as empty context line)
+                if in_hunk:
+                    current_hunk_space += 1
             else:
                 errors.append(f"Unexpected line prefix at line {i+1}: '{line[:20]}'.")
 
             i += 1
+
+        finalize_current_hunk()
 
         if not has_at_least_one_hunk:
             errors.append("Patch contains no valid hunks ('@@ -... +... @@').")

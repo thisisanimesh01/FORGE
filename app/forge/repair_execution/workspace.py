@@ -13,6 +13,7 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
+import stat
 import tempfile
 from typing import Dict, List, Optional, Set, Tuple
 import uuid
@@ -23,6 +24,56 @@ from forge.repository.validation import assert_contained_path, SecurityError
 from forge.repair_execution.schemas import RepairWorkspace, WorkspaceStatus
 
 
+def _safe_copy_tree(src_dir: Path, dst_dir: Path) -> None:
+    """Safely copy directory tree, skipping special files, escaping symlinks, and protected paths."""
+    src_dir = src_dir.resolve()
+    dst_dir = dst_dir.resolve()
+    dst_dir.mkdir(parents=True, exist_ok=True)
+
+    for root, dirs, files in os.walk(src_dir, followlinks=False):
+        # Prune VCS and protected directories
+        dirs[:] = [d for d in dirs if d != ".git" and not is_protected_name(d)]
+        rel_root = Path(root).relative_to(src_dir)
+        target_dir = dst_dir / rel_root
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        for file_name in sorted(files):
+            if is_protected_name(file_name):
+                continue
+            src_file = Path(root) / file_name
+
+            # Check special files (FIFO, socket, character/block device)
+            try:
+                st = os.lstat(src_file)
+                if stat.S_ISFIFO(st.st_mode) or stat.S_ISSOCK(st.st_mode) or stat.S_ISCHR(st.st_mode) or stat.S_ISBLK(st.st_mode):
+                    continue
+            except OSError:
+                continue
+
+            # Check symlinks: reject if target escapes src_dir or points to protected path
+            if src_file.is_symlink():
+                try:
+                    resolved = src_file.resolve()
+                    if not resolved.is_relative_to(src_dir):
+                        continue
+                    rel_resolved = str(resolved.relative_to(src_dir)).replace("\\", "/")
+                    if is_protected_path(rel_resolved, base_dir=src_dir):
+                        continue
+                except (ValueError, RuntimeError, OSError):
+                    continue
+
+            rel_path = str((rel_root / file_name)).replace("\\", "/")
+            if is_protected_path(rel_path, base_dir=src_dir):
+                continue
+
+            dst_file = target_dir / file_name
+            try:
+                if src_file.is_file():
+                    shutil.copy2(src_file, dst_file, follow_symlinks=False)
+            except Exception:
+                continue
+
+
 def compute_tree_digest(workspace_path: Path, allowed_paths: Optional[List[str]] = None) -> str:
     """Compute a deterministic SHA-256 hash across workspace files and contents."""
     resolved_ws = workspace_path.resolve()
@@ -30,7 +81,7 @@ def compute_tree_digest(workspace_path: Path, allowed_paths: Optional[List[str]]
 
     file_hashes: List[Tuple[str, str]] = []
 
-    for root, dirs, files in os.walk(resolved_ws):
+    for root, dirs, files in os.walk(resolved_ws, followlinks=False):
         # Skip git internal metadata and hidden VCS dirs
         dirs[:] = [d for d in dirs if d != ".git" and not is_protected_name(d)]
 
@@ -39,6 +90,23 @@ def compute_tree_digest(workspace_path: Path, allowed_paths: Optional[List[str]]
                 continue
 
             file_path = Path(root) / file_name
+
+            # Skip special files and escaping symlinks
+            try:
+                st = os.lstat(file_path)
+                if stat.S_ISFIFO(st.st_mode) or stat.S_ISSOCK(st.st_mode) or stat.S_ISCHR(st.st_mode) or stat.S_ISBLK(st.st_mode):
+                    continue
+            except OSError:
+                continue
+
+            if file_path.is_symlink():
+                try:
+                    resolved = file_path.resolve()
+                    if not resolved.is_relative_to(resolved_ws):
+                        continue
+                except (ValueError, RuntimeError, OSError):
+                    continue
+
             try:
                 rel_path = str(file_path.relative_to(resolved_ws)).replace("\\", "/")
             except ValueError:
@@ -48,7 +116,6 @@ def compute_tree_digest(workspace_path: Path, allowed_paths: Optional[List[str]]
                 continue
 
             if allowed_paths is not None and rel_path not in allowed_paths:
-                # Still include in overall tree digest if evaluating full workspace
                 pass
 
             try:
@@ -98,32 +165,20 @@ class RepairWorkspaceManager:
         """
         workspace_id = f"rws_{uuid.uuid4().hex[:12]}"
         isolated_dir = self.base_workspaces_dir / workspace_id
-        isolated_dir.mkdir(parents=True, exist_ok=False)
+        snapshot_dir = self.base_workspaces_dir / f"{workspace_id}_baseline"
 
-        # Copy repository files into isolated directory excluding protected patterns and .git
-        def ignore_patterns(path: str, names: List[str]) -> Set[str]:
-            ignored = set()
-            for name in names:
-                if name == ".git" or is_protected_name(name):
-                    ignored.add(name)
-            return ignored
+        # Safely copy files into isolated directory and baseline snapshot
+        _safe_copy_tree(src_dir=self.original_repo_path, dst_dir=isolated_dir)
+        _safe_copy_tree(src_dir=self.original_repo_path, dst_dir=snapshot_dir)
 
-        shutil.copytree(
-            src=self.original_repo_path,
-            dst=isolated_dir,
-            dirs_exist_ok=True,
-            ignore=ignore_patterns,
-            symlinks=False,  # Resolve symlinks to avoid escapes
-        )
-
-        # Deep purge of any nested protected files that might have been copied
+        # Deep purge of any nested protected files
         purge_protected_paths_from_workspace(isolated_dir)
+        purge_protected_paths_from_workspace(snapshot_dir)
 
         # Baseline commit resolution
         resolved_commit = baseline_commit or "baseline_unversioned"
         git_dir = self.original_repo_path / ".git"
         if git_dir.exists() and git_dir.is_dir() and baseline_commit is None:
-            # Safely query HEAD commit
             head_file = git_dir / "HEAD"
             if head_file.exists():
                 try:
@@ -146,6 +201,7 @@ class RepairWorkspaceManager:
             isolated_workspace_path=str(isolated_dir),
             baseline_commit=resolved_commit,
             baseline_tree_digest=baseline_digest,
+            baseline_snapshot_path=str(snapshot_dir),
             allowed_paths=allowed_paths,
             workspace_status=WorkspaceStatus.READY,
         )
@@ -177,12 +233,22 @@ class RepairWorkspaceManager:
         if workspace.workspace_status == WorkspaceStatus.PRESERVED_FOR_INSPECTION and not force:
             return False
 
-        ws_dir = Path(workspace.isolated_workspace_path)
-        if ws_dir.exists() and ws_dir.is_dir():
-            try:
+        ws_dir = Path(workspace.isolated_workspace_path).resolve()
+        try:
+            assert_contained_path(ws_dir, self.base_workspaces_dir)
+            if ws_dir.exists() and ws_dir.is_dir():
                 shutil.rmtree(ws_dir)
+        except Exception:
+            return False
+
+        if workspace.baseline_snapshot_path:
+            snap_dir = Path(workspace.baseline_snapshot_path).resolve()
+            try:
+                assert_contained_path(snap_dir, self.base_workspaces_dir)
+                if snap_dir.exists() and snap_dir.is_dir():
+                    shutil.rmtree(snap_dir)
             except Exception:
-                return False
+                pass
 
         workspace.workspace_status = WorkspaceStatus.CLEANED_UP
         workspace.cleanup_status = "cleaned_up"

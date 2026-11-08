@@ -7,10 +7,12 @@ Provides:
 - Clear reporting of restored files and final rollback status.
 """
 
+import os
 from pathlib import Path
 import shutil
 from typing import Dict, List, Optional, Tuple
 
+from forge.repository.protection import is_protected_name
 from forge.repository.validation import assert_contained_path
 from forge.repair_execution.schemas import (
     RepairWorkspace,
@@ -48,17 +50,55 @@ class WorkspaceRollbackManager:
             return RollbackStatus.FAILED, [], ""
 
         restored_files: List[str] = []
+        snap_path = Path(workspace.baseline_snapshot_path).resolve() if workspace.baseline_snapshot_path else None
         original_repo = Path(workspace.original_repository_reference).resolve()
         files_to_restore = set(modified_files or workspace.allowed_paths or [])
 
         try:
-            # 1. Restore from in-memory backups if available
-            if backups:
+            # 1. Primary restoration: restore from immutable baseline snapshot captured at allocation
+            if snap_path and snap_path.exists() and snap_path.is_dir():
+                # 1a. Delete any files in workspace that did not exist in the baseline snapshot
+                for root, dirs, files in os.walk(ws_root, followlinks=False):
+                    dirs[:] = [d for d in dirs if d != ".git" and not is_protected_name(d)]
+                    for f in files:
+                        if is_protected_name(f):
+                            continue
+                        ws_f = Path(root) / f
+                        try:
+                            rel_p = str(ws_f.relative_to(ws_root)).replace("\\", "/")
+                        except ValueError:
+                            continue
+                        snap_f = snap_path / rel_p
+                        if not snap_f.exists():
+                            ws_f.unlink()
+                            restored_files.append(rel_p)
+
+                # 1b. Restore or replace any files from baseline snapshot whose content differs
+                for root, dirs, files in os.walk(snap_path, followlinks=False):
+                    dirs[:] = [d for d in dirs if d != ".git" and not is_protected_name(d)]
+                    for f in files:
+                        if is_protected_name(f):
+                            continue
+                        snap_f = Path(root) / f
+                        try:
+                            rel_p = str(snap_f.relative_to(snap_path)).replace("\\", "/")
+                        except ValueError:
+                            continue
+                        ws_f = ws_root / rel_p
+                        try:
+                            if not ws_f.exists() or ws_f.read_bytes() != snap_f.read_bytes():
+                                ws_f.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.copy2(snap_f, ws_f)
+                                restored_files.append(rel_p)
+                        except Exception:
+                            continue
+
+            # 2. Secondary fallback: restore from in-memory backups if available
+            elif backups:
                 for rel_path, original_bytes in backups.items():
                     norm_path = rel_path.replace("\\", "/").strip()
                     target_file = assert_contained_path(ws_root / norm_path, ws_root)
                     if original_bytes is None:
-                        # File was created during patch; delete it
                         if target_file.exists():
                             target_file.unlink()
                             restored_files.append(norm_path)
@@ -68,8 +108,8 @@ class WorkspaceRollbackManager:
                         restored_files.append(norm_path)
                     files_to_restore.discard(norm_path)
 
-            # 2. For any remaining files, synchronize from original read-only repo
-            if original_repo.exists() and original_repo.is_dir():
+            # 3. Tertiary fallback: synchronize from original read-only repo
+            elif original_repo.exists() and original_repo.is_dir():
                 for rel_path in files_to_restore:
                     norm_path = rel_path.replace("\\", "/").strip()
                     orig_file = original_repo / norm_path
@@ -80,19 +120,17 @@ class WorkspaceRollbackManager:
                         shutil.copy2(orig_file, ws_file)
                         restored_files.append(norm_path)
                     elif ws_file.exists():
-                        # File does not exist in original repo; remove it
                         ws_file.unlink()
                         restored_files.append(norm_path)
 
-            # 3. Compute post-rollback tree digest
+            # 4. Compute post-rollback tree digest
             post_digest = compute_tree_digest(ws_root)
 
-            # 4. Verify against baseline digest
+            # 5. Verify against baseline digest
             if post_digest == workspace.baseline_tree_digest:
                 workspace.workspace_status = WorkspaceStatus.READY
                 return RollbackStatus.SUCCEEDED, sorted(list(set(restored_files))), post_digest
             else:
-                # Digest mismatch: workspace could not be perfectly restored
                 workspace.workspace_status = WorkspaceStatus.PRESERVED_FOR_INSPECTION
                 return RollbackStatus.FAILED, sorted(list(set(restored_files))), post_digest
 

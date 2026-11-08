@@ -15,7 +15,7 @@ Enforces non-negotiable authorization rules before applying any repair:
 from datetime import datetime, timezone
 import hashlib
 import json
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from forge.repair_execution.schemas import ApprovalStatus, RepairApproval
 from forge.repair_planning.schemas import RepairPlan, RepairPlanStatus
@@ -37,6 +37,8 @@ def compute_plan_digest(plan: RepairPlan) -> str:
                     "start_line": chg.start_line,
                     "end_line": chg.end_line,
                     "change_type": chg.change_type,
+                    "description": chg.description,
+                    "rationale": chg.rationale,
                 }
                 for chg in plan.required_changes
             ],
@@ -71,6 +73,8 @@ class RepairApprovalValidator:
         plan: RepairPlan,
         requested_scope: Optional[List[str]] = None,
         current_time: Optional[datetime] = None,
+        revoked_approvals: Optional[Set[str]] = None,
+        consumed_approvals: Optional[Dict[str, str]] = None,
     ) -> ApprovalValidationResult:
         """Verify all mandatory authorization invariants.
 
@@ -79,6 +83,19 @@ class RepairApprovalValidator:
         """
         errors: List[str] = []
         now = current_time or datetime.now(timezone.utc)
+
+        # Invariant 0: Revocation & Consumption Replay Check
+        if revoked_approvals and approval.approval_id in revoked_approvals:
+            errors.append(
+                f"Authorization violation: approval '{approval.approval_id}' has been revoked."
+            )
+
+        if consumed_approvals and approval.approval_id in consumed_approvals:
+            prior_exec = consumed_approvals[approval.approval_id]
+            errors.append(
+                f"Authorization violation: approval '{approval.approval_id}' has already been consumed by execution '{prior_exec}'. "
+                "Approval reuse or replay is strictly forbidden."
+            )
 
         # Invariant 1: Approval status must be APPROVED
         if approval.approval_status != ApprovalStatus.APPROVED:

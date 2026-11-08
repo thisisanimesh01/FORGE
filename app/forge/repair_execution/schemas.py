@@ -188,6 +188,7 @@ class RepairWorkspace(BaseModel):
     isolated_workspace_path: str = Field(description="Absolute path to the isolated repair workspace.")
     baseline_commit: str = Field(description="Commit SHA recorded at workspace initialization.")
     baseline_tree_digest: str = Field(description="SHA-256 digest of clean baseline workspace tree.")
+    baseline_snapshot_path: Optional[str] = Field(default=None, description="Path to immutable baseline snapshot taken at workspace creation.")
     allowed_paths: List[str] = Field(default_factory=list, description="Approved file paths allowlisted for modification.")
     workspace_status: WorkspaceStatus = Field(default=WorkspaceStatus.INITIALIZED)
     creation_timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -246,6 +247,9 @@ class RepairEvent(BaseModel):
 
     event_id: str = Field(description="Unique deterministic event identifier.")
     execution_id: str = Field(description="Linked execution identifier.")
+    sequence_number: int = Field(default=1, ge=1, description="Monotonically increasing sequence number.")
+    prev_event_hash: Optional[str] = Field(default=None, description="Cryptographic SHA-256 hash of previous event.")
+    event_hash: Optional[str] = Field(default=None, description="Cryptographic SHA-256 hash of current event payload.")
     event_type: RepairEventType = Field(description="Type of lifecycle event.")
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     actor: str = Field(description="Actor or component triggering event (e.g. 'repair_executor').")

@@ -105,10 +105,16 @@ class ControlledPatchApplier:
 
                 original_bytes = abs_path.read_bytes()
                 self._backups[target_path] = original_bytes
+                is_crlf = b"\r\n" in original_bytes
                 original_content = original_bytes.decode("utf-8")
 
                 new_content = self._apply_file_hunks(original_content, diff_lines, target_path)
-                abs_path.write_text(new_content, encoding="utf-8")
+                if is_crlf:
+                    lines_split = new_content.splitlines()
+                    had_trailing_nl = new_content.endswith("\n")
+                    new_content = "\r\n".join(lines_split) + ("\r\n" if had_trailing_nl else "")
+
+                abs_path.write_bytes(new_content.encode("utf-8"))
                 modified_files.append(target_path)
 
             summary = f"Successfully modified {len(modified_files)} file(s): {', '.join(modified_files)}"
@@ -156,6 +162,8 @@ class ControlledPatchApplier:
             if line.startswith("+++ "):
                 # Finish previous file if any
                 if current_file and current_lines:
+                    if current_file in file_diffs:
+                        raise PatchApplicationError(f"Duplicate file entry in patch for '{current_file}'.")
                     file_diffs[current_file] = current_lines
                     current_lines = []
 
@@ -168,6 +176,8 @@ class ControlledPatchApplier:
                 current_lines.append(line)
 
         if current_file and current_lines:
+            if current_file in file_diffs:
+                raise PatchApplicationError(f"Duplicate file entry in patch for '{current_file}'.")
             file_diffs[current_file] = current_lines
 
         return file_diffs
@@ -185,6 +195,9 @@ class ControlledPatchApplier:
         if not hunks:
             raise PatchApplicationError(f"No valid hunks found for '{file_path}'.")
 
+        # Check for no-newline markers at end of diff
+        has_no_nl_eof = any(line.strip().startswith("\\ No newline at end of file") for line in diff_lines)
+
         # Apply hunks in reverse line order to prevent offset disruption
         hunks.sort(key=lambda h: h["old_start"], reverse=True)
 
@@ -195,15 +208,26 @@ class ControlledPatchApplier:
             old_length = hunk["old_length"]
             hunk_lines = hunk["lines"]
 
-            # Calculate slice indices (1-indexed to 0-indexed)
-            start_idx = max(0, old_start - 1)
-            end_idx = start_idx + old_length
+            # Calculate slice indices (1-indexed to 0-indexed, with 0-indexed support for creations)
+            if old_start == 0 and old_length == 0:
+                start_idx = 0
+                end_idx = 0
+            else:
+                start_idx = max(0, old_start - 1)
+                end_idx = start_idx + old_length
+
+            if start_idx > len(result_lines):
+                raise PatchApplicationError(
+                    f"Hunk starting line {old_start} exceeds file length ({len(result_lines)} lines) in '{file_path}'."
+                )
 
             # Build expected old slice and replacement new slice
             expected_old: List[str] = []
             replacement_new: List[str] = []
 
             for hl in hunk_lines:
+                if hl.startswith("\\"):
+                    continue
                 prefix = hl[0] if hl else " "
                 line_text = hl[1:] + ("\n" if not hl[1:].endswith("\n") else "")
 
@@ -218,7 +242,6 @@ class ControlledPatchApplier:
             # Match context check: verify expected lines exist
             actual_slice = result_lines[start_idx:end_idx]
             if len(actual_slice) != len(expected_old):
-                # Try relaxed match or fail
                 match_ok = False
             else:
                 match_ok = all(
@@ -233,7 +256,11 @@ class ControlledPatchApplier:
 
             result_lines[start_idx:end_idx] = replacement_new
 
-        return "".join(result_lines)
+        result_text = "".join(result_lines)
+        if has_no_nl_eof and result_text.endswith("\n"):
+            result_text = result_text[:-1]
+
+        return result_text
 
     def _parse_hunks(self, diff_lines: List[str]) -> List[Dict]:
         """Parse unified diff lines into structured hunk dictionaries."""

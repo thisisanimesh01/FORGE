@@ -79,6 +79,10 @@ class RepairExecutionTools:
         """Register a known RepairPlan in memory for tool lookups."""
         self._plans[plan.plan_id] = plan
 
+    def revoke_approval(self, approval_id: str, reason: str = "revoked by human operator") -> bool:
+        """Revoke a human approval, preventing any future execution."""
+        return self.executor.revoke_approval(approval_id, reason)
+
     # -----------------------------------------------------------------------
     # Tool Handlers
     # -----------------------------------------------------------------------
@@ -133,7 +137,12 @@ class RepairExecutionTools:
         elif params.plan_id and params.plan_id in self._plans:
             plan = self._plans[params.plan_id]
 
-        check = self.approval_validator.validate_approval(approval, plan)
+        check = self.approval_validator.validate_approval(
+            approval=approval,
+            plan=plan,
+            revoked_approvals=set(self.executor._revoked_approvals.keys()),
+            consumed_approvals=self.executor._consumed_approvals,
+        )
         output = ValidateRepairApprovalOutput(
             is_valid=check.is_valid,
             approval_status=approval.approval_status,

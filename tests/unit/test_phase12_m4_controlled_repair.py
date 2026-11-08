@@ -55,6 +55,7 @@ from forge.repair_execution.schemas import (
     FailureClassification,
     PatchValidationStatus,
     RepairApproval,
+    RepairEvent,
     RepairEventType,
     RepairPatch,
     RepairWorkspace,
@@ -721,3 +722,381 @@ def test_tool_registry_repair_execution_tools(sample_repo: Path):
     )
     rb_data = json.loads(rb_res)
     assert rb_data["rollback_status"] == "succeeded"
+
+
+# ---------------------------------------------------------------------------
+# 9. Adversarial Security & Correctness Audit Regression Tests
+# ---------------------------------------------------------------------------
+
+def test_adversarial_rollback_immune_to_original_repo_mutation(tmp_path: Path):
+    """Rollback restores pristine baseline even when the original repository is modified after allocation."""
+    repo_dir = tmp_path / "orig_repo"
+    repo_dir.mkdir()
+    target_file = repo_dir / "service.py"
+    target_file.write_text("def handle():\n    return 'original_baseline'\n")
+
+    ws_dir = tmp_path / "workspaces"
+    ws_mgr = RepairWorkspaceManager(original_repo_path=repo_dir, base_workspaces_dir=ws_dir)
+    ws = ws_mgr.allocate_workspace(allowed_paths=["service.py"], plan_id="p1")
+
+    baseline_digest = ws.baseline_tree_digest
+    assert ws.baseline_snapshot_path is not None
+    assert Path(ws.baseline_snapshot_path).exists()
+
+    # Adversarial mutation: Modify original repo after workspace allocation
+    target_file.write_text("def handle():\n    # UNEXPECTED EXTERNAL MUTATION\n    return 'tampered_repo'\n")
+
+    # Apply patch in workspace
+    patch_diff = """--- a/service.py
++++ b/service.py
+@@ -1,2 +1,2 @@
+ def handle():
+-    return 'original_baseline'
++    return 'patched_workspace'
+"""
+    applier = ControlledPatchApplier()
+    outcome = applier.apply_patch(Path(ws.isolated_workspace_path), unified_diff=patch_diff, allowed_files=["service.py"])
+    assert outcome.success is True
+
+    # Trigger rollback without in-memory backups (simulating tool or crash recovery)
+    rb_mgr = WorkspaceRollbackManager()
+    status, restored, post_digest = rb_mgr.rollback(ws, modified_files=["service.py"], backups=None)
+
+    assert status == RollbackStatus.SUCCEEDED
+    assert post_digest == baseline_digest
+    ws_content = (Path(ws.isolated_workspace_path) / "service.py").read_text()
+    assert "original_baseline" in ws_content
+    assert "tampered_repo" not in ws_content
+    assert ws.workspace_status == WorkspaceStatus.READY
+
+
+def test_adversarial_integrity_check_immune_to_original_repo_mutation(tmp_path: Path):
+    """Integrity check remains valid on untouched workspace even if original repo changes."""
+    repo_dir = tmp_path / "orig_repo"
+    repo_dir.mkdir()
+    (repo_dir / "mod.py").write_text("v1 = 1\n")
+
+    ws_dir = tmp_path / "workspaces"
+    ws_mgr = RepairWorkspaceManager(original_repo_path=repo_dir, base_workspaces_dir=ws_dir)
+    ws = ws_mgr.allocate_workspace(allowed_paths=["mod.py"], plan_id="p1")
+
+    # Adversarially modify original repo and add files
+    (repo_dir / "mod.py").write_text("v1 = 9999\n")
+    (repo_dir / "unrelated_new.py").write_text("secret = True\n")
+
+    # Check integrity of workspace (which was not modified)
+    checker = WorkspaceIntegrityChecker()
+    report = checker.verify_integrity(ws, allowed_paths=["mod.py"])
+
+    assert report.is_valid is True
+    assert report.violations == []
+    assert report.modified_files == []
+    assert report.unexpected_files == []
+
+
+def test_adversarial_symlink_escape_rejected_during_allocation(tmp_path: Path):
+    """Escaping symlinks pointing outside the repository are never copied into the workspace."""
+    repo_dir = tmp_path / "orig_repo"
+    repo_dir.mkdir()
+    (repo_dir / "safe.py").write_text("x = 1\n")
+
+    outside_secret = tmp_path / "secret.env"
+    outside_secret.write_text("PRIVATE_KEY=supersecret\n")
+
+    # Create an escaping symlink pointing outside repo
+    try:
+        (repo_dir / "escaped_link").symlink_to(outside_secret)
+    except OSError:
+        pytest.skip("Symlinks not supported on this filesystem")
+
+    ws_dir = tmp_path / "workspaces"
+    ws_mgr = RepairWorkspaceManager(original_repo_path=repo_dir, base_workspaces_dir=ws_dir)
+    ws = ws_mgr.allocate_workspace(allowed_paths=["safe.py"], plan_id="p1")
+
+    ws_root = Path(ws.isolated_workspace_path)
+    assert not (ws_root / "escaped_link").exists()
+    assert (ws_root / "safe.py").exists()
+
+
+def test_adversarial_patch_bad_hunk_counts_rejected():
+    """Hunk header line counts that disagree with actual line counts are rejected fail-closed."""
+    validator = RepairPatchValidator()
+    # Header says 5 lines old, but diff only provides 3 old lines
+    bad_diff = """--- a/foo.py
++++ b/foo.py
+@@ -1,5 +1,2 @@
+ line1
+-line2
++newline2
+ line3
+"""
+    res = validator.validate_patch(bad_diff, allowed_paths=["foo.py"])
+    assert res.is_valid is False
+    assert res.status == PatchValidationStatus.INVALID_SYNTAX
+    assert any("line count mismatch" in err for err in res.errors)
+
+
+def test_adversarial_patch_overlapping_hunks_rejected():
+    """Overlapping hunks targeting the same line ranges are rejected fail-closed."""
+    validator = RepairPatchValidator()
+    overlap_diff = """--- a/foo.py
++++ b/foo.py
+@@ -1,3 +1,3 @@
+ line1
+-line2
++mod2
+ line3
+@@ -2,3 +2,3 @@
+-line2
+-line3
++other2
++other3
+ line4
+"""
+    res = validator.validate_patch(overlap_diff, allowed_paths=["foo.py"])
+    assert res.is_valid is False
+    assert res.status == PatchValidationStatus.INVALID_SYNTAX
+    assert any("Overlapping hunks" in err for err in res.errors)
+
+
+def test_adversarial_patch_reordered_hunks_rejected():
+    """Reordered hunks out of line number order are rejected fail-closed."""
+    validator = RepairPatchValidator()
+    reordered_diff = """--- a/foo.py
++++ b/foo.py
+@@ -10,1 +10,1 @@
+-line10
++mod10
+@@ -2,1 +2,1 @@
+-line2
++mod2
+"""
+    res = validator.validate_patch(reordered_diff, allowed_paths=["foo.py"])
+    assert res.is_valid is False
+    assert res.status == PatchValidationStatus.INVALID_SYNTAX
+    assert any("Reordered hunks" in err for err in res.errors)
+
+
+def test_adversarial_patch_empty_hunk_rejected():
+    """Empty hunks with zero line modifications are rejected fail-closed."""
+    validator = RepairPatchValidator()
+    empty_diff = """--- a/foo.py
++++ b/foo.py
+@@ -1,0 +1,0 @@
+"""
+    res = validator.validate_patch(empty_diff, allowed_paths=["foo.py"])
+    assert res.is_valid is False
+    assert res.status == PatchValidationStatus.INVALID_SYNTAX
+    assert any("Empty hunk" in err for err in res.errors)
+
+
+def test_adversarial_patch_duplicate_file_rejected():
+    """Multiple diff sections targeting the same file are rejected fail-closed."""
+    validator = RepairPatchValidator()
+    dup_diff = """--- a/foo.py
++++ b/foo.py
+@@ -1,1 +1,1 @@
+-a
++b
+--- a/foo.py
++++ b/foo.py
+@@ -3,1 +3,1 @@
+-c
++d
+"""
+    res = validator.validate_patch(dup_diff, allowed_paths=["foo.py"])
+    assert res.is_valid is False
+    assert res.status == PatchValidationStatus.INVALID_SYNTAX
+    assert any("Duplicate file entry" in err for err in res.errors)
+
+
+def test_adversarial_patch_renames_and_git_modes_rejected():
+    """File rename diffs and git file mode changes are rejected fail-closed."""
+    validator = RepairPatchValidator()
+
+    # Rename
+    rename_diff = """--- a/foo.py
++++ b/bar.py
+@@ -1,1 +1,1 @@
+-a
++b
+"""
+    res1 = validator.validate_patch(rename_diff, allowed_paths=["foo.py", "bar.py"])
+    assert res1.is_valid is False
+    assert any("File rename" in err for err in res1.errors)
+
+    # Mode change
+    mode_diff = """old mode 100644
+new mode 100755
+--- a/foo.py
++++ b/foo.py
+@@ -1,1 +1,1 @@
+-a
++b
+"""
+    res2 = validator.validate_patch(mode_diff, allowed_paths=["foo.py"])
+    assert res2.is_valid is False
+    assert any("Forbidden git metadata" in err for err in res2.errors)
+
+
+def test_adversarial_approval_replay_rejected(sample_repo: Path):
+    """An approved RepairApproval is strictly single-use; subsequent replay attempts are blocked."""
+    plan = _build_dummy_plan()
+    approval = _build_dummy_approval(plan)
+
+    ws_mgr = RepairWorkspaceManager(original_repo_path=sample_repo)
+    executor = ControlledRepairExecutor(repo_path=sample_repo, workspace_manager=ws_mgr)
+
+    diff = (
+        "--- a/src/calculator.py\n"
+        "+++ b/src/calculator.py\n"
+        "@@ -4,2 +4,4 @@\n"
+        " def divide(a, b):\n"
+        "+    if b == 0:\n"
+        "+        raise ValueError('division by zero')\n"
+        "     return a / b\n"
+    )
+    patch = RepairPatch(
+        patch_id="pat_replay",
+        repair_plan_id=plan.plan_id,
+        strategy_id=plan.selected_strategy_id,
+        unified_diff=diff,
+        patch_digest=compute_patch_digest(diff),
+        affected_files=["src/calculator.py"],
+        validation_status=PatchValidationStatus.VALID,
+    )
+
+    # First execution: succeeds
+    res1 = executor.execute_repair(plan=plan, approval=approval, custom_patch=patch)
+    assert res1.execution_status == ExecutionStatus.APPLIED
+    assert executor.is_approval_consumed(approval.approval_id) is True
+
+    # Second execution using identical approval: BLOCKED as replay attempt
+    res2 = executor.execute_repair(plan=plan, approval=approval, custom_patch=patch)
+    assert res2.execution_status == ExecutionStatus.BLOCKED
+    assert res2.failure_classification == FailureClassification.UNAUTHORIZED_EXECUTION
+    assert "already been consumed" in res2.diff_summary
+
+
+def test_adversarial_approval_revocation_blocked(sample_repo: Path):
+    """Revoking an approval prevents execution even if the approval object states APPROVED."""
+    plan = _build_dummy_plan()
+    approval = _build_dummy_approval(plan)
+
+    ws_mgr = RepairWorkspaceManager(original_repo_path=sample_repo)
+    executor = ControlledRepairExecutor(repo_path=sample_repo, workspace_manager=ws_mgr)
+
+    # Explicitly revoke approval before execution
+    executor.revoke_approval(approval.approval_id, reason="Security vulnerability discovered")
+
+    res = executor.execute_repair(plan=plan, approval=approval)
+    assert res.execution_status == ExecutionStatus.BLOCKED
+    assert res.failure_classification == FailureClassification.APPROVAL_REVOKED
+    assert "has been revoked" in res.diff_summary
+
+
+def test_adversarial_approval_plan_description_change_invalidates_digest():
+    """Modifying change description or rationale alters canonical plan digest."""
+    chg1 = RequiredChange(
+        file_path="src/calculator.py",
+        start_line=10,
+        end_line=15,
+        change_type="modify_condition",
+        description="Original description",
+        rationale="Original rationale",
+    )
+    plan1 = _build_dummy_plan(required_changes=[chg1])
+    d1 = compute_plan_digest(plan1)
+
+    chg2 = RequiredChange(
+        file_path="src/calculator.py",
+        start_line=10,
+        end_line=15,
+        change_type="modify_condition",
+        description="Tampered description",
+        rationale="Original rationale",
+    )
+    plan2 = _build_dummy_plan(required_changes=[chg2])
+    d2 = compute_plan_digest(plan2)
+
+    assert d1 != d2
+
+
+def test_adversarial_event_hash_chain_tamper_detection():
+    """Audit events form a cryptographic hash chain; tampering is immediately detected."""
+    recorder = RepairEventRecorder()
+    exec_id = "rex_audit_01"
+
+    ev1 = recorder.record_event(exec_id, RepairEventType.WORKSPACE_PREPARED, "Workspace allocated")
+    ev2 = recorder.record_event(exec_id, RepairEventType.APPROVAL_VERIFIED, "Approval verified")
+    ev3 = recorder.record_event(exec_id, RepairEventType.PATCH_APPLICATION_SUCCEEDED, "Patch applied")
+
+    assert ev1.sequence_number == 1
+    assert ev2.sequence_number == 2
+    assert ev3.sequence_number == 3
+
+    assert ev2.prev_event_hash == ev1.event_hash
+    assert ev3.prev_event_hash == ev2.event_hash
+
+    is_valid, err = recorder.verify_event_chain(exec_id)
+    assert is_valid is True
+    assert err is None
+
+    # Adversarial tampering: replace an event in recorder's internal list
+    tampered_ev = RepairEvent(
+        event_id=ev2.event_id,
+        execution_id=ev2.execution_id,
+        sequence_number=2,
+        prev_event_hash=ev1.event_hash,
+        event_hash="forged_hash",
+        event_type=RepairEventType.APPROVAL_VERIFIED,
+        timestamp=ev2.timestamp,
+        actor=ev2.actor,
+        action_description="Tampered description",
+        related_evidence=[],
+        outcome="success",
+    )
+    recorder._events_by_execution[exec_id][1] = tampered_ev
+
+    is_valid_after, err_after = recorder.verify_event_chain(exec_id)
+    assert is_valid_after is False
+    assert "event_hash tampered" in err_after
+
+
+def test_adversarial_crlf_and_no_newline_preservation(tmp_path: Path):
+    """In-memory patch applier preserves CRLF endings and no-newline EOF markers."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    # 1. CRLF file
+    crlf_file = ws / "crlf.py"
+    crlf_file.write_bytes(b"line1\r\nline2\r\n")
+
+    crlf_diff = """--- a/crlf.py
++++ b/crlf.py
+@@ -1,2 +1,2 @@
+ line1
+-line2
++line2_patched
+"""
+    applier = ControlledPatchApplier()
+    res1 = applier.apply_patch(ws, unified_diff=crlf_diff, allowed_files=["crlf.py"])
+    assert res1.success is True
+    assert crlf_file.read_bytes() == b"line1\r\nline2_patched\r\n"
+
+    # 2. No newline at EOF
+    no_nl_file = ws / "no_nl.py"
+    no_nl_file.write_bytes(b"line1\nline2")
+
+    no_nl_diff = """--- a/no_nl.py
++++ b/no_nl.py
+@@ -1,2 +1,2 @@
+ line1
+-line2
+\\ No newline at end of file
++line2_patched
+\\ No newline at end of file
+"""
+    res2 = applier.apply_patch(ws, unified_diff=no_nl_diff, allowed_files=["no_nl.py"])
+    assert res2.success is True
+    assert no_nl_file.read_bytes() == b"line1\nline2_patched"
