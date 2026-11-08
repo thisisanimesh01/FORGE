@@ -132,6 +132,51 @@ def compute_tree_digest(workspace_path: Path, allowed_paths: Optional[List[str]]
     return hasher.hexdigest()
 
 
+import threading
+
+
+def _set_directory_read_only(path: Path) -> None:
+    """Recursively set read-only permissions on files and directories in snapshot."""
+    for root, dirs, files in os.walk(path, followlinks=False):
+        for f in files:
+            p = Path(root) / f
+            try:
+                p.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+            except OSError:
+                pass
+        for d in dirs:
+            p = Path(root) / d
+            try:
+                p.chmod(stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+            except OSError:
+                pass
+    try:
+        path.chmod(stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+    except OSError:
+        pass
+
+
+def _set_directory_writable(path: Path) -> None:
+    """Recursively restore write permissions so directory can be removed."""
+    try:
+        path.chmod(stat.S_IRWXU)
+    except OSError:
+        pass
+    for root, dirs, files in os.walk(path, followlinks=False):
+        for f in files:
+            p = Path(root) / f
+            try:
+                p.chmod(stat.S_IRWXU)
+            except OSError:
+                pass
+        for d in dirs:
+            p = Path(root) / d
+            try:
+                p.chmod(stat.S_IRWXU)
+            except OSError:
+                pass
+
+
 class RepairWorkspaceManager:
     """Manages the lifecycle of isolated repair workspaces."""
 
@@ -152,6 +197,7 @@ class RepairWorkspaceManager:
 
         self.base_workspaces_dir.mkdir(parents=True, exist_ok=True)
         self._workspaces: Dict[str, RepairWorkspace] = {}
+        self._lock = threading.Lock()
 
     def allocate_workspace(
         self,
@@ -163,55 +209,71 @@ class RepairWorkspaceManager:
 
         Original repository is never modified.
         """
-        workspace_id = f"rws_{uuid.uuid4().hex[:12]}"
-        isolated_dir = self.base_workspaces_dir / workspace_id
-        snapshot_dir = self.base_workspaces_dir / f"{workspace_id}_baseline"
+        with self._lock:
+            workspace_id = None
+            for _ in range(10):
+                cand = f"rws_{uuid.uuid4().hex[:12]}"
+                cand_ws = self.base_workspaces_dir / cand
+                cand_snap = self.base_workspaces_dir / f"{cand}_baseline"
+                if not cand_ws.exists() and not cand_snap.exists():
+                    workspace_id = cand
+                    break
 
-        # Safely copy files into isolated directory and baseline snapshot
-        _safe_copy_tree(src_dir=self.original_repo_path, dst_dir=isolated_dir)
-        _safe_copy_tree(src_dir=self.original_repo_path, dst_dir=snapshot_dir)
+            if not workspace_id:
+                raise WorkspaceError("Failed to allocate unique workspace directory: namespace collision.")
 
-        # Deep purge of any nested protected files
-        purge_protected_paths_from_workspace(isolated_dir)
-        purge_protected_paths_from_workspace(snapshot_dir)
+            isolated_dir = self.base_workspaces_dir / workspace_id
+            snapshot_dir = self.base_workspaces_dir / f"{workspace_id}_baseline"
 
-        # Baseline commit resolution
-        resolved_commit = baseline_commit or "baseline_unversioned"
-        git_dir = self.original_repo_path / ".git"
-        if git_dir.exists() and git_dir.is_dir() and baseline_commit is None:
-            head_file = git_dir / "HEAD"
-            if head_file.exists():
-                try:
-                    ref_text = head_file.read_text().strip()
-                    if ref_text.startswith("ref: "):
-                        ref_path = git_dir / ref_text[5:]
-                        if ref_path.exists():
-                            resolved_commit = ref_path.read_text().strip()
-                    elif len(ref_text) == 40:
-                        resolved_commit = ref_text
-                except Exception:
-                    pass
+            # Safely copy files into isolated directory and baseline snapshot
+            _safe_copy_tree(src_dir=self.original_repo_path, dst_dir=isolated_dir)
+            _safe_copy_tree(src_dir=self.original_repo_path, dst_dir=snapshot_dir)
 
-        # Compute clean baseline tree digest
-        baseline_digest = compute_tree_digest(isolated_dir)
+            # Deep purge of any nested protected files
+            purge_protected_paths_from_workspace(isolated_dir)
+            purge_protected_paths_from_workspace(snapshot_dir)
 
-        workspace = RepairWorkspace(
-            workspace_id=workspace_id,
-            original_repository_reference=str(self.original_repo_path),
-            isolated_workspace_path=str(isolated_dir),
-            baseline_commit=resolved_commit,
-            baseline_tree_digest=baseline_digest,
-            baseline_snapshot_path=str(snapshot_dir),
-            allowed_paths=allowed_paths,
-            workspace_status=WorkspaceStatus.READY,
-        )
+            # Compute clean baseline tree digest before write-protecting snapshot
+            baseline_digest = compute_tree_digest(isolated_dir)
 
-        self._workspaces[workspace_id] = workspace
-        return workspace
+            # Write-protect baseline snapshot directory to prevent accidental or malicious tampering
+            _set_directory_read_only(snapshot_dir)
+
+            # Baseline commit resolution
+            resolved_commit = baseline_commit or "baseline_unversioned"
+            git_dir = self.original_repo_path / ".git"
+            if git_dir.exists() and git_dir.is_dir() and baseline_commit is None:
+                head_file = git_dir / "HEAD"
+                if head_file.exists():
+                    try:
+                        ref_text = head_file.read_text().strip()
+                        if ref_text.startswith("ref: "):
+                            ref_path = git_dir / ref_text[5:]
+                            if ref_path.exists():
+                                resolved_commit = ref_path.read_text().strip()
+                        elif len(ref_text) == 40:
+                            resolved_commit = ref_text
+                    except Exception:
+                        pass
+
+            workspace = RepairWorkspace(
+                workspace_id=workspace_id,
+                original_repository_reference=str(self.original_repo_path),
+                isolated_workspace_path=str(isolated_dir),
+                baseline_commit=resolved_commit,
+                baseline_tree_digest=baseline_digest,
+                baseline_snapshot_path=str(snapshot_dir),
+                allowed_paths=allowed_paths,
+                workspace_status=WorkspaceStatus.READY,
+            )
+
+            self._workspaces[workspace_id] = workspace
+            return workspace
 
     def get_workspace(self, workspace_id: str) -> Optional[RepairWorkspace]:
         """Retrieve workspace record by ID."""
-        return self._workspaces.get(workspace_id)
+        with self._lock:
+            return self._workspaces.get(workspace_id)
 
     def verify_workspace_containment(self, workspace: RepairWorkspace, relative_path: str) -> Path:
         """Assert that a target relative path is safely contained in the isolated workspace.
@@ -226,39 +288,43 @@ class RepairWorkspaceManager:
 
     def cleanup_workspace(self, workspace_id: str, force: bool = False) -> bool:
         """Safely destroy an isolated workspace unless preserved for inspection."""
-        workspace = self._workspaces.get(workspace_id)
-        if not workspace:
-            return False
+        with self._lock:
+            workspace = self._workspaces.get(workspace_id)
+            if not workspace:
+                return False
 
-        if workspace.workspace_status == WorkspaceStatus.PRESERVED_FOR_INSPECTION and not force:
-            return False
+            if workspace.workspace_status == WorkspaceStatus.PRESERVED_FOR_INSPECTION and not force:
+                return False
 
-        ws_dir = Path(workspace.isolated_workspace_path).resolve()
-        try:
-            assert_contained_path(ws_dir, self.base_workspaces_dir)
-            if ws_dir.exists() and ws_dir.is_dir():
-                shutil.rmtree(ws_dir)
-        except Exception:
-            return False
-
-        if workspace.baseline_snapshot_path:
-            snap_dir = Path(workspace.baseline_snapshot_path).resolve()
+            ws_dir = Path(workspace.isolated_workspace_path).resolve()
             try:
-                assert_contained_path(snap_dir, self.base_workspaces_dir)
-                if snap_dir.exists() and snap_dir.is_dir():
-                    shutil.rmtree(snap_dir)
+                assert_contained_path(ws_dir, self.base_workspaces_dir)
+                if ws_dir.exists() and ws_dir.is_dir():
+                    _set_directory_writable(ws_dir)
+                    shutil.rmtree(ws_dir, ignore_errors=True)
             except Exception:
-                pass
+                return False
 
-        workspace.workspace_status = WorkspaceStatus.CLEANED_UP
-        workspace.cleanup_status = "cleaned_up"
-        return True
+            if workspace.baseline_snapshot_path:
+                snap_dir = Path(workspace.baseline_snapshot_path).resolve()
+                try:
+                    assert_contained_path(snap_dir, self.base_workspaces_dir)
+                    if snap_dir.exists() and snap_dir.is_dir():
+                        _set_directory_writable(snap_dir)
+                        shutil.rmtree(snap_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
+            workspace.workspace_status = WorkspaceStatus.CLEANED_UP
+            workspace.cleanup_status = "cleaned_up"
+            return True
 
     def preserve_for_inspection(self, workspace_id: str) -> bool:
         """Mark workspace as preserved for inspection when rollback fails or recovery is required."""
-        workspace = self._workspaces.get(workspace_id)
-        if not workspace:
-            return False
-        workspace.workspace_status = WorkspaceStatus.PRESERVED_FOR_INSPECTION
-        workspace.cleanup_status = "preserved"
-        return True
+        with self._lock:
+            workspace = self._workspaces.get(workspace_id)
+            if not workspace:
+                return False
+            workspace.workspace_status = WorkspaceStatus.PRESERVED_FOR_INSPECTION
+            workspace.cleanup_status = "preserved"
+            return True

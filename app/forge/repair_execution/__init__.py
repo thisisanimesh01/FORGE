@@ -21,6 +21,7 @@ from forge.repair_execution.integrity import (
     WorkspaceIntegrityChecker,
     WorkspaceIntegrityReport,
 )
+from forge.repair_execution.ledger import ApprovalLedger
 from forge.repair_execution.patch_applier import (
     ControlledPatchApplier,
     PatchApplicationOutcome,
@@ -76,10 +77,11 @@ __all__ = [
     "RepairWorkspace",
     "RollbackStatus",
     "WorkspaceStatus",
-    # Approval
+    # Approval & Ledger
     "RepairApprovalValidator",
     "ApprovalValidationResult",
     "compute_plan_digest",
+    "ApprovalLedger",
     # Workspace & Rollback
     "RepairWorkspaceManager",
     "compute_tree_digest",

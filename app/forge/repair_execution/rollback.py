@@ -57,6 +57,12 @@ class WorkspaceRollbackManager:
         try:
             # 1. Primary restoration: restore from immutable baseline snapshot captured at allocation
             if snap_path and snap_path.exists() and snap_path.is_dir():
+                # Verify that baseline snapshot has not been corrupted or tampered with
+                snap_digest = compute_tree_digest(snap_path)
+                if snap_digest != workspace.baseline_tree_digest:
+                    workspace.workspace_status = WorkspaceStatus.CORRUPTED
+                    return RollbackStatus.FAILED, [], compute_tree_digest(ws_root)
+
                 # 1a. Delete any files in workspace that did not exist in the baseline snapshot
                 for root, dirs, files in os.walk(ws_root, followlinks=False):
                     dirs[:] = [d for d in dirs if d != ".git" and not is_protected_name(d)]

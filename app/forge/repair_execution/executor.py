@@ -13,13 +13,15 @@ Orchestrates the end-to-end controlled repair lifecycle:
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+import threading
+from typing import Dict, List, Optional, Set
 import uuid
 
 from forge.repair_planning.schemas import RepairPlan
 from forge.repair_execution.approval import RepairApprovalValidator, compute_plan_digest
 from forge.repair_execution.events import RepairEventRecorder
 from forge.repair_execution.integrity import WorkspaceIntegrityChecker
+from forge.repair_execution.ledger import ApprovalLedger
 from forge.repair_execution.patch_applier import ControlledPatchApplier
 from forge.repair_execution.patch_generator import RepairPatchGenerator
 from forge.repair_execution.patch_validator import RepairPatchValidator
@@ -50,6 +52,8 @@ class ControlledRepairExecutor:
         repo_path: Optional[Path] = None,
         workspace_manager: Optional[RepairWorkspaceManager] = None,
         event_recorder: Optional[RepairEventRecorder] = None,
+        db_path: Optional[Path] = None,
+        trusted_approver_identities: Optional[Set[str]] = None,
     ) -> None:
         self.repo_path = repo_path.resolve() if repo_path else None
         if workspace_manager:
@@ -67,18 +71,26 @@ class ControlledRepairExecutor:
         self.rollback_manager = WorkspaceRollbackManager()
         self.integrity_checker = WorkspaceIntegrityChecker()
 
+        self.ledger = ApprovalLedger(db_path=db_path)
+        self.trusted_approver_identities = trusted_approver_identities
+        self._lock = threading.Lock()
         self._executions: Dict[str, RepairExecutionResult] = {}
-        self._consumed_approvals: Dict[str, str] = {}
-        self._revoked_approvals: Dict[str, str] = {}
+
+    @property
+    def _consumed_approvals(self) -> Dict[str, str]:
+        return self.ledger.get_consumed_map()
+
+    @property
+    def _revoked_approvals(self) -> Dict[str, str]:
+        return self.ledger.get_revoked_map()
 
     def revoke_approval(self, approval_id: str, reason: str = "revoked by human operator") -> bool:
         """Revoke a human approval, preventing any future execution."""
-        self._revoked_approvals[approval_id] = reason
-        return True
+        return self.ledger.record_revoked(approval_id, reason)
 
     def is_approval_consumed(self, approval_id: str) -> bool:
         """Check if an approval has already been used in an execution."""
-        return approval_id in self._consumed_approvals
+        return self.ledger.is_consumed(approval_id)
 
     def _format_limitations(
         self,
@@ -117,48 +129,68 @@ class ControlledRepairExecutor:
         # -------------------------------------------------------------------
         # Step 1: Authorization & Approval Verification
         # -------------------------------------------------------------------
-        approval_check = self.approval_validator.validate_approval(
-            approval=approval,
-            plan=plan,
-            revoked_approvals=set(self._revoked_approvals.keys()),
-            consumed_approvals=self._consumed_approvals,
-        )
-        if not approval_check.is_valid:
-            self.event_recorder.record_event(
-                execution_id=execution_id,
-                event_type=RepairEventType.APPROVAL_REJECTED,
-                action_description=f"Approval rejected: {', '.join(approval_check.errors)}",
-                outcome="failure",
+        with self._lock:
+            revoked_map = self.ledger.get_revoked_map()
+            consumed_map = self.ledger.get_consumed_map()
+            approval_check = self.approval_validator.validate_approval(
+                approval=approval,
+                plan=plan,
+                revoked_approvals=set(revoked_map.keys()),
+                consumed_approvals=consumed_map,
+                trusted_approver_identities=self.trusted_approver_identities,
             )
+            if not approval_check.is_valid:
+                self.event_recorder.record_event(
+                    execution_id=execution_id,
+                    event_type=RepairEventType.APPROVAL_REJECTED,
+                    action_description=f"Approval rejected: {', '.join(approval_check.errors)}",
+                    outcome="failure",
+                )
 
-            failure_class = FailureClassification.UNAUTHORIZED_EXECUTION
-            if approval.approval_status == ApprovalStatus.EXPIRED or approval.is_expired():
-                failure_class = FailureClassification.APPROVAL_EXPIRED
-            elif approval.approval_status == ApprovalStatus.REVOKED or any("has been revoked" in err for err in approval_check.errors):
-                failure_class = FailureClassification.APPROVAL_REVOKED
-            elif any("outside approved" in err for err in approval_check.errors):
-                failure_class = FailureClassification.SCOPE_BREACH
-            elif any("already been consumed" in err for err in approval_check.errors):
                 failure_class = FailureClassification.UNAUTHORIZED_EXECUTION
+                if approval.approval_status == ApprovalStatus.EXPIRED or approval.is_expired():
+                    failure_class = FailureClassification.APPROVAL_EXPIRED
+                elif approval.approval_status == ApprovalStatus.REVOKED or any("has been revoked" in err for err in approval_check.errors):
+                    failure_class = FailureClassification.APPROVAL_REVOKED
+                elif any("outside approved" in err for err in approval_check.errors):
+                    failure_class = FailureClassification.SCOPE_BREACH
+                elif any("already been consumed" in err for err in approval_check.errors):
+                    failure_class = FailureClassification.UNAUTHORIZED_EXECUTION
 
-            result = RepairExecutionResult(
-                execution_id=execution_id,
-                repair_plan_id=plan.plan_id,
-                execution_status=ExecutionStatus.BLOCKED,
-                workspace_id=workspace.workspace_id if workspace else "none",
-                diff_summary=f"Execution blocked: Authorization failed: {'; '.join(approval_check.errors)}",
-                execution_events=self.event_recorder.get_events(execution_id),
-                rollback_status=RollbackStatus.NOT_TRIGGERED,
-                failure_classification=failure_class,
-                limitations=self._format_limitations(plan.limitations, ["Repair execution was blocked due to failed approval validation."]),
-                verification_pending=True,
-                approval_reference=approval.approval_id,
-            )
-            self._executions[execution_id] = result
-            return result
+                result = RepairExecutionResult(
+                    execution_id=execution_id,
+                    repair_plan_id=plan.plan_id,
+                    execution_status=ExecutionStatus.BLOCKED,
+                    workspace_id=workspace.workspace_id if workspace else "none",
+                    diff_summary=f"Execution blocked: Authorization failed: {'; '.join(approval_check.errors)}",
+                    execution_events=self.event_recorder.get_events(execution_id),
+                    rollback_status=RollbackStatus.NOT_TRIGGERED,
+                    failure_classification=failure_class,
+                    limitations=self._format_limitations(plan.limitations, ["Repair execution was blocked due to failed approval validation."]),
+                    verification_pending=True,
+                    approval_reference=approval.approval_id,
+                )
+                self._executions[execution_id] = result
+                return result
 
-        # Record consumed approval to prevent single-approval replay
-        self._consumed_approvals[approval.approval_id] = execution_id
+            # Atomically record consumed approval in durable ledger before any workspace mutation
+            recorded = self.ledger.record_consumed(approval.approval_id, execution_id)
+            if not recorded:
+                result = RepairExecutionResult(
+                    execution_id=execution_id,
+                    repair_plan_id=plan.plan_id,
+                    execution_status=ExecutionStatus.BLOCKED,
+                    workspace_id=workspace.workspace_id if workspace else "none",
+                    diff_summary=f"Execution blocked: Approval '{approval.approval_id}' was already consumed concurrently.",
+                    execution_events=self.event_recorder.get_events(execution_id),
+                    rollback_status=RollbackStatus.NOT_TRIGGERED,
+                    failure_classification=FailureClassification.UNAUTHORIZED_EXECUTION,
+                    limitations=self._format_limitations(plan.limitations, ["Repair execution was blocked due to concurrent approval consumption."]),
+                    verification_pending=True,
+                    approval_reference=approval.approval_id,
+                )
+                self._executions[execution_id] = result
+                return result
 
         self.event_recorder.record_event(
             execution_id=execution_id,

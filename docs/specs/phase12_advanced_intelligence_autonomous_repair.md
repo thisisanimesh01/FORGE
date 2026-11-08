@@ -198,7 +198,7 @@ Coordinates the entire pipeline:
   - `RepairEvent`: Immutable audit record capturing event category, actor, action description, related evidence, and tree/patch digest.
   - `RepairExecutionResult`: Complete outcome including execution status, modified files, diff summary, rollback status, failure classification, and `verification_pending = True`.
 
-### 2. Mandatory Human Approval Invariants (`forge.repair_execution.approval`)
+### 2. Mandatory Human Approval Invariants (`forge.repair_execution.approval`, `ledger`)
 - `RepairApprovalValidator` audits non-negotiable authorization rules:
   1. Approval status must be strictly `APPROVED`.
   2. Approval expiry must be in the future (`current_time < approval_expiry`).
@@ -209,15 +209,16 @@ Coordinates the entire pipeline:
   7. Supporting causal evidence must be verified and fresh (zero stale evidence).
   8. All affected target files must fall strictly within `approved_file_paths`.
   9. All required changes must fall strictly within `approved_file_paths`.
-  10. Non-empty human approver reference is mandatory (rejects 'unknown', 'auto', 'llm').
-  11. Single-use consumption: replay attempts with already-consumed approvals are strictly blocked.
-  12. Revocation tracking: revoked approvals are immediately blocked.
+  10. Non-empty human approver reference is mandatory (rejects synthetic/AI references: 'unknown', 'auto', 'llm', 'agent', 'model', 'bot').
+  11. Trusted approver allowlisting: when configured, approver identity must belong to `trusted_approver_identities`.
+  12. Single-use consumption & durability: tracked atomically via `ApprovalLedger` (SQLite-backed, thread-locked); concurrent replay attempts are blocked with `UNAUTHORIZED_EXECUTION`.
+  13. Revocation tracking: revoked approvals are immediately blocked with `APPROVAL_REVOKED`.
 
 ### 3. Isolated Workspace Lifecycle & Protection (`forge.repair_execution.workspace`)
 - Target repository is strictly read-only and never modified.
 - Workspaces are allocated in isolated directories under `workspace_dir / "repair_workspaces" / <workspace_id>`.
 - Uses `_safe_copy_tree()` filtering out FIFO special files, unix domain sockets, character/block devices, and escaping symlinks. Symlinks pointing outside repository root are strictly forbidden.
-- Allocates an immutable baseline snapshot directory (`<workspace_id>_baseline`) alongside the workspace.
+- Allocates an immutable, write-protected baseline snapshot directory (`<workspace_id>_baseline`, mode 0400 files, 0500 directories) alongside the workspace with collision resilience.
 - Calls `purge_protected_paths_from_workspace()` to remove credentials (`.env`, secrets, databases).
 - Computes canonical SHA-256 tree digest over all workspace files.
 
@@ -232,12 +233,13 @@ Coordinates the entire pipeline:
 ### 5. Workspace Integrity Verification & Rollback (`forge.repair_execution.integrity`, `rollback`)
 - `WorkspaceIntegrityChecker` compares post-repair workspace against the immutable baseline snapshot and approved file allowlist.
 - Detects unauthorized file modification, creation, or deletion outside scope, triggering immediate rollback.
-- `WorkspaceRollbackManager` restores original files directly from the immutable baseline snapshot (completely immune to external host repository mutations), verifying post-rollback tree digest equals baseline digest.
+- `WorkspaceRollbackManager` verifies that `compute_tree_digest(snap_path)` matches `baseline_tree_digest` before restoration. If corrupted, it **refuses** restoration, marks workspace `CORRUPTED`, and returns `FAILED` to preserve forensic evidence.
+- Successful rollback restores original files directly from the baseline snapshot, verifying post-rollback tree digest equals baseline digest.
 - Failed rollback transitions workspace to `PRESERVED_FOR_INSPECTION` with `RECOVERY_REQUIRED`.
 
 ### 6. Audit Trail & Secret Redaction (`forge.repair_execution.events`)
 - Emits sequential `RepairEvent` audit records for all lifecycle stages.
-- Forms an append-only SHA-256 cryptographic hash chain verifying event history integrity and detecting any tampering.
+- Forms an append-only SHA-256 cryptographic hash chain verifying event history integrity, supporting `expected_head_hash` checks to detect complete chain rewriting.
 - Automatically redacts secrets via `redact_secrets()`. Enforces `MAX_EVENTS_PER_EXECUTION = 200`.
 
 ### 7. Repair Execution Tools (`forge.repair_execution.tools`)

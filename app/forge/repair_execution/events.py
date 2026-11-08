@@ -34,11 +34,15 @@ def compute_event_hash(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+import threading
+
+
 class RepairEventRecorder:
     """Manages recording and retrieval of audit events during repair execution."""
 
     def __init__(self) -> None:
         self._events_by_execution: Dict[str, List[RepairEvent]] = {}
+        self._lock = threading.Lock()
 
     def record_event(
         self,
@@ -64,59 +68,76 @@ class RepairEventRecorder:
         Returns:
             The recorded immutable RepairEvent.
         """
-        if execution_id not in self._events_by_execution:
-            self._events_by_execution[execution_id] = []
+        with self._lock:
+            if execution_id not in self._events_by_execution:
+                self._events_by_execution[execution_id] = []
 
-        existing_events = self._events_by_execution[execution_id]
-        if len(existing_events) >= MAX_EVENTS_PER_EXECUTION:
-            # Strictly enforce cap to prevent memory exhaustion
-            return existing_events[-1]
+            existing_events = self._events_by_execution[execution_id]
+            if len(existing_events) >= MAX_EVENTS_PER_EXECUTION:
+                # Strictly enforce cap to prevent memory exhaustion
+                return existing_events[-1]
 
-        sanitized_description = redact_secrets(action_description)
-        seq = len(existing_events) + 1
-        event_id = f"rev_{execution_id}_{seq:04d}"
+            sanitized_description = redact_secrets(action_description)
+            seq = len(existing_events) + 1
+            event_id = f"rev_{execution_id}_{seq:04d}"
 
-        prev_hash = existing_events[-1].event_hash if existing_events and existing_events[-1].event_hash else "0" * 64
-        ev_hash = compute_event_hash(
-            prev_hash=prev_hash,
-            seq=seq,
-            event_type=event_type,
-            description=sanitized_description,
-            integrity_digest=integrity_digest,
-            outcome=outcome,
-        )
+            prev_hash = existing_events[-1].event_hash if existing_events and existing_events[-1].event_hash else "0" * 64
+            ev_hash = compute_event_hash(
+                prev_hash=prev_hash,
+                seq=seq,
+                event_type=event_type,
+                description=sanitized_description,
+                integrity_digest=integrity_digest,
+                outcome=outcome,
+            )
 
-        event = RepairEvent(
-            event_id=event_id,
-            execution_id=execution_id,
-            sequence_number=seq,
-            prev_event_hash=prev_hash,
-            event_hash=ev_hash,
-            event_type=event_type,
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            actor=actor,
-            action_description=sanitized_description,
-            related_evidence=related_evidence or [],
-            integrity_digest=integrity_digest,
-            outcome=outcome,
-        )
+            event = RepairEvent(
+                event_id=event_id,
+                execution_id=execution_id,
+                sequence_number=seq,
+                prev_event_hash=prev_hash,
+                event_hash=ev_hash,
+                event_type=event_type,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                actor=actor,
+                action_description=sanitized_description,
+                related_evidence=related_evidence or [],
+                integrity_digest=integrity_digest,
+                outcome=outcome,
+            )
 
-        existing_events.append(event)
-        return event
+            existing_events.append(event)
+            return event
 
     def get_events(self, execution_id: str) -> List[RepairEvent]:
         """Retrieve all recorded events for an execution."""
-        return list(self._events_by_execution.get(execution_id, []))
+        with self._lock:
+            return list(self._events_by_execution.get(execution_id, []))
 
-    def verify_event_chain(self, execution_id: str) -> Tuple[bool, Optional[str]]:
+    def verify_event_chain(
+        self,
+        execution_id: str,
+        expected_head_hash: Optional[str] = None,
+    ) -> Tuple[bool, Optional[str]]:
         """Verify the cryptographic hash chain and monotonic ordering of recorded events.
+
+        Args:
+            execution_id: Target execution identifier.
+            expected_head_hash: Optional authentic committed head hash to detect full chain rewriting.
 
         Returns:
             Tuple of (is_valid, optional_error_message).
         """
-        events = self._events_by_execution.get(execution_id, [])
+        with self._lock:
+            events = list(self._events_by_execution.get(execution_id, []))
+
         if not events:
+            if expected_head_hash:
+                return False, "Expected event chain is empty; events were deleted."
             return True, None
+
+        if expected_head_hash and events[-1].event_hash != expected_head_hash:
+            return False, f"Head hash mismatch: expected {expected_head_hash}, got {events[-1].event_hash}. Event chain was rewritten."
 
         expected_prev = "0" * 64
         for idx, ev in enumerate(events):

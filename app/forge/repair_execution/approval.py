@@ -75,6 +75,7 @@ class RepairApprovalValidator:
         current_time: Optional[datetime] = None,
         revoked_approvals: Optional[Set[str]] = None,
         consumed_approvals: Optional[Dict[str, str]] = None,
+        trusted_approver_identities: Optional[Set[str]] = None,
     ) -> ApprovalValidationResult:
         """Verify all mandatory authorization invariants.
 
@@ -167,12 +168,40 @@ class RepairApprovalValidator:
                 f"Authorization violation: plan contains required changes in unapproved file(s) {unapproved_changes}."
             )
 
-        # Invariant 10: Approver reference non-empty
-        if not approval.approver_reference or approval.approver_reference.strip().lower() in ("unknown", "none", "auto", "llm"):
+        # Invariant 10: Approver reference non-empty, non-AI, and verified against trusted identity registry
+        prohibited_identities = {
+            "unknown",
+            "none",
+            "auto",
+            "llm",
+            "ai",
+            "model",
+            "agent",
+            "forge",
+            "assistant",
+            "subagent",
+            "bot",
+            "synthetic",
+            "system",
+        }
+        approver_raw = approval.approver_reference.strip() if approval.approver_reference else ""
+        approver_lower = approver_raw.lower()
+
+        if (
+            not approver_raw
+            or approver_lower in prohibited_identities
+            or any(term in approver_lower for term in ("llm", "subagent", "synthetic"))
+        ):
             errors.append(
                 "Authorization violation: invalid or unverified approver reference. "
-                "Explicit human approver identity is required."
+                "Explicit human approver identity is required (AI/model/agent references are strictly forbidden)."
             )
+        elif trusted_approver_identities is not None:
+            if approver_raw not in trusted_approver_identities:
+                errors.append(
+                    f"Authorization violation: approver identity '{approver_raw}' is not recognized "
+                    "in the trusted human approver registry."
+                )
 
         is_valid = len(errors) == 0
         return ApprovalValidationResult(is_valid=is_valid, errors=errors)

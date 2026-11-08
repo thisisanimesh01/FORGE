@@ -1100,3 +1100,189 @@ def test_adversarial_crlf_and_no_newline_preservation(tmp_path: Path):
     res2 = applier.apply_patch(ws, unified_diff=no_nl_diff, allowed_files=["no_nl.py"])
     assert res2.success is True
     assert no_nl_file.read_bytes() == b"line1\nline2_patched"
+
+
+def test_adversarial_approval_restart_persistence_sqlite(sample_repo: Path, tmp_path: Path):
+    """Consumed approval survives process restart via SQLite ledger; cannot be replayed on fresh executor."""
+    db_file = tmp_path / "ledger.db"
+    plan = _build_dummy_plan()
+    approval = _build_dummy_approval(plan)
+
+    diff = (
+        "--- a/src/calculator.py\n"
+        "+++ b/src/calculator.py\n"
+        "@@ -4,2 +4,4 @@\n"
+        " def divide(a, b):\n"
+        "+    if b == 0:\n"
+        "+        raise ValueError('division by zero')\n"
+        "     return a / b\n"
+    )
+    patch = RepairPatch(
+        patch_id="pat_replay",
+        repair_plan_id=plan.plan_id,
+        strategy_id=plan.selected_strategy_id,
+        unified_diff=diff,
+        patch_digest=compute_patch_digest(diff),
+        affected_files=["src/calculator.py"],
+        validation_status=PatchValidationStatus.VALID,
+    )
+
+    # First executor process consumes approval
+    ws_mgr1 = RepairWorkspaceManager(original_repo_path=sample_repo, base_workspaces_dir=tmp_path / "ws1")
+    exec1 = ControlledRepairExecutor(repo_path=sample_repo, workspace_manager=ws_mgr1, db_path=db_file)
+    res1 = exec1.execute_repair(plan=plan, approval=approval, custom_patch=patch)
+    assert res1.execution_status == ExecutionStatus.APPLIED
+
+    # Second executor instance simulating process restart with same db_path
+    ws_mgr2 = RepairWorkspaceManager(original_repo_path=sample_repo, base_workspaces_dir=tmp_path / "ws2")
+    exec2 = ControlledRepairExecutor(repo_path=sample_repo, workspace_manager=ws_mgr2, db_path=db_file)
+    res2 = exec2.execute_repair(plan=plan, approval=approval, custom_patch=patch)
+    assert res2.execution_status == ExecutionStatus.BLOCKED
+    assert res2.failure_classification == FailureClassification.UNAUTHORIZED_EXECUTION
+    assert "already been consumed" in res2.diff_summary
+
+
+def test_adversarial_approval_concurrency_race(sample_repo: Path, tmp_path: Path):
+    """Simultaneous concurrent requests racing on a single approval cannot both consume it."""
+    import concurrent.futures
+
+    plan = _build_dummy_plan()
+    approval = _build_dummy_approval(plan)
+
+    diff = (
+        "--- a/src/calculator.py\n"
+        "+++ b/src/calculator.py\n"
+        "@@ -4,2 +4,4 @@\n"
+        " def divide(a, b):\n"
+        "+    if b == 0:\n"
+        "+        raise ValueError('division by zero')\n"
+        "     return a / b\n"
+    )
+
+    ws_mgr = RepairWorkspaceManager(original_repo_path=sample_repo, base_workspaces_dir=tmp_path / "ws")
+    executor = ControlledRepairExecutor(repo_path=sample_repo, workspace_manager=ws_mgr)
+
+    def _attempt_exec(thread_id: int):
+        p = RepairPatch(
+            patch_id=f"pat_race_{thread_id}",
+            repair_plan_id=plan.plan_id,
+            strategy_id=plan.selected_strategy_id,
+            unified_diff=diff,
+            patch_digest=compute_patch_digest(diff),
+            affected_files=["src/calculator.py"],
+            validation_status=PatchValidationStatus.VALID,
+        )
+        return executor.execute_repair(plan=plan, approval=approval, custom_patch=p)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(_attempt_exec, i) for i in range(4)]
+        results = [f.result() for f in futures]
+
+    applied_count = sum(1 for r in results if r.execution_status == ExecutionStatus.APPLIED)
+    blocked_count = sum(1 for r in results if r.execution_status == ExecutionStatus.BLOCKED)
+
+    assert applied_count == 1
+    assert blocked_count == 3
+
+
+def test_adversarial_trusted_human_identity_boundary(sample_repo: Path):
+    """Approver reference is verified against trusted identity registry; AI and unlisted identities fail closed."""
+    plan = _build_dummy_plan()
+
+    # 1. AI/Synthetic approver reference rejected
+    ai_approval = _build_dummy_approval(plan, approver="autonomous-subagent")
+    res_ai = RepairApprovalValidator.validate_approval(ai_approval, plan)
+    assert res_ai.is_valid is False
+    assert any("AI/model/agent references are strictly forbidden" in e for e in res_ai.errors)
+
+    # 2. Trusted approver registry enforcement
+    trusted_registry = {"lead-architect@security.internal", "audit-director@security.internal"}
+    unknown_approval = _build_dummy_approval(plan, approver="attacker@external.corp")
+    res_unknown = RepairApprovalValidator.validate_approval(
+        unknown_approval,
+        plan,
+        trusted_approver_identities=trusted_registry,
+    )
+    assert res_unknown.is_valid is False
+    assert any("not recognized in the trusted human approver registry" in e for e in res_unknown.errors)
+
+    # 3. Legitimate trusted approver passes
+    valid_approval = _build_dummy_approval(plan, approver="lead-architect@security.internal")
+    res_valid = RepairApprovalValidator.validate_approval(
+        valid_approval,
+        plan,
+        trusted_approver_identities=trusted_registry,
+    )
+    assert res_valid.is_valid is True
+
+
+def test_adversarial_baseline_snapshot_read_only_protection(sample_repo: Path, tmp_path: Path):
+    """Files in the baseline snapshot directory are write-protected (read-only mode 0400)."""
+    ws_mgr = RepairWorkspaceManager(original_repo_path=sample_repo, base_workspaces_dir=tmp_path / "ws")
+    ws = ws_mgr.allocate_workspace(allowed_paths=["src/calculator.py"], plan_id="p1")
+
+    snap_file = Path(ws.baseline_snapshot_path) / "src" / "calculator.py"
+    assert snap_file.exists()
+
+    # Attempting to write directly to snapshot file raises PermissionError
+    with pytest.raises(PermissionError):
+        snap_file.write_text("corrupted snapshot content")
+
+    ws_mgr.cleanup_workspace(ws.workspace_id)
+
+
+def test_adversarial_rollback_refuses_corrupted_baseline(sample_repo: Path, tmp_path: Path):
+    """If the baseline snapshot is tampered with, rollback refuses to restore and marks workspace CORRUPTED."""
+    import stat
+
+    ws_mgr = RepairWorkspaceManager(original_repo_path=sample_repo, base_workspaces_dir=tmp_path / "ws")
+    ws = ws_mgr.allocate_workspace(allowed_paths=["src/calculator.py"], plan_id="p1")
+
+    # Mutate active workspace
+    ws_file = Path(ws.isolated_workspace_path) / "src" / "calculator.py"
+    ws_file.write_text("modified workspace content")
+
+    # Adversary circumvents permissions and tampers with baseline snapshot
+    snap_file = Path(ws.baseline_snapshot_path) / "src" / "calculator.py"
+    snap_file.chmod(stat.S_IRWXU)
+    snap_file.write_text("tampered baseline content")
+
+    rollback_mgr = WorkspaceRollbackManager()
+    status, restored, digest = rollback_mgr.rollback(ws)
+
+    # Rollback must refuse to restore from corrupted snapshot
+    assert status == RollbackStatus.FAILED
+    assert ws.workspace_status == WorkspaceStatus.CORRUPTED
+    assert len(restored) == 0
+
+    # Clean up with force
+    ws_mgr.cleanup_workspace(ws.workspace_id, force=True)
+
+
+def test_adversarial_event_chain_full_rewrite_detection():
+    """Rewriting the entire event chain is detected when checked against an authentic head hash commitment."""
+    recorder = RepairEventRecorder()
+    exec_id = "rex_tamper_test"
+
+    recorder.record_event(exec_id, RepairEventType.WORKSPACE_PREPARED, "Workspace allocated")
+    recorder.record_event(exec_id, RepairEventType.APPROVAL_VERIFIED, "Approval verified")
+    ev3 = recorder.record_event(exec_id, RepairEventType.PATCH_APPLICATION_SUCCEEDED, "Patch applied")
+    head_hash = ev3.event_hash
+
+    # Authenticated check succeeds
+    valid, err = recorder.verify_event_chain(exec_id, expected_head_hash=head_hash)
+    assert valid is True
+    assert err is None
+
+    # Adversary clears events and creates forged events recalculating a new chain
+    recorder.clear(exec_id)
+    recorder.record_event(exec_id, RepairEventType.WORKSPACE_PREPARED, "Forged workspace event")
+    recorder.record_event(exec_id, RepairEventType.PATCH_APPLICATION_SUCCEEDED, "Forged patch event")
+
+    # Internal chain is internally valid, but fails against authentic head hash commitment
+    internally_valid, _ = recorder.verify_event_chain(exec_id)
+    assert internally_valid is True
+
+    authenticated_valid, auth_err = recorder.verify_event_chain(exec_id, expected_head_hash=head_hash)
+    assert authenticated_valid is False
+    assert "Head hash mismatch" in auth_err
