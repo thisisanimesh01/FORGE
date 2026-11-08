@@ -30,6 +30,7 @@ from forge.schemas import (
 from forge.storage.store import ForgeStore
 from forge.causality.tools import CausalityTools
 from forge.repair_planning.tools import RepairPlanningTools
+from forge.repair_execution.tools import RepairExecutionTools
 from forge.llm.repo_tools import RepositoryIntelligenceTools
 from forge.repository.incremental import IncrementalRepositoryIndex
 from forge.llm.repo_tool_schemas import (
@@ -122,6 +123,10 @@ class ToolRegistry:
         self._repair_planning_tools = RepairPlanningTools(
             workspace_path=self.workspace_path,
             incremental_index=self.incremental_index,
+            max_output_chars=self.max_output_chars,
+        )
+        self._repair_execution_tools = RepairExecutionTools(
+            repository_path=self.workspace_path,
             max_output_chars=self.max_output_chars,
         )
         if rejected_tracker is not None:
@@ -474,9 +479,40 @@ class ToolRegistry:
             if hasattr(self, handler_name):
                 self._handlers[tool_def.name] = getattr(self, handler_name)
 
+        # Phase 12 M4: Repair Execution Tools
+        for tool_def in self._repair_execution_tools.get_tool_definitions():
+            self._definitions.append(tool_def)
+            handler_name = f"_handle_{tool_def.name}"
+            if hasattr(self, handler_name):
+                self._handlers[tool_def.name] = getattr(self, handler_name)
+
     # -------------------------------------------------------------
     # Tool Handlers
     # -------------------------------------------------------------
+
+    def _handle_prepare_repair_workspace(self, args: Dict[str, Any]) -> str:
+        return self._repair_execution_tools.prepare_repair_workspace(args)
+
+    def _handle_validate_repair_approval(self, args: Dict[str, Any]) -> str:
+        return self._repair_execution_tools.validate_repair_approval(args)
+
+    def _handle_generate_repair_patch(self, args: Dict[str, Any]) -> str:
+        return self._repair_execution_tools.generate_repair_patch(args)
+
+    def _handle_validate_repair_patch(self, args: Dict[str, Any]) -> str:
+        return self._repair_execution_tools.validate_repair_patch(args)
+
+    def _handle_apply_approved_repair(self, args: Dict[str, Any]) -> str:
+        return self._repair_execution_tools.apply_approved_repair(args)
+
+    def _handle_inspect_repair_execution(self, args: Dict[str, Any]) -> str:
+        return self._repair_execution_tools.inspect_repair_execution(args)
+
+    def _handle_rollback_repair_workspace(self, args: Dict[str, Any]) -> str:
+        return self._repair_execution_tools.rollback_repair_workspace(args)
+
+    def _handle_get_repair_execution_history(self, args: Dict[str, Any]) -> str:
+        return self._repair_execution_tools.get_repair_execution_history(args)
 
     def _handle_create_repair_plan(self, args: Dict[str, Any]) -> str:
         return self._repair_planning_tools.create_repair_plan(args)
