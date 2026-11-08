@@ -36,7 +36,14 @@ Phase 12 builds upon FORGE's foundational repository understanding (Phase 11) to
   - Hardcoded safety invariants in code: `approval_required = True`, `execution_permitted = False`.
   - ToolRegistry integration exposing 6 bounded, read-only tools.
   - Dedicated milestone documentation in [`docs/milestones/phase-12-m3-repair-planning.md`](../milestones/phase-12-m3-repair-planning.md).
-- **Milestone 4**: Controlled Autonomous Repair `[PENDING]`
+- **Milestone 4**: Controlled Autonomous Repair `[COMPLETED]`
+  - Explicit human approval validation bound to plan digest, strategy, and file scope allowlist.
+  - Isolated workspace allocation preserving read-only immutability of target repository.
+  - Pure in-memory unified diff application with automatic pre-patch backup reversion on context mismatch.
+  - Workspace integrity verification and automatic rollback restoration to baseline tree digest.
+  - Immutable audit event trail with automatic secret redaction.
+  - ToolRegistry integration exposing 8 structured, typed repair execution tools.
+  - Dedicated milestone documentation in [`docs/milestones/phase-12-m4-controlled-repair.md`](../milestones/phase-12-m4-controlled-repair.md).
 - **Milestone 5**: Repair Verification `[PENDING]`
 - **Milestone 6**: Repair Quality & Reliability `[PENDING]`
 
@@ -176,3 +183,56 @@ Coordinates the entire pipeline:
 
 ### 6. Repair Planning Tools (`forge.repair_planning.tools`)
 - Exposes 6 typed, read-only tools to `ToolRegistry`: `create_repair_plan`, `compare_repair_strategies`, `assess_repair_risk`, `explain_repair_plan`, `validate_repair_plan`, `generate_verification_plan`.
+
+---
+
+## Milestone 4 Architecture: Controlled Autonomous Repair
+
+### 1. Data Contracts & Enums (`forge.repair_execution.schemas`)
+- **Strict Pydantic Contracts**: Governed by `ConfigDict(extra="forbid")` and explicit character/event limits.
+- **Key Enums**: `ExecutionStatus`, `ApprovalStatus`, `WorkspaceStatus`, `PatchValidationStatus`, `FailureClassification`, `RollbackStatus`, `RepairEventType`.
+- **Core Models**:
+  - `RepairApproval`: Frozen contract binding approval ID, plan ID, SHA-256 plan digest, strategy ID, approved file paths allowlist, timestamps, and human approver reference.
+  - `RepairWorkspace`: Tracks workspace ID, original repository reference, isolated directory path, baseline commit, baseline tree digest, and workspace status.
+  - `RepairPatch`: Structured unified diff representation with added/removed line metrics and canonical SHA-256 patch digest.
+  - `RepairEvent`: Immutable audit record capturing event category, actor, action description, related evidence, and tree/patch digest.
+  - `RepairExecutionResult`: Complete outcome including execution status, modified files, diff summary, rollback status, failure classification, and `verification_pending = True`.
+
+### 2. Mandatory Human Approval Invariants (`forge.repair_execution.approval`)
+- `RepairApprovalValidator` audits 10 non-negotiable authorization rules:
+  1. Approval status must be strictly `APPROVED`.
+  2. Approval expiry must be in the future (`current_time < approval_expiry`).
+  3. `repair_plan_id` must match target plan ID.
+  4. SHA-256 digest of normalized plan content must match approved `plan_digest`.
+  5. `approved_strategy_id` must match `plan.selected_strategy_id`.
+  6. Plan status must be `ACTIONABLE`.
+  7. Supporting causal evidence must be verified and fresh (zero stale evidence).
+  8. All affected target files must fall strictly within `approved_file_paths`.
+  9. All required changes must fall strictly within `approved_file_paths`.
+  10. Non-empty human approver reference is mandatory (rejects 'unknown', 'auto', 'llm').
+
+### 3. Isolated Workspace Lifecycle & Protection (`forge.repair_execution.workspace`)
+- Target repository is strictly read-only and never modified.
+- Workspaces are allocated in isolated directories under `workspace_dir / "repair_workspaces" / <workspace_id>`.
+- Excludes `.git` and protected paths during copy. Symlinks are resolved to prevent sandbox escape.
+- Calls `purge_protected_paths_from_workspace()` to remove credentials (`.env`, secrets, databases).
+- Computes canonical SHA-256 tree digest over all workspace files.
+
+### 4. Controlled In-Memory Patch Application (`forge.repair_execution.patch_applier`)
+- Pure in-memory Python implementation with zero host shell commands, zero subprocess execution, and zero script interpolation.
+- Backs up pre-patch file states in memory.
+- Enforces context-line matching before hunk substitution. Context mismatches immediately abort application and restore in-memory backups.
+- Applies hunks in reverse line order to prevent offset disruption.
+
+### 5. Workspace Integrity Verification & Rollback (`forge.repair_execution.integrity`, `rollback`)
+- `WorkspaceIntegrityChecker` compares post-repair workspace against baseline tree digest and approved file allowlist.
+- Detects unauthorized file modification, creation, or deletion outside scope, triggering immediate rollback.
+- `WorkspaceRollbackManager` restores original files from memory or original repo, verifying post-rollback tree digest equals baseline digest.
+- Failed rollback transitions workspace to `PRESERVED_FOR_INSPECTION` with `RECOVERY_REQUIRED`.
+
+### 6. Audit Trail & Secret Redaction (`forge.repair_execution.events`)
+- Emits sequential `RepairEvent` audit records for all lifecycle stages.
+- Automatically redacts secrets via `redact_secrets()`. Enforces `MAX_EVENTS_PER_EXECUTION = 200`.
+
+### 7. Repair Execution Tools (`forge.repair_execution.tools`)
+- Exposes 8 structured, typed tools to `ToolRegistry`: `prepare_repair_workspace`, `validate_repair_approval`, `generate_repair_patch`, `validate_repair_patch`, `apply_approved_repair`, `inspect_repair_execution`, `rollback_repair_workspace`, `get_repair_execution_history`.
