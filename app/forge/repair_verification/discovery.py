@@ -72,6 +72,30 @@ class RepairTestDiscoverer:
             if m.endswith(".py")
         }
 
+        # 2b. Map 1-hop indirect dependencies from non-test workspace source files
+        indirect_dependent_stems: Set[str] = set()
+        for p in self.workspace_path.rglob("*.py"):
+            parts = p.parts
+            if any(part in {".git", ".venv", "venv", "__pycache__", ".tox", ".pytest_cache"} for part in parts):
+                continue
+            rel_p = str(p.relative_to(self.workspace_path)).replace("\\", "/")
+            if rel_p in all_tests or p.name.startswith("test_") or "tests/" in rel_p:
+                continue
+            try:
+                if p.stat().st_size <= MAX_FILE_BYTES:
+                    src_content = p.read_text(encoding="utf-8", errors="replace")
+                    src_tree = ast.parse(src_content, filename=str(p))
+                    for node in ast.walk(src_tree):
+                        if isinstance(node, ast.Import):
+                            for alias in node.names:
+                                if any(st == alias.name.split(".")[-1] or st in alias.name.split(".") for st in mod_stems):
+                                    indirect_dependent_stems.add(p.stem)
+                        elif isinstance(node, ast.ImportFrom):
+                            if node.module and any(st == node.module.split(".")[-1] or st in node.module.split(".") for st in mod_stems):
+                                indirect_dependent_stems.add(p.stem)
+            except Exception:
+                pass
+
         seen_test_ids: Set[str] = set()
 
         # 3. Inspect each test file
@@ -82,7 +106,8 @@ class RepairTestDiscoverer:
             except SecurityError:
                 continue
 
-            test_names, imported_modules = self._parse_test_file(full_test_path)
+            test_names, imported_modules, file_limits = self._parse_test_file(full_test_path)
+            result.limitations.extend(file_limits)
             test_stem = Path(test_file_rel).stem
 
             # Check if this test file is directly targeted
@@ -116,12 +141,17 @@ class RepairTestDiscoverer:
                     )
                     result.targeted_tests.append(item)
                 else:
-                    # Check if it imports something related (regression)
+                    # Check if it imports something related (direct or indirect regression)
                     is_regression = False
                     for stem in mod_stems:
                         if any(stem in imp for imp in imported_modules):
                             is_regression = True
                             break
+                    if not is_regression and indirect_dependent_stems:
+                        for ind_stem in indirect_dependent_stems:
+                            if any(ind_stem in imp for imp in imported_modules):
+                                is_regression = True
+                                break
 
                     cat = TestScopeCategory.REGRESSION if is_regression else TestScopeCategory.FULL_SUITE
                     item = TestIdentifier(
@@ -134,6 +164,11 @@ class RepairTestDiscoverer:
                         result.regression_tests.append(item)
                     else:
                         result.other_tests.append(item)
+
+        if result.duplicate_identifiers:
+            result.limitations.append(
+                f"Duplicate test identifier(s) detected: {', '.join(result.duplicate_identifiers)}"
+            )
 
         return result
 
@@ -160,29 +195,37 @@ class RepairTestDiscoverer:
 
             rel_str = str(p.relative_to(self.workspace_path)).replace("\\", "/")
             name = p.name
-            if name.startswith("test_") or name.endswith("_test.py") or "tests/" in rel_str:
+            if (
+                name.startswith("test_")
+                or name.endswith("_test.py")
+                or "tests/" in rel_str
+                or "test/" in rel_str
+                or rel_str.startswith("tests/")
+                or rel_str.startswith("test/")
+            ):
                 test_files.append(rel_str)
 
         return sorted(test_files)
 
-    def _parse_test_file(self, file_path: Path) -> Tuple[List[str], Set[str]]:
-        """Parse Python test file to extract test function names and imported modules."""
+    def _parse_test_file(self, file_path: Path) -> Tuple[List[str], Set[str], List[str]]:
+        """Parse Python test file to extract test function names, imported modules, and discovery limitations."""
         test_names: List[str] = []
         imported_modules: Set[str] = set()
+        file_limitations: List[str] = []
 
         try:
             if file_path.stat().st_size > MAX_FILE_BYTES:
-                return ["test_suite_file"], set()
+                return ["test_suite_file"], set(), [f"File {file_path.name} exceeds max size limit"]
             content = file_path.read_text(encoding="utf-8", errors="replace")
             tree = ast.parse(content, filename=str(file_path))
-        except Exception:
-            # Fallback regex if syntax error or AST parsing fails
+        except Exception as e:
+            file_limitations.append(f"AST parse failure in {file_path.name}: {e}")
             try:
                 content = file_path.read_text(encoding="utf-8", errors="replace")
                 func_matches = re.findall(r"def\s+(test_[a-zA-Z0-9_]+)\s*\(", content)
-                return sorted(set(func_matches)) or ["test_suite_fallback"], set()
+                return sorted(set(func_matches)) or ["test_suite_fallback"], set(), file_limitations
             except Exception:
-                return ["test_suite_fallback"], set()
+                return ["test_suite_fallback"], set(), file_limitations
 
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef):
@@ -199,8 +242,27 @@ class RepairTestDiscoverer:
             elif isinstance(node, ast.ImportFrom):
                 if node.module:
                     imported_modules.add(node.module)
+            elif isinstance(node, ast.Call):
+                # Detect dynamic import attempts: importlib.import_module or __import__
+                func = node.func
+                is_dyn = False
+                mod_arg = None
+                if isinstance(func, ast.Name) and func.id == "__import__":
+                    is_dyn = True
+                    if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                        mod_arg = node.args[0].value
+                elif isinstance(func, ast.Attribute) and func.attr == "import_module":
+                    is_dyn = True
+                    if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                        mod_arg = node.args[0].value
+                if is_dyn:
+                    if mod_arg:
+                        imported_modules.add(mod_arg)
+                    file_limitations.append(
+                        f"Dynamic import detected in {file_path.name}; test dependency graph may be incomplete"
+                    )
 
         if not test_names:
             test_names = [f"test_{Path(file_path).stem}"]
 
-        return sorted(set(test_names)), imported_modules
+        return sorted(set(test_names)), imported_modules, file_limitations

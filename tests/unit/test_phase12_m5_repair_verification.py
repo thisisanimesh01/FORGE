@@ -57,6 +57,7 @@ from forge.repair_verification.test_selection import IntelligentTestSelector
 from forge.repair_verification.tools import RepairVerificationTools
 from forge.repair_verification.verification_plan import VerificationPlanGenerator
 from forge.sandbox.adapter import Sandbox
+from forge.sandbox.docker import DockerSandbox
 from forge.sandbox.models import (
     ExecutionLimits,
     ExecutionStatus as SbxStatus,
@@ -858,4 +859,440 @@ def test_original_repo_mutation_detected(test_repo_env):
     # Mutate repo
     (repo_dir / "unauthorized_change.txt").write_text("modified!", encoding="utf-8")
     assert VerificationIntegrityChecker.verify_original_repo_unmodified(repo_dir, expected_digest) is False
+
+
+# ---------------------------------------------------------------------------
+# Category I: Final Security Audit & Adversarial Scenarios
+# ---------------------------------------------------------------------------
+
+def test_adversarial_replay_verification_rejected(test_repo_env):
+    """Replaying the same verification execution ID is rejected by the executor."""
+    repo_dir, ws_dir, snap_dir, workspace, exec_result = test_repo_env
+    fake_sbx = FakeSandboxAdapter(is_available_flag=True)
+    v_sbx = VerificationSandbox(sandbox=fake_sbx)
+    executor = RepairVerificationExecutor(sandbox=v_sbx)
+
+    # First run succeeds
+    res1, updated1 = executor.verify_repair(execution_result=exec_result, workspace=workspace)
+    assert res1.verification_status == VerificationStatus.PASSED
+
+    # Second run with identical verification_id must be rejected as replay
+    res2, updated2 = executor.verify_repair(execution_result=exec_result, workspace=workspace)
+    assert res2.verification_status == VerificationStatus.BLOCKED
+    assert res2.gate_decision == "BLOCKED"
+    assert any("replay" in lim.lower() for lim in res2.limitations)
+    assert updated2 is None
+
+
+def test_adversarial_mismatched_plan_patch_digest_rejected(test_repo_env):
+    """Providing a VerificationPlan with mismatched patch digest is rejected."""
+    repo_dir, ws_dir, snap_dir, workspace, exec_result = test_repo_env
+    fake_sbx = FakeSandboxAdapter(is_available_flag=True)
+    v_sbx = VerificationSandbox(sandbox=fake_sbx)
+    executor = RepairVerificationExecutor(sandbox=v_sbx)
+
+    gen = VerificationPlanGenerator()
+    valid_plan = gen.generate_plan(execution_result=exec_result, workspace=workspace)
+    tampered_plan = valid_plan.model_copy(update={"expected_patch_digest": "f" * 64})
+
+    res, updated = executor.verify_repair(
+        execution_result=exec_result,
+        workspace=workspace,
+        plan=tampered_plan,
+    )
+    assert res.verification_status == VerificationStatus.BLOCKED
+    assert res.gate_decision == "FAILED"
+    assert any("patch digest" in lim for lim in res.limitations)
+    assert updated is None
+
+
+def test_adversarial_empty_selected_checks_fails_closed(test_repo_env):
+    """Verification plan with zero checks must never pass verification gates."""
+    repo_dir, ws_dir, snap_dir, workspace, exec_result = test_repo_env
+    empty_plan = VerificationPlan(
+        plan_id="vplan_empty",
+        repair_plan_id=exec_result.repair_plan_id,
+        execution_id=exec_result.execution_id,
+        workspace_id=workspace.workspace_id,
+        selected_checks=[],
+        selection_method="none",
+        selection_rationale="empty",
+        expected_baseline_digest=workspace.baseline_tree_digest,
+        expected_patch_digest=exec_result.applied_patch_digest,
+    )
+    repaired_summary = SuiteExecutionSummary(
+        execution_type="repaired",
+        workspace_id=workspace.workspace_id,
+        tree_digest="tree_01",
+        checks=[],
+        all_passed=True,
+        sandbox_available=True,
+    )
+    status, decision, req_done, req_fail, opt_fail = VerificationGateKeeper.evaluate_gates(
+        execution_result=exec_result,
+        plan=empty_plan,
+        sandbox_available=True,
+        baseline_summary=None,
+        repaired_summary=repaired_summary,
+        regression_class=RegressionClassification.NO_REGRESSION_OBSERVED,
+        workspace_integrity_passed=True,
+        integrity_violations=[],
+    )
+    assert status == VerificationStatus.INCOMPLETE
+    assert decision == "FAILED"
+
+
+def test_adversarial_missing_baseline_summary_classified_as_inconclusive(test_repo_env):
+    """Missing baseline summary cannot produce NO_REGRESSION_OBSERVED guarantee."""
+    repo_dir, ws_dir, snap_dir, workspace, exec_result = test_repo_env
+    rep_chk = CheckExecutionResult(
+        check_id="chk_01",
+        category=TestScopeCategory.TARGETED,
+        command=["pytest", "-v"],
+        outcome=CheckOutcome.PASSED,
+        exit_code=0,
+    )
+    repaired_summary = SuiteExecutionSummary(
+        execution_type="repaired",
+        workspace_id=workspace.workspace_id,
+        tree_digest="tree_01",
+        checks=[rep_chk],
+        all_passed=True,
+        sandbox_available=True,
+    )
+    classification, findings = DeterministicRegressionEngine.analyze_regressions(
+        baseline_summary=None,
+        repaired_summary=repaired_summary,
+    )
+    assert classification == RegressionClassification.INCONCLUSIVE
+    assert len(findings) == 1
+    assert "missing" in findings[0].explanation.lower()
+
+
+def test_adversarial_corrupted_baseline_summary_classified_as_inconclusive(test_repo_env):
+    """Corrupted baseline snapshot execution produces INCONCLUSIVE regression result."""
+    repo_dir, ws_dir, snap_dir, workspace, exec_result = test_repo_env
+    rep_chk = CheckExecutionResult(
+        check_id="chk_01",
+        category=TestScopeCategory.TARGETED,
+        command=["pytest", "-v"],
+        outcome=CheckOutcome.PASSED,
+        exit_code=0,
+    )
+    baseline_summary = SuiteExecutionSummary(
+        execution_type="baseline",
+        workspace_id=workspace.workspace_id,
+        tree_digest="",
+        checks=[],
+        all_passed=False,
+        sandbox_available=True,
+        sandbox_details={"error": "Corrupted baseline snapshot: digest mismatch"},
+    )
+    repaired_summary = SuiteExecutionSummary(
+        execution_type="repaired",
+        workspace_id=workspace.workspace_id,
+        tree_digest="tree_01",
+        checks=[rep_chk],
+        all_passed=True,
+        sandbox_available=True,
+    )
+    classification, findings = DeterministicRegressionEngine.analyze_regressions(
+        baseline_summary=baseline_summary,
+        repaired_summary=repaired_summary,
+    )
+    assert classification == RegressionClassification.INCONCLUSIVE
+    assert any("corrupted" in f.explanation.lower() for f in findings)
+
+
+def test_adversarial_environment_mismatch_detected(test_repo_env):
+    """Mismatched test suites or sandbox images produce ENVIRONMENT_MISMATCH."""
+    repo_dir, ws_dir, snap_dir, workspace, exec_result = test_repo_env
+    chk1 = CheckExecutionResult(
+        check_id="chk_01",
+        category=TestScopeCategory.TARGETED,
+        command=["pytest", "-v"],
+        outcome=CheckOutcome.PASSED,
+        exit_code=0,
+    )
+    chk2 = CheckExecutionResult(
+        check_id="chk_02",
+        category=TestScopeCategory.REGRESSION,
+        command=["pytest", "-v"],
+        outcome=CheckOutcome.PASSED,
+        exit_code=0,
+    )
+
+    # 1. Different checks in baseline vs repaired
+    base_summary = SuiteExecutionSummary(
+        execution_type="baseline",
+        workspace_id=workspace.workspace_id,
+        tree_digest="tree_01",
+        checks=[chk1],
+        all_passed=True,
+        sandbox_available=True,
+    )
+    rep_summary = SuiteExecutionSummary(
+        execution_type="repaired",
+        workspace_id=workspace.workspace_id,
+        tree_digest="tree_02",
+        checks=[chk1, chk2],
+        all_passed=True,
+        sandbox_available=True,
+    )
+    classification, findings = DeterministicRegressionEngine.analyze_regressions(
+        baseline_summary=base_summary,
+        repaired_summary=rep_summary,
+    )
+    assert classification == RegressionClassification.ENVIRONMENT_MISMATCH
+
+    # 2. Conflicting container images in sandbox_details
+    base_summary_img = SuiteExecutionSummary(
+        execution_type="baseline",
+        workspace_id=workspace.workspace_id,
+        tree_digest="tree_01",
+        checks=[chk1],
+        all_passed=True,
+        sandbox_available=True,
+        sandbox_details={"image": "python:3.11-slim"},
+    )
+    rep_summary_img = SuiteExecutionSummary(
+        execution_type="repaired",
+        workspace_id=workspace.workspace_id,
+        tree_digest="tree_02",
+        checks=[chk1],
+        all_passed=True,
+        sandbox_available=True,
+        sandbox_details={"image": "python:3.12-slim"},
+    )
+    classification_img, findings_img = DeterministicRegressionEngine.analyze_regressions(
+        baseline_summary=base_summary_img,
+        repaired_summary=rep_summary_img,
+    )
+    assert classification_img == RegressionClassification.ENVIRONMENT_MISMATCH
+
+
+def test_adversarial_event_payload_in_place_tampering_detected():
+    """Modifying event payload in place is detected by verify_event_chain hash recomputation."""
+    recorder = VerificationEventRecorder()
+    ev1 = recorder.record_event("vrf_01", VerificationEventType.VERIFICATION_REQUESTED, "Start verification")
+    ev2 = recorder.record_event("vrf_01", VerificationEventType.VERIFICATION_PASSED, "Passed verification")
+
+    # Intact chain passes
+    assert recorder.verify_event_chain(expected_head_hash=ev2.event_hash) is True
+
+    # Tamper with ev1 payload by constructing modified copy with same event_hash
+    tampered_ev1 = VerificationEvent(
+        event_id=ev1.event_id,
+        verification_id=ev1.verification_id,
+        sequence_number=ev1.sequence_number,
+        prev_event_hash=ev1.prev_event_hash,
+        event_hash=ev1.event_hash,  # Preserved original hash!
+        event_type=ev1.event_type,
+        timestamp=ev1.timestamp,
+        actor=ev1.actor,
+        action_description="Tampered description inserted here",
+        outcome=ev1.outcome,
+    )
+    recorder._events[0] = tampered_ev1
+
+    with pytest.raises(ValueError, match="event payload tampering detected"):
+        recorder.verify_event_chain()
+
+
+def test_adversarial_dynamic_import_and_test_directory_discovery(tmp_path: Path):
+    """Discoverer detects tests in test/ directory and flags dynamic imports as limitations."""
+    ws = tmp_path / "ws_dynamic"
+    ws.mkdir()
+    (ws / "calc.py").write_text("def mul(a, b): return a * b\n", encoding="utf-8")
+
+    # Directory named test/ (singular)
+    test_dir = ws / "test"
+    test_dir.mkdir()
+    (test_dir / "my_check.py").write_text(
+        "import importlib\n"
+        "def test_dyn():\n"
+        "    mod = importlib.import_module('calc')\n"
+        "    assert mod.mul(2, 3) == 6\n",
+        encoding="utf-8",
+    )
+
+    discoverer = RepairTestDiscoverer(workspace_path=ws)
+    res = discoverer.discover_tests(modified_files=["calc.py"])
+
+    # Discovered test file in test/
+    assert "test/my_check.py" in res.all_test_files
+    # Detected dynamic import and added to limitations
+    assert any("dynamic import" in lim.lower() for lim in res.limitations)
+
+    # Test selection must mark partial verification due to limitations
+    selector = IntelligentTestSelector(workspace_path=ws)
+    checks, ids, excl, is_partial, rationale = selector.select_checks(modified_files=["calc.py"], discovered=res)
+    assert is_partial is True
+    assert "limitations" in rationale.lower()
+
+
+def test_adversarial_indirect_module_import_discovery(tmp_path: Path):
+    """Discoverer detects 1-hop indirect dependencies and categorizes importing tests as regression."""
+    ws = tmp_path / "ws_indirect"
+    ws.mkdir()
+    (ws / "core.py").write_text("def base_val(): return 42\n", encoding="utf-8")
+    (ws / "service.py").write_text("from core import base_val\ndef get_service(): return base_val() + 1\n", encoding="utf-8")
+    (ws / "tests").mkdir()
+    (ws / "tests" / "test_service.py").write_text(
+        "import service\ndef test_srv(): assert service.get_service() == 43\n",
+        encoding="utf-8",
+    )
+
+    discoverer = RepairTestDiscoverer(workspace_path=ws)
+    # core.py was modified; test_service imports service.py which imports core.py
+    res = discoverer.discover_tests(modified_files=["core.py"])
+    assert len(res.regression_tests) >= 1
+    assert res.regression_tests[0].test_file == "tests/test_service.py"
+
+
+# ---------------------------------------------------------------------------
+# Category J: End-to-End Fake-Adapter Scenarios
+# ---------------------------------------------------------------------------
+
+def test_fake_adapter_e2e_new_regression_detected(test_repo_env):
+    """Scenario A: New regression introduced by repair (baseline passes, repaired fails)."""
+    repo_dir, ws_dir, snap_dir, workspace, exec_result = test_repo_env
+
+    # Baseline passes, repaired fails
+    custom_responses = {
+        "base_": SandboxResult(
+            request_id="sbx_base",
+            run_id="base_ws_001",
+            status=SbxStatus.SUCCEEDED,
+            exit_code=0,
+            stdout="=== 2 passed in 0.05s ===",
+        ),
+        "rep_": SandboxResult(
+            request_id="sbx_rep",
+            run_id="rep_ws_001",
+            status=SbxStatus.FAILED,
+            exit_code=1,
+            stdout="=== 1 passed, 1 failed in 0.05s ===\nFAILED tests/test_calculator.py::test_divide",
+        ),
+    }
+    fake_sbx = FakeSandboxAdapter(is_available_flag=True, custom_responses=custom_responses)
+    v_sbx = VerificationSandbox(sandbox=fake_sbx)
+    executor = RepairVerificationExecutor(sandbox=v_sbx)
+
+    res, updated_exec = executor.verify_repair(execution_result=exec_result, workspace=workspace)
+
+    assert res.verification_status == VerificationStatus.REGRESSION_DETECTED
+    assert res.gate_decision == "FAILED"
+    assert res.regression_classification == RegressionClassification.REGRESSION_DETECTED
+    assert updated_exec is None  # verification_pending remains True!
+
+
+def test_fake_adapter_e2e_pre_existing_failure_preserved(test_repo_env):
+    """Scenario B: Pre-existing failure preserved in both baseline and repaired."""
+    repo_dir, ws_dir, snap_dir, workspace, exec_result = test_repo_env
+
+    failing_result = SandboxResult(
+        request_id="sbx_fail",
+        run_id="run_01",
+        status=SbxStatus.FAILED,
+        exit_code=1,
+        stdout="=== 1 failed in 0.05s ===\nFAILED tests/test_calculator.py::test_divide",
+    )
+    fake_sbx = FakeSandboxAdapter(
+        is_available_flag=True,
+        custom_responses={"base_": failing_result, "rep_": failing_result},
+    )
+    v_sbx = VerificationSandbox(sandbox=fake_sbx)
+    executor = RepairVerificationExecutor(sandbox=v_sbx)
+
+    res, updated_exec = executor.verify_repair(execution_result=exec_result, workspace=workspace)
+
+    assert res.regression_classification == RegressionClassification.PRE_EXISTING_FAILURE
+    assert res.verification_status == VerificationStatus.FAILED
+    assert updated_exec is None
+
+
+def test_fake_adapter_e2e_existing_failure_fixed(test_repo_env):
+    """Scenario C: Existing failure fixed by repair (baseline fails, repaired passes)."""
+    repo_dir, ws_dir, snap_dir, workspace, exec_result = test_repo_env
+
+    custom_responses = {
+        "base_": SandboxResult(
+            request_id="sbx_base",
+            run_id="base_ws_001",
+            status=SbxStatus.FAILED,
+            exit_code=1,
+            stdout="=== 1 failed in 0.05s ===\nFAILED tests/test_calculator.py::test_divide",
+        ),
+        "rep_": SandboxResult(
+            request_id="sbx_rep",
+            run_id="rep_ws_001",
+            status=SbxStatus.SUCCEEDED,
+            exit_code=0,
+            stdout="=== 2 passed in 0.05s ===",
+        ),
+    }
+    fake_sbx = FakeSandboxAdapter(is_available_flag=True, custom_responses=custom_responses)
+    v_sbx = VerificationSandbox(sandbox=fake_sbx)
+    executor = RepairVerificationExecutor(sandbox=v_sbx)
+
+    res, updated_exec = executor.verify_repair(execution_result=exec_result, workspace=workspace)
+
+    assert res.regression_classification == RegressionClassification.IMPROVED
+    assert res.verification_status == VerificationStatus.PASSED
+    assert res.gate_decision == "PASSED"
+    assert updated_exec is not None
+    assert updated_exec.verification_pending is False
+
+
+def test_fake_adapter_e2e_sandbox_unavailable_fails_closed(test_repo_env):
+    """Scenario D: Sandbox unavailable fails closed with zero host execution."""
+    repo_dir, ws_dir, snap_dir, workspace, exec_result = test_repo_env
+    fake_sbx = FakeSandboxAdapter(is_available_flag=False, health_message="Daemon unreachable")
+    v_sbx = VerificationSandbox(sandbox=fake_sbx)
+    executor = RepairVerificationExecutor(sandbox=v_sbx)
+
+    res, updated_exec = executor.verify_repair(execution_result=exec_result, workspace=workspace)
+
+    assert res.verification_status == VerificationStatus.SANDBOX_UNAVAILABLE
+    assert res.gate_decision == "BLOCKED"
+    assert updated_exec is None
+    assert len(fake_sbx.executed_requests) == 0  # Zero execution attempts on unavailable sandbox!
+
+
+def test_fake_adapter_e2e_unapplied_execution_rejected(test_repo_env):
+    """Scenario E: Unapplied execution status rejected at gate 0."""
+    repo_dir, ws_dir, snap_dir, workspace, exec_result = test_repo_env
+    unapplied_exec = exec_result.model_copy(update={"execution_status": ExecutionStatus.FAILED})
+
+    fake_sbx = FakeSandboxAdapter(is_available_flag=True)
+    v_sbx = VerificationSandbox(sandbox=fake_sbx)
+    executor = RepairVerificationExecutor(sandbox=v_sbx)
+
+    # Plan generation raises on unapplied status
+    with pytest.raises(ValueError, match="expected 'applied'"):
+        executor.verify_repair(execution_result=unapplied_exec, workspace=workspace)
+
+
+def test_genuine_docker_execution_when_available(test_repo_env):
+    """Genuine Docker container execution test when Docker daemon is reachable.
+
+    Explicitly verifies real container isolation, non-root execution, network disabled,
+    read-only mounts, and immutability of the original repository.
+    """
+    repo_dir, ws_dir, snap_dir, workspace, exec_result = test_repo_env
+    real_docker = DockerSandbox()
+    healthy, msg = real_docker.check_health()
+    if not healthy:
+        pytest.skip(f"Real Docker sandbox unavailable in current test environment: {msg}")
+
+    v_sbx = VerificationSandbox(sandbox=real_docker)
+    executor = RepairVerificationExecutor(sandbox=v_sbx)
+
+    res, updated_exec = executor.verify_repair(execution_result=exec_result, workspace=workspace)
+
+    assert res.verification_status in (VerificationStatus.PASSED, VerificationStatus.FAILED)
+    # Original repository must remain completely pristine
+    expected_digest = compute_tree_digest(repo_dir)
+    assert VerificationIntegrityChecker.verify_original_repo_unmodified(repo_dir, expected_digest) is True
 

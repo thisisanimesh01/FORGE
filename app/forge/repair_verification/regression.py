@@ -37,13 +37,67 @@ class DeterministicRegressionEngine:
         findings: List[RegressionFinding] = []
 
         if not baseline_summary:
-            # Baseline was not run or unavailable
-            if repaired_summary.all_passed:
-                return RegressionClassification.NO_REGRESSION_OBSERVED, findings
-            return RegressionClassification.VERIFICATION_INCOMPLETE, findings
+            # Baseline was not run or unavailable - comparisons are incomplete
+            findings.append(
+                RegressionFinding(
+                    check_id="baseline_missing",
+                    classification=RegressionClassification.INCONCLUSIVE,
+                    explanation="Baseline execution summary is missing; cannot establish regression-free guarantee without baseline evidence.",
+                )
+            )
+            return RegressionClassification.INCONCLUSIVE, findings
+
+        if baseline_summary.sandbox_details.get("error"):
+            err_msg = baseline_summary.sandbox_details.get("error")
+            findings.append(
+                RegressionFinding(
+                    check_id="baseline_error",
+                    classification=RegressionClassification.INCONCLUSIVE,
+                    explanation=f"Baseline execution incomplete or corrupted: {err_msg}",
+                )
+            )
+            return RegressionClassification.INCONCLUSIVE, findings
 
         if not baseline_summary.sandbox_available or not repaired_summary.sandbox_available:
             return RegressionClassification.INCONCLUSIVE, findings
+
+        if baseline_summary.sandbox_available != repaired_summary.sandbox_available:
+            findings.append(
+                RegressionFinding(
+                    check_id="sandbox_availability_mismatch",
+                    classification=RegressionClassification.ENVIRONMENT_MISMATCH,
+                    explanation="Sandbox availability differs between baseline and repaired runs.",
+                )
+            )
+            return RegressionClassification.ENVIRONMENT_MISMATCH, findings
+
+        # Environment detail checks (image, python version, dependencies)
+        base_details = baseline_summary.sandbox_details
+        rep_details = repaired_summary.sandbox_details
+        for env_key in ("image", "python_version", "dependencies"):
+            if env_key in base_details and env_key in rep_details:
+                if base_details[env_key] != rep_details[env_key]:
+                    findings.append(
+                        RegressionFinding(
+                            check_id=f"env_mismatch_{env_key}",
+                            classification=RegressionClassification.ENVIRONMENT_MISMATCH,
+                            explanation=f"Environment mismatch for '{env_key}': baseline '{base_details[env_key]}' != repaired '{rep_details[env_key]}'.",
+                        )
+                    )
+                    return RegressionClassification.ENVIRONMENT_MISMATCH, findings
+
+        # Check test selection equivalence between baseline and repaired suites
+        base_ids = set(c.check_id for c in baseline_summary.checks)
+        rep_ids = set(c.check_id for c in repaired_summary.checks)
+        if base_ids != rep_ids:
+            findings.append(
+                RegressionFinding(
+                    check_id="test_selection_mismatch",
+                    classification=RegressionClassification.ENVIRONMENT_MISMATCH,
+                    explanation=f"Test selection mismatch: baseline checked {len(base_ids)} checks, repaired checked {len(rep_ids)} checks.",
+                )
+            )
+            return RegressionClassification.ENVIRONMENT_MISMATCH, findings
 
         # Index baseline checks by check_id
         base_checks_map: Dict[str, CheckExecutionResult] = {

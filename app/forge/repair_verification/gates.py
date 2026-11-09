@@ -61,6 +61,24 @@ class VerificationGateKeeper:
                 optional_failed,
             )
 
+        # Gate 0b: Cryptographic digest alignment
+        if plan.expected_patch_digest != execution_result.applied_patch_digest:
+            return (
+                VerificationStatus.BLOCKED,
+                "FAILED",
+                required_completed,
+                required_failed,
+                optional_failed,
+            )
+        if baseline_summary and baseline_summary.tree_digest and plan.expected_baseline_digest != baseline_summary.tree_digest:
+            return (
+                VerificationStatus.BLOCKED,
+                "FAILED",
+                required_completed,
+                required_failed,
+                optional_failed,
+            )
+
         # Gate 1: Sandbox availability
         if not sandbox_available:
             return (
@@ -74,7 +92,7 @@ class VerificationGateKeeper:
         # Gate 2: Workspace & Snapshot Integrity
         if not workspace_integrity_passed:
             return (
-                VerificationStatus.FAILED,
+                VerificationStatus.RECOVERY_REQUIRED,
                 "RECOVERY_REQUIRED",
                 required_completed,
                 required_failed,
@@ -82,6 +100,15 @@ class VerificationGateKeeper:
             )
 
         # Gate 3: Evaluate checks in repaired suite
+        if not plan.selected_checks:
+            return (
+                VerificationStatus.INCOMPLETE,
+                "FAILED",
+                required_completed,
+                required_failed,
+                optional_failed,
+            )
+
         rep_checks_map = {c.check_id: c for c in repaired_summary.checks}
 
         for chk in plan.selected_checks:
@@ -117,6 +144,16 @@ class VerificationGateKeeper:
         if required_failed:
             return (
                 VerificationStatus.FAILED,
+                "FAILED",
+                required_completed,
+                required_failed,
+                optional_failed,
+            )
+
+        # Gate 6: Completed checks check (must have at least one completed required check)
+        if not required_completed:
+            return (
+                VerificationStatus.INCOMPLETE,
                 "FAILED",
                 required_completed,
                 required_failed,

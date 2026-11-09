@@ -379,7 +379,7 @@ class VerificationResult(BaseModel):
         if self.requires_human_review is not True:
             raise ValueError("Safety invariant breach: requires_human_review must strictly be True")
 
-        # Invariant 2: Cannot mark PASSED if any required checks failed
+        # Invariant 2: Cannot mark PASSED if any required checks failed or if none completed
         if self.verification_status == VerificationStatus.PASSED:
             if self.required_checks_failed:
                 raise ValueError(
@@ -389,9 +389,17 @@ class VerificationResult(BaseModel):
                 raise ValueError(
                     "Integrity violation: cannot mark verification as PASSED when regression is detected"
                 )
+            if not self.required_checks_completed:
+                raise ValueError(
+                    "Integrity violation: cannot mark verification as PASSED when no required checks were completed"
+                )
             if self.gate_decision != "PASSED":
                 raise ValueError(
                     f"Integrity violation: verification_status is PASSED but gate_decision is {self.gate_decision}"
+                )
+            if self.applied_patch_digest and self.repair_plan_digest and self.applied_patch_digest != self.repair_plan_digest:
+                raise ValueError(
+                    f"Integrity violation: applied_patch_digest '{self.applied_patch_digest}' does not match repair_plan_digest '{self.repair_plan_digest}'"
                 )
         return self
 

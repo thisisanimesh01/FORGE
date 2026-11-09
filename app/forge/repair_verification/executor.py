@@ -57,6 +57,7 @@ class RepairVerificationExecutor:
         self.event_recorder = event_recorder or VerificationEventRecorder()
         self.baseline_runner = baseline_runner or BaselineVerificationRunner(sandbox=self.sandbox)
         self.plan_generator = VerificationPlanGenerator()
+        self._completed_verifications: set[str] = set()
 
     def verify_repair(
         self,
@@ -74,6 +75,71 @@ class RepairVerificationExecutor:
         verification_seed = f"{execution_result.execution_id}:{workspace.workspace_id}"
         verification_hash = hashlib.sha256(verification_seed.encode("utf-8")).hexdigest()[:12]
         verification_id = f"vrf_{verification_hash}"
+
+        limitations: List[str] = []
+
+        # 0a. Check repository immutability pre-execution
+        repo_ref = Path(workspace.original_repository_reference)
+        if repo_ref.exists():
+            if not VerificationIntegrityChecker.verify_original_repo_unmodified(repo_ref):
+                return VerificationResult(
+                    verification_id=verification_id,
+                    execution_id=execution_result.execution_id,
+                    workspace_id=workspace.workspace_id,
+                    repair_plan_id=execution_result.repair_plan_id,
+                    repair_plan_digest=execution_result.applied_patch_digest or "",
+                    applied_patch_digest=execution_result.applied_patch_digest or "",
+                    baseline_tree_digest=workspace.baseline_tree_digest,
+                    verification_status=VerificationStatus.RECOVERY_REQUIRED,
+                    regression_classification=RegressionClassification.INCONCLUSIVE,
+                    gate_decision="RECOVERY_REQUIRED",
+                    requires_human_review=True,
+                    limitations=["Original repository was modified prior to verification; recovery required."],
+                ), None
+
+        # 0b. Replay protection
+        if verification_id in self._completed_verifications:
+            return VerificationResult(
+                verification_id=verification_id,
+                execution_id=execution_result.execution_id,
+                workspace_id=workspace.workspace_id,
+                repair_plan_id=execution_result.repair_plan_id,
+                repair_plan_digest=execution_result.applied_patch_digest or "",
+                applied_patch_digest=execution_result.applied_patch_digest or "",
+                baseline_tree_digest=workspace.baseline_tree_digest,
+                verification_status=VerificationStatus.BLOCKED,
+                regression_classification=RegressionClassification.INCONCLUSIVE,
+                gate_decision="BLOCKED",
+                requires_human_review=True,
+                limitations=[f"Verification replay rejected for verification_id '{verification_id}'"],
+            ), None
+
+        # 0c. Validate plan cryptographic binding and alignment if caller-supplied
+        if plan is not None:
+            mismatches: List[str] = []
+            if plan.execution_id != execution_result.execution_id:
+                mismatches.append(f"execution_id '{plan.execution_id}' != '{execution_result.execution_id}'")
+            if plan.workspace_id != workspace.workspace_id:
+                mismatches.append(f"workspace_id '{plan.workspace_id}' != '{workspace.workspace_id}'")
+            if plan.expected_patch_digest != execution_result.applied_patch_digest:
+                mismatches.append(f"patch digest '{plan.expected_patch_digest}' != '{execution_result.applied_patch_digest}'")
+            if plan.expected_baseline_digest != workspace.baseline_tree_digest:
+                mismatches.append(f"baseline digest '{plan.expected_baseline_digest}' != '{workspace.baseline_tree_digest}'")
+            if mismatches:
+                return VerificationResult(
+                    verification_id=verification_id,
+                    execution_id=execution_result.execution_id,
+                    workspace_id=workspace.workspace_id,
+                    repair_plan_id=execution_result.repair_plan_id,
+                    repair_plan_digest=plan.expected_patch_digest,
+                    applied_patch_digest=execution_result.applied_patch_digest or "",
+                    baseline_tree_digest=workspace.baseline_tree_digest,
+                    verification_status=VerificationStatus.BLOCKED,
+                    regression_classification=RegressionClassification.INCONCLUSIVE,
+                    gate_decision="FAILED",
+                    requires_human_review=True,
+                    limitations=[f"Verification rejected due to plan mismatch: {'; '.join(mismatches)}"],
+                ), None
 
         self.event_recorder.record_event(
             verification_id=verification_id,
@@ -286,10 +352,18 @@ class RepairVerificationExecutor:
             )
             updated_exec_result = None
 
+        if repo_ref.exists() and not VerificationIntegrityChecker.verify_original_repo_unmodified(repo_ref):
+            final_status = VerificationStatus.RECOVERY_REQUIRED
+            gate_decision = "RECOVERY_REQUIRED"
+            limitations.append("Original repository modification detected post-verification; recovery required.")
+            updated_exec_result = None
+
         if plan.is_partial_verification:
             limitations.append(
                 "Verification was performed on a partial test selection, not the entire test suite."
             )
+
+        self._completed_verifications.add(verification_id)
 
         verification_result = VerificationResult(
             verification_id=verification_id,

@@ -132,12 +132,18 @@ class IntelligentTestSelector:
         # 5. Partial verification determination
         total_tests_selected = len(all_identifiers)
         total_discovered = total_tests_selected + len(disc.other_tests)
-        is_partial = len(disc.other_tests) > 0 or not disc.all_test_files
+        has_limitations = bool(disc.limitations) or disc.scan_limit_exceeded
+        is_partial = len(disc.other_tests) > 0 or not disc.all_test_files or has_limitations
 
         if is_partial:
-            rationale_parts.append(
-                f"Partial verification: {total_tests_selected} of {total_discovered} discovered tests selected."
-            )
+            if has_limitations:
+                rationale_parts.append(
+                    f"Partial verification due to discovery limitations: {'; '.join(disc.limitations)}."
+                )
+            else:
+                rationale_parts.append(
+                    f"Partial verification: {total_tests_selected} of {total_discovered} discovered tests selected."
+                )
         else:
             rationale_parts.append("Full suite coverage: all discovered tests selected.")
 

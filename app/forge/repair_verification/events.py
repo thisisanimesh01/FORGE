@@ -51,7 +51,6 @@ class VerificationEventRecorder:
             "event_type": event_type.value,
             "action": clean_desc,
             "outcome": outcome,
-            "details": details or {},
         }
         serialized = json.dumps(payload_dict, sort_keys=True)
         event_hash_input = f"{prev_hash or ''}:{serialized}"
@@ -80,7 +79,7 @@ class VerificationEventRecorder:
         """Verify unbroken cryptographic integrity of event log.
 
         Raises:
-            ValueError: If chain rewriting or hash mismatch is detected.
+            ValueError: If chain rewriting, sequence break, or hash tampering is detected.
         """
         if not self._events:
             return True
@@ -95,6 +94,23 @@ class VerificationEventRecorder:
                 raise ValueError(
                     f"Integrity violation: broken cryptographic link at event {ev.event_id}"
                 )
+
+            # Recompute expected hash from payload fields
+            payload_dict = {
+                "seq": ev.sequence_number,
+                "verification_id": ev.verification_id,
+                "event_type": ev.event_type.value,
+                "action": ev.action_description,
+                "outcome": ev.outcome,
+            }
+            serialized = json.dumps(payload_dict, sort_keys=True)
+            expected_input = f"{prev_hash or ''}:{serialized}"
+            expected_hash = hashlib.sha256(expected_input.encode("utf-8")).hexdigest()
+            if ev.event_hash != expected_hash:
+                raise ValueError(
+                    f"Integrity violation: event payload tampering detected at event {ev.event_id}"
+                )
+
             prev_hash = ev.event_hash
 
         if expected_head_hash is not None:
