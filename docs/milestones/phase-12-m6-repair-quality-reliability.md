@@ -121,10 +121,16 @@ All 12 quality tools are registered in FORGE's central `ToolRegistry`:
 ## 7. Verification & Benchmark Results
 
 ### Dedicated Test Suite (`tests/unit/test_phase12_m6_repair_quality.py`)
-- **Total Tests:** 45
-- **Passed:** 45 (100%)
+- **Total Tests:** 54 (including 9 comprehensive adversarial audit tests)
+- **Passed:** 54 (100%)
 - **Failed:** 0
-- **Duration:** 7.10s
+- **Duration:** 10.24s
+
+### Audit Remediation & Hardening Highlights
+1. **Completeness Semantics & Minimality**: Disentangled context files (`affected_files`) from mandatory code changes (`required_changes`). Context files legitimately unedited are not penalized; extraneous file edits outside plan scope incur minimality penalties.
+2. **Statistical Reliability & Sample Sizes**: Added `min_statistical_sample_size = 5` threshold. Strategies with $N < 5$ past runs are flagged as observing trends without penalizing current repair scores.
+3. **Context-Aware Risk Classification**: Implemented `_strip_comments_and_strings()` in `RepairRiskAnalyzer` to prevent false positives from comments, docstrings, or log strings while accurately catching genuine executable calls (`eval(...)`, `subprocess.run(...)`) and credential leaks.
+4. **Policy Integrity & Validation**: Enforced strict validation preventing tampering with `allow_regressions` (strictly `False`) or negative dimension weights.
 
 ### Full Project Regression Suite
 - **Total Tests:** 1,947

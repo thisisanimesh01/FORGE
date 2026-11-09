@@ -2,6 +2,8 @@
 
 Verifies that all M3 RequiredChanges, target files, and required verification
 checks were comprehensively addressed in the repair.
+Distinguishes files requiring modification from contextually affected files
+that legitimately require no direct code change.
 """
 
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -35,10 +37,14 @@ class RepairCompletenessAnalyzer:
         total_required_changes = len(required_changes)
         addressed_changes = 0
         unaddressed_changes: List[str] = []
+        required_files: Set[str] = set()
 
         for idx, rc in enumerate(required_changes):
             rc_file = rc.get("file_path", "") if isinstance(rc, dict) else getattr(rc, "file_path", "")
             norm_rc_file = rc_file.strip("/").replace("\\", "/")
+            if norm_rc_file:
+                required_files.add(norm_rc_file)
+
             if norm_rc_file and norm_rc_file in normalized_modified:
                 addressed_changes += 1
             else:
@@ -46,21 +52,29 @@ class RepairCompletenessAnalyzer:
                 unaddressed_changes.append(f"{norm_rc_file}: {desc}")
                 findings.append(f"Unaddressed required change: '{norm_rc_file}' was not modified ({desc})")
 
-        # 2. Check Affected Files
-        plan_affected_files = repair_plan.get("affected_files") or []
-        missing_affected_files: List[str] = []
+        # 2. Distinguish Affected Files:
+        # Files analyzed/impacted vs files requiring modification.
+        plan_affected_files = [f.strip("/").replace("\\", "/") for f in (repair_plan.get("affected_files") or [])]
+        approved_paths = [f.strip("/").replace("\\", "/") for f in (repair_plan.get("approved_file_paths") or [])]
+        expected_scope = set(plan_affected_files) | set(approved_paths) | required_files
+
+        unmodified_affected_files: List[str] = []
         for af in plan_affected_files:
-            norm_af = af.strip("/").replace("\\", "/")
-            if norm_af not in normalized_modified:
-                missing_affected_files.append(norm_af)
-                findings.append(f"Plan affected file '{norm_af}' was not modified in the repair")
+            if af not in normalized_modified:
+                unmodified_affected_files.append(af)
+
+        # Detect unnecessary file modifications (files modified not in expected scope)
+        unnecessary_modifications: List[str] = []
+        for mf in normalized_modified:
+            if expected_scope and mf not in expected_scope:
+                unnecessary_modifications.append(mf)
+                findings.append(f"Unnecessary file modification: '{mf}' was modified but not in plan scope")
 
         # 3. Check Verification Completeness
         verification_completeness_ratio = 1.0
         if verification_result:
             req_completed = verification_result.get("required_checks_completed") or []
             req_failed = verification_result.get("required_checks_failed") or []
-            skipped = verification_result.get("skipped_checks") or {}
 
             total_req_checks = len(req_completed) + len(req_failed)
             if total_req_checks > 0:
@@ -78,13 +92,23 @@ class RepairCompletenessAnalyzer:
         if total_required_changes > 0:
             change_ratio = addressed_changes / total_required_changes
             score *= change_ratio
-        elif not plan_affected_files and not modified_files:
+        elif expected_scope:
+            # If no explicit required_changes list, check if at least one expected file was modified
+            intersect = expected_scope & normalized_modified
+            if intersect:
+                score *= len(intersect) / len(expected_scope)
+            else:
+                score = 0.0
+                findings.append("None of the expected scope files were modified in repair")
+        elif not modified_files:
             score = 0.0
             findings.append("No changes specified in plan and no files modified")
 
-        if missing_affected_files:
-            score -= min(0.3, 0.1 * len(missing_affected_files))
+        # Penalize unnecessary file changes (rewards minimality)
+        if unnecessary_modifications:
+            score -= min(0.3, 0.1 * len(unnecessary_modifications))
 
+        # Penalize incomplete verification
         if verification_completeness_ratio < self.policy.min_verification_completeness:
             score -= 0.4
             findings.append(
@@ -103,13 +127,15 @@ class RepairCompletenessAnalyzer:
             "total_required_changes": total_required_changes,
             "addressed_changes_count": addressed_changes,
             "unaddressed_changes": unaddressed_changes,
-            "missing_affected_files": missing_affected_files,
+            "unmodified_affected_files": unmodified_affected_files,
+            "unnecessary_modifications": unnecessary_modifications,
             "verification_completeness_ratio": verification_completeness_ratio,
         }
 
         explanation = (
             f"Addressed {addressed_changes}/{total_required_changes} required changes. "
-            f"Missing affected files: {len(missing_affected_files)}. "
+            f"Unmodified context files: {len(unmodified_affected_files)}. "
+            f"Unnecessary modifications: {len(unnecessary_modifications)}. "
             f"Verification completeness: {verification_completeness_ratio:.2f}."
         )
 

@@ -279,6 +279,7 @@ class RepairQualityExecutor:
             risk_level=risk_level,
             confidence=confidence,
             gate_decision=gate_decision,
+            policy_version=self.policy.policy_version,
             requires_human_review=True,
         )
 

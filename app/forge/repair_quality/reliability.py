@@ -2,6 +2,8 @@
 
 Evaluates M5 baseline comparison, test stability, regression classification,
 and historical repair reliability across previous runs.
+Enforces statistical validity thresholds so small sample sizes are not
+misrepresented as conclusive evidence.
 """
 
 from pathlib import Path
@@ -46,28 +48,43 @@ class RepairReliabilityAnalyzer:
         improved = "improved" in regression_class
         no_regression = "no_regression_observed" in regression_class
 
-        # 2. Historical Records
+        # 2. Historical Records & Statistical Significance
         historical_available = False
         strategy_success_rate = 1.0
         past_attempts = 0
         past_regressions = 0
+        is_statistically_significant = False
 
         if self.history_store and strategy_id:
-            stats = self.history_store.get_strategy_stats(strategy_id)
-            past_attempts = stats.get("total_attempts", 0)
-            if past_attempts > 0:
-                historical_available = True
-                strategy_success_rate = stats.get("success_rate", 0.0)
-                past_regressions = stats.get("regressions_count", 0)
+            try:
+                stats = self.history_store.get_strategy_stats(strategy_id)
+                past_attempts = stats.get("total_attempts", 0)
+                if past_attempts > 0:
+                    historical_available = True
+                    strategy_success_rate = stats.get("success_rate", 0.0)
+                    past_regressions = stats.get("regressions_count", 0)
 
-                if past_regressions > 0:
-                    findings.append(
-                        f"Historical warning: strategy '{strategy_id}' previously caused {past_regressions} regression(s) across {past_attempts} run(s)"
-                    )
-                if strategy_success_rate < 0.50:
-                    findings.append(
-                        f"Historical warning: strategy '{strategy_id}' has a low historical success rate of {strategy_success_rate:.1%}"
-                    )
+                    min_sample = self.policy.min_statistical_sample_size
+                    if past_attempts >= min_sample:
+                        is_statistically_significant = True
+                        if past_regressions > 0:
+                            findings.append(
+                                f"Historical warning (N={past_attempts}): strategy '{strategy_id}' previously caused {past_regressions} regression(s)"
+                            )
+                        if strategy_success_rate < 0.50:
+                            findings.append(
+                                f"Statistically significant reliability concern (N={past_attempts}): strategy '{strategy_id}' has a low historical success rate of {strategy_success_rate:.1%}"
+                            )
+                        elif strategy_success_rate >= 0.80:
+                            findings.append(
+                                f"High historical stability (N={past_attempts}): strategy '{strategy_id}' has a {strategy_success_rate:.1%} success rate"
+                            )
+                    else:
+                        findings.append(
+                            f"Historical sample size for strategy '{strategy_id}' (N={past_attempts}) is below statistical threshold ({min_sample}); observing trends without penalizing current repair"
+                        )
+            except Exception as e:
+                findings.append(f"Historical query degraded: {e}")
 
         # 3. Score & Status Calculation
         if regressions_detected:
@@ -88,15 +105,19 @@ class RepairReliabilityAnalyzer:
             if pre_existing:
                 findings.append("Pre-existing baseline failures observed; repair did not exacerbate them")
 
-            # Historical adjustment
+            # Historical adjustment only when statistically significant
             if historical_available:
-                if past_attempts >= 5 and strategy_success_rate >= 0.8:
-                    confidence = ConfidenceClassification.VERY_HIGH
-                elif strategy_success_rate < 0.5:
-                    score -= 0.3
-                    confidence = ConfidenceClassification.LOW
+                if is_statistically_significant:
+                    if strategy_success_rate >= 0.80:
+                        confidence = ConfidenceClassification.VERY_HIGH
+                    elif strategy_success_rate < 0.50:
+                        score -= 0.3
+                        confidence = ConfidenceClassification.HIGH
+                    else:
+                        confidence = ConfidenceClassification.HIGH
                 else:
-                    confidence = ConfidenceClassification.HIGH
+                    # Small sample size (N < min_sample)
+                    confidence = ConfidenceClassification.MEDIUM
             else:
                 confidence = ConfidenceClassification.MEDIUM
                 findings.append("No historical data available for strategy; evaluation based solely on current run")
@@ -117,12 +138,13 @@ class RepairReliabilityAnalyzer:
             "past_attempts": past_attempts,
             "past_regressions": past_regressions,
             "strategy_success_rate": strategy_success_rate,
+            "is_statistically_significant": is_statistically_significant,
         }
 
         explanation = (
             f"Reliability assessed: regression outcome '{regression_class}', "
             f"verif status '{verif_status}'. History: {past_attempts} prior runs "
-            f"(success rate: {strategy_success_rate:.1%})."
+            f"(success rate: {strategy_success_rate:.1%}, significant: {is_statistically_significant})."
         )
 
         dimension_score = QualityDimensionScore(

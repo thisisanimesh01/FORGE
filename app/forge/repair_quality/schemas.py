@@ -175,6 +175,7 @@ class RepairQualityPolicy(BaseModel):
     min_verification_completeness: float = Field(default=1.0, ge=0.0, le=1.0)
     min_overall_score: float = Field(default=0.70, ge=0.0, le=1.0)
     min_dimension_score: float = Field(default=0.50, ge=0.0, le=1.0)
+    min_statistical_sample_size: int = Field(default=5, ge=1)
     dimension_weights: Dict[QualityDimension, float] = Field(
         default_factory=lambda: {
             QualityDimension.CORRECTNESS: 0.25,
@@ -186,6 +187,23 @@ class RepairQualityPolicy(BaseModel):
         }
     )
     require_all_evidence: bool = Field(default=True)
+
+    @field_validator("allow_regressions")
+    @classmethod
+    def enforce_allow_regressions_false(cls, v: bool) -> bool:
+        if v is not False:
+            raise ValueError("Safety invariant breach: allow_regressions cannot be True")
+        return False
+
+    @field_validator("dimension_weights")
+    @classmethod
+    def validate_weights(cls, weights: Dict[QualityDimension, float]) -> Dict[QualityDimension, float]:
+        for dim, w in weights.items():
+            if w < 0.0:
+                raise ValueError(f"Weight for dimension '{dim.value}' cannot be negative: {w}")
+        if sum(weights.values()) <= 0.0:
+            raise ValueError("Sum of dimension weights must be greater than zero")
+        return weights
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +300,7 @@ class RepairQualityResult(BaseModel):
     risk_level: RiskSeverity = Field(default=RiskSeverity.LOW)
     confidence: ConfidenceClassification = Field(default=ConfidenceClassification.MEDIUM)
     gate_decision: QualityGateDecision = Field(description="Quality gatekeeper decision")
+    policy_version: str = Field(default="1.0.0", description="Policy version bound to this evaluation")
     requires_human_review: bool = Field(default=True, description="Strictly True. Cannot be disabled.")
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 

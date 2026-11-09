@@ -274,7 +274,15 @@ class RepairQualityTools:
             except Exception:
                 pass
 
-        score, violations = self.scorer.calculate_score(dimension_scores=parsed_scores)
+        scorer = self.scorer
+        if inp.policy:
+            try:
+                active_policy = RepairQualityPolicy.model_validate(inp.policy)
+                scorer = RepairQualityScorer(active_policy)
+            except ValidationError as e:
+                return json.dumps({"error": f"Invalid policy: {e}"})
+
+        score, violations = scorer.calculate_score(dimension_scores=parsed_scores)
         return json.dumps({
             "overall_score": score,
             "policy_violations": violations,
@@ -295,8 +303,16 @@ class RepairQualityTools:
             except Exception:
                 pass
 
+        gatekeeper = self.gatekeeper
+        if inp.policy:
+            try:
+                active_policy = RepairQualityPolicy.model_validate(inp.policy)
+                gatekeeper = RepairQualityGateKeeper(active_policy)
+            except ValidationError as e:
+                return json.dumps({"error": f"Invalid policy: {e}"})
+
         metrics = RepairQualityMetrics.model_validate(inp.metrics)
-        status, decision, reasons = self.gatekeeper.evaluate_gates(
+        status, decision, reasons = gatekeeper.evaluate_gates(
             overall_score=inp.overall_score,
             dimension_scores=parsed_scores,
             metrics=metrics,

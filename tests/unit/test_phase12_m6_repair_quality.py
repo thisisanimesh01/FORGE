@@ -1110,3 +1110,271 @@ def test_tool_registry_tools_callable(tmp_path: Path):
     # 3. get_tool_definitions count
     defs = tools.get_tool_definitions()
     assert len(defs) == 12
+
+
+# ---------------------------------------------------------------------------
+# Adversarial Audit & Security Verification Tests
+# ---------------------------------------------------------------------------
+
+def test_completeness_unmodified_context_files_not_penalized():
+    """Audit 1: Unmodified context/affected files are not penalized when required changes are addressed."""
+    analyzer = RepairCompletenessAnalyzer()
+    plan = {
+        "repair_plan_id": "plan_audit_1",
+        "affected_files": ["src/calc.py", "docs/architecture.md", "README.md"],
+        "approved_file_paths": ["src/calc.py", "docs/architecture.md", "README.md"],
+        "required_changes": [
+            {"file_path": "src/calc.py", "description": "Fix divide-by-zero check"}
+        ],
+    }
+    modified_files = ["src/calc.py"]
+    verif = {
+        "required_checks_completed": ["check_div"],
+        "required_checks_failed": [],
+    }
+
+    metrics, score = analyzer.analyze_completeness(
+        repair_plan=plan,
+        modified_files=modified_files,
+        verification_result=verif,
+    )
+
+    assert score.score == 1.0
+    assert metrics["addressed_changes_count"] == 1
+    assert "docs/architecture.md" in metrics["unmodified_affected_files"]
+    assert "README.md" in metrics["unmodified_affected_files"]
+    assert len(metrics["unnecessary_modifications"]) == 0
+
+
+def test_completeness_unnecessary_file_modifications_penalized():
+    """Audit 1: Minimality enforcement - modifying files outside plan scope is penalized."""
+    analyzer = RepairCompletenessAnalyzer()
+    plan = {
+        "repair_plan_id": "plan_audit_2",
+        "affected_files": ["src/calc.py"],
+        "approved_file_paths": ["src/calc.py"],
+        "required_changes": [
+            {"file_path": "src/calc.py", "description": "Fix divide-by-zero check"}
+        ],
+    }
+    # Modified src/calc.py plus 2 unapproved/unnecessary files
+    modified_files = ["src/calc.py", "src/unrelated.py", "config/keys.json"]
+    verif = {
+        "required_checks_completed": ["check_div"],
+        "required_checks_failed": [],
+    }
+
+    metrics, score = analyzer.analyze_completeness(
+        repair_plan=plan,
+        modified_files=modified_files,
+        verification_result=verif,
+    )
+
+    assert score.score < 1.0
+    assert "src/unrelated.py" in metrics["unnecessary_modifications"]
+    assert "config/keys.json" in metrics["unnecessary_modifications"]
+
+
+def test_reliability_small_sample_size_not_penalized(tmp_path: Path):
+    """Audit 2: Sample size N < 5 is marked not statistically significant and does not penalize clean repairs."""
+    db_path = tmp_path / "reliability_small.db"
+    store = HistoricalReliabilityStore(db_path=db_path)
+    # Only 1 past attempt which failed
+    store.record_quality_result(
+        request_id="req_past_1",
+        repair_plan_id="plan_p1",
+        execution_id="exec_p1",
+        strategy_id="experimental_strategy",
+        target_files=["src/calc.py"],
+        quality_status="failed",
+        overall_score=0.4,
+        gate_decision="failed",
+        risk_level="low",
+        regressions_count=1,
+    )
+
+    analyzer = RepairReliabilityAnalyzer(history_store=store)
+    verif = {
+        "verification_status": "passed",
+        "regression_classification": "no_regression_observed",
+    }
+
+    metrics, score, conf = analyzer.analyze_reliability(
+        verification_result=verif,
+        strategy_id="experimental_strategy",
+    )
+
+    assert metrics["is_statistically_significant"] is False
+    assert metrics["past_attempts"] == 1
+    assert score.score == 1.0  # Not penalized because N < 5
+    assert conf == ConfidenceClassification.MEDIUM
+
+
+def test_reliability_significant_sample_size_penalized(tmp_path: Path):
+    """Audit 2: Sample size N >= 5 with low historical success rate penalizes score with high confidence."""
+    db_path = tmp_path / "reliability_sig.db"
+    store = HistoricalReliabilityStore(db_path=db_path)
+    # Record 6 past attempts, only 1 passed
+    for i in range(6):
+        store.record_quality_result(
+            request_id=f"req_past_{i}",
+            repair_plan_id=f"plan_p{i}",
+            execution_id=f"exec_p{i}",
+            strategy_id="unstable_strategy",
+            target_files=["src/calc.py"],
+            quality_status="passed" if i == 0 else "failed",
+            overall_score=0.8 if i == 0 else 0.3,
+            gate_decision="passed" if i == 0 else "failed",
+            risk_level="low",
+            regressions_count=1 if i > 0 else 0,
+        )
+
+    analyzer = RepairReliabilityAnalyzer(history_store=store)
+    verif = {
+        "verification_status": "passed",
+        "regression_classification": "no_regression_observed",
+    }
+
+    metrics, score, conf = analyzer.analyze_reliability(
+        verification_result=verif,
+        strategy_id="unstable_strategy",
+    )
+
+    assert metrics["is_statistically_significant"] is True
+    assert metrics["past_attempts"] == 6
+    assert score.score <= 0.7  # Penalized -0.3 due to statistically significant instability
+    assert conf == ConfidenceClassification.HIGH
+
+
+def test_risk_analyzer_comments_and_strings_not_flagged():
+    """Audit 3: Non-executable comments, docstrings, and string literals containing keywords do not trigger false positives."""
+    analyzer = RepairRiskAnalyzer()
+    patch = """diff --git a/src/calc.py b/src/calc.py
+--- a/src/calc.py
++++ b/src/calc.py
+@@ -1,5 +1,9 @@
++# Note: eval(x) is completely forbidden in this module!
++# subprocess.run() should not be used here
++def helper():
++    \"\"\"Avoid pickle.loads for deserialization.\"\"\"
++    msg = "evaluating expression safely"
++    test_token = "dummy_sample_token_for_tests"
++    return msg
+"""
+    metrics, score, risk_level = analyzer.analyze_risk(
+        patch_content=patch,
+        modified_files=["src/calc.py"],
+    )
+
+    assert risk_level == RiskSeverity.LOW
+    assert score.score == 1.0
+    assert len(score.findings) == 0
+
+
+def test_risk_analyzer_real_calls_flagged_accurately():
+    """Audit 3: True positive detection of executable calls and hardcoded credentials."""
+    analyzer = RepairRiskAnalyzer()
+
+    # 1. Real eval call
+    eval_patch = """diff --git a/src/calc.py b/src/calc.py
++++ b/src/calc.py
+@@ -5,1 +5,2 @@
++    val = eval(user_string)
+"""
+    _, _, risk_level = analyzer.analyze_risk(
+        patch_content=eval_patch,
+        modified_files=["src/calc.py"],
+    )
+    assert risk_level == RiskSeverity.CRITICAL
+
+    # 2. Real subprocess call
+    proc_patch = """diff --git a/src/calc.py b/src/calc.py
++++ b/src/calc.py
+@@ -5,1 +5,2 @@
++    res = subprocess.run(["ls", "-la"])
+"""
+    _, _, risk_level = analyzer.analyze_risk(
+        patch_content=proc_patch,
+        modified_files=["src/calc.py"],
+    )
+    assert risk_level == RiskSeverity.HIGH
+
+    # 3. Real credential leak
+    cred_patch = """diff --git a/src/calc.py b/src/calc.py
++++ b/src/calc.py
+@@ -5,1 +5,2 @@
++    api_key = "live_prod_super_secret_99881122"
+"""
+    _, _, risk_level = analyzer.analyze_risk(
+        patch_content=cred_patch,
+        modified_files=["src/calc.py"],
+    )
+    assert risk_level == RiskSeverity.CRITICAL
+
+
+def test_policy_invariants_and_tamper_rejection():
+    """Audit 4: Invariants reject attempts to enable regressions or supply invalid weights."""
+    from pydantic import ValidationError
+
+    # allow_regressions cannot be True
+    with pytest.raises(ValidationError, match="allow_regressions cannot be True"):
+        RepairQualityPolicy(allow_regressions=True)
+
+    # Negative weight rejected
+    with pytest.raises(ValidationError, match="cannot be negative"):
+        RepairQualityPolicy(dimension_weights={QualityDimension.CORRECTNESS: -0.5})
+
+    # Zero total weights rejected
+    with pytest.raises(ValidationError, match="Sum of dimension weights must be greater than zero"):
+        RepairQualityPolicy(dimension_weights={
+            QualityDimension.CORRECTNESS: 0.0,
+            QualityDimension.COMPLETENESS: 0.0,
+            QualityDimension.MAINTAINABILITY: 0.0,
+            QualityDimension.PATCH_QUALITY: 0.0,
+            QualityDimension.RELIABILITY: 0.0,
+            QualityDimension.SECURITY_RISK: 0.0,
+        })
+
+
+def test_tool_custom_policy_validation(tmp_path: Path):
+    """Audit 4: Tool invocation validates and rejects malicious policies passed by callers."""
+    tools = RepairQualityTools(repository_path=tmp_path)
+
+    # 1. Calculate score with illegal allow_regressions
+    resp = tools.calculate_repair_quality_score({
+        "dimension_scores": {
+            "correctness": {"score": 1.0, "status": "passed", "weight": 0.25, "explanation": "ok"},
+        },
+        "policy": {"allow_regressions": True},
+    })
+    data = json.loads(resp)
+    assert "error" in data
+    assert "allow_regressions cannot be True" in data["error"]
+
+    # 2. Gate evaluation with illegal weights
+    gate_resp = tools.evaluate_repair_quality_gates({
+        "overall_score": 0.95,
+        "dimension_scores": {
+            "correctness": {"score": 1.0, "status": "passed", "weight": 0.25, "explanation": "ok"},
+        },
+        "metrics": {},
+        "policy": {"dimension_weights": {"correctness": -1.0}},
+    })
+    gate_data = json.loads(gate_resp)
+    assert "error" in gate_data
+    assert "cannot be negative" in gate_data["error"]
+
+
+def test_history_store_sqlite_resilience(tmp_path: Path):
+    """Resilience: Corrupted SQLite database safely degrades without crashing."""
+    corrupt_db = tmp_path / "corrupt.db"
+    # Write garbage bytes to database file
+    corrupt_db.write_bytes(b"GARBAGE_SQLITE_CORRUPTION_DATA_BYTES")
+
+    store = HistoricalReliabilityStore(db_path=corrupt_db)
+    stats = store.get_strategy_stats("test_strategy")
+    assert stats["total_attempts"] == 0
+    assert stats["success_rate"] == 0.0
+
+    history = store.get_history(strategy_id="test_strategy")
+    assert history == []
