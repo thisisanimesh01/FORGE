@@ -20,6 +20,10 @@ from forge.diagnosis.schemas import DiagnosisInput
 from forge.llm.models import ToolDefinition
 from forge.repair_execution.schemas import ApprovalStatus, RepairApproval
 from forge.orchestration.orchestrator import EngineeringOrchestrator
+from forge.orchestration.persistence import OrchestrationStateStore
+from forge.orchestration.idempotency import IdempotencyLedger
+from forge.orchestration.coordination import TaskCoordinator, TaskState
+from forge.orchestration.recovery import WorkflowRecoveryEngine
 from forge.orchestration.schemas import (
     CreateOrchestrationWorkflowInput,
     CreateOrchestrationWorkflowOutput,
@@ -31,6 +35,12 @@ from forge.orchestration.schemas import (
     InspectOrchestrationStatusOutput,
     InspectStageResultInput,
     InspectStageResultOutput,
+    InspectWorkflowRecoveryInput,
+    InspectWorkflowRecoveryOutput,
+    InspectWorkflowTasksInput,
+    InspectWorkflowTasksOutput,
+    RecoverOrchestrationWorkflowInput,
+    RecoverOrchestrationWorkflowOutput,
     RequestOrchestrationApprovalInput,
     RequestOrchestrationApprovalOutput,
     StageStatus,
@@ -43,15 +53,28 @@ from forge.orchestration.schemas import (
 
 
 class OrchestrationTools:
-    """Tool invocation handler for Phase 13 M1 Engineering Orchestration."""
+    """Tool invocation handler for Phase 13 Engineering Orchestration & Autonomy."""
 
     def __init__(
         self,
         repository_path: Path,
         max_output_chars: int = 50_000,
+        state_store: Optional[OrchestrationStateStore] = None,
+        recovery_engine: Optional[WorkflowRecoveryEngine] = None,
+        task_coordinator: Optional[TaskCoordinator] = None,
+        idempotency_ledger: Optional[IdempotencyLedger] = None,
     ) -> None:
         self.repository_path = repository_path.resolve()
         self.max_output_chars = max_output_chars
+        self.state_store = state_store or OrchestrationStateStore()
+        self.idempotency_ledger = idempotency_ledger or IdempotencyLedger()
+        self.recovery_engine = recovery_engine or WorkflowRecoveryEngine(
+            state_store=self.state_store,
+            idempotency_ledger=self.idempotency_ledger,
+        )
+        self.task_coordinator = task_coordinator or TaskCoordinator(
+            state_store=self.state_store,
+        )
         self._orchestrators: Dict[str, EngineeringOrchestrator] = {}
 
     def register_orchestrator(self, orchestrator: EngineeringOrchestrator) -> None:
@@ -87,7 +110,11 @@ class OrchestrationTools:
             repository_path=str(repo_path),
             defect_input=defect_input,
         )
-        orchestrator = EngineeringOrchestrator(context=context)
+        orchestrator = EngineeringOrchestrator(
+            context=context,
+            state_store=self.state_store,
+            idempotency_ledger=self.idempotency_ledger,
+        )
         self.register_orchestrator(orchestrator)
 
         out = CreateOrchestrationWorkflowOutput(
@@ -335,6 +362,68 @@ class OrchestrationTools:
         )
         return out.model_dump_json()
 
+    def inspect_workflow_recovery(self, args: Dict[str, Any]) -> str:
+        """Tool: inspect_workflow_recovery."""
+        try:
+            inp = InspectWorkflowRecoveryInput.model_validate(args)
+        except ValidationError as e:
+            return json.dumps({"error": f"Validation error: {e}"})
+
+        decision = self.recovery_engine.inspect_recovery(inp.workflow_id)
+        out = InspectWorkflowRecoveryOutput(
+            workflow_id=inp.workflow_id,
+            state=decision.checkpoint.state if decision.checkpoint else WorkflowState.BLOCKED,
+            can_recover=decision.can_recover,
+            checkpoint_sequence=decision.checkpoint.sequence if decision.checkpoint else None,
+            checkpoint_digest=decision.checkpoint.checkpoint_digest if decision.checkpoint else None,
+            reconciliation_required=decision.reconciliation_required,
+            blocking_reason=decision.blocking_reason,
+        )
+        return out.model_dump_json()
+
+    def recover_orchestration_workflow(self, args: Dict[str, Any]) -> str:
+        """Tool: recover_orchestration_workflow."""
+        try:
+            inp = RecoverOrchestrationWorkflowInput.model_validate(args)
+        except ValidationError as e:
+            return json.dumps({"error": f"Validation error: {e}"})
+
+        try:
+            decision, orchestrator = self.recovery_engine.recover_workflow(
+                workflow_id=inp.workflow_id,
+                allow_discard_unconfirmed_mutation=inp.allow_discard_unconfirmed_mutation,
+            )
+            if orchestrator:
+                self.register_orchestrator(orchestrator)
+            out = RecoverOrchestrationWorkflowOutput(
+                workflow_id=inp.workflow_id,
+                recovered=decision.can_recover,
+                state=orchestrator.state if orchestrator else WorkflowState.BLOCKED,
+                message=decision.blocking_reason or f"Workflow '{inp.workflow_id}' recovered successfully in state '{orchestrator.state.value if orchestrator else 'BLOCKED'}'.",
+                reconciliation_required=decision.reconciliation_required,
+            )
+            return out.model_dump_json()
+        except Exception as exc:
+            return json.dumps({"error": f"Recovery failed: {exc}"})
+
+    def inspect_workflow_tasks(self, args: Dict[str, Any]) -> str:
+        """Tool: inspect_workflow_tasks."""
+        try:
+            inp = InspectWorkflowTasksInput.model_validate(args)
+        except ValidationError as e:
+            return json.dumps({"error": f"Validation error: {e}"})
+
+        tasks = self.task_coordinator.list_tasks(inp.workflow_id)
+        ready_tasks = self.task_coordinator.get_ready_tasks(inp.workflow_id)
+        has_failures = any(t.state == TaskState.FAILED for t in tasks)
+        out = InspectWorkflowTasksOutput(
+            workflow_id=inp.workflow_id,
+            tasks=[t.model_dump(mode="json") for t in tasks],
+            ready_task_ids=[t.task_id for t in ready_tasks],
+            has_failures=has_failures,
+        )
+        return out.model_dump_json()
+
     # -------------------------------------------------------------
     # Tool Definitions for ToolRegistry
     # -------------------------------------------------------------
@@ -376,5 +465,20 @@ class OrchestrationTools:
                 name="get_engineering_report",
                 description="Retrieve the comprehensive, evidence-backed Markdown engineering report for a workflow.",
                 parameters=GetEngineeringReportInput.model_json_schema(),
+            ),
+            ToolDefinition(
+                name="inspect_workflow_recovery",
+                description="Inspect recovery state, last verified checkpoint, event-chain verification, and reconciliation requirements for a workflow.",
+                parameters=InspectWorkflowRecoveryInput.model_json_schema(),
+            ),
+            ToolDefinition(
+                name="recover_orchestration_workflow",
+                description="Safely recover an interrupted workflow from its last valid checkpoint, validating cryptographic audit log integrity.",
+                parameters=RecoverOrchestrationWorkflowInput.model_json_schema(),
+            ),
+            ToolDefinition(
+                name="inspect_workflow_tasks",
+                description="Inspect DAG coordination tasks, execution order, prerequisite states, and failure propagation for a workflow.",
+                parameters=InspectWorkflowTasksInput.model_json_schema(),
             ),
         ]

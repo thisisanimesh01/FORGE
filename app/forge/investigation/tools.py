@@ -634,6 +634,15 @@ class ToolRegistry:
     def _handle_get_engineering_report(self, args: Dict[str, Any]) -> str:
         return self._orchestration_tools.get_engineering_report(args)
 
+    def _handle_inspect_workflow_recovery(self, args: Dict[str, Any]) -> str:
+        return self._orchestration_tools.inspect_workflow_recovery(args)
+
+    def _handle_recover_orchestration_workflow(self, args: Dict[str, Any]) -> str:
+        return self._orchestration_tools.recover_orchestration_workflow(args)
+
+    def _handle_inspect_workflow_tasks(self, args: Dict[str, Any]) -> str:
+        return self._orchestration_tools.inspect_workflow_tasks(args)
+
     def _handle_create_repair_plan(self, args: Dict[str, Any]) -> str:
         return self._repair_planning_tools.create_repair_plan(args)
 
