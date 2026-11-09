@@ -121,23 +121,38 @@ All 12 quality tools are registered in FORGE's central `ToolRegistry`:
 ## 7. Verification & Benchmark Results
 
 ### Dedicated Test Suite (`tests/unit/test_phase12_m6_repair_quality.py`)
-- **Total Tests:** 54 (including 9 comprehensive adversarial audit tests)
-- **Passed:** 54 (100%)
+- **Total Tests:** 59 (including 14 dedicated adversarial closure audit tests)
+- **Passed:** 59 (100%)
 - **Failed:** 0
-- **Duration:** 10.24s
+- **Duration:** 1.01s
 
 ### Audit Remediation & Hardening Highlights
 1. **Completeness Semantics & Minimality**: Disentangled context files (`affected_files`) from mandatory code changes (`required_changes`). Context files legitimately unedited are not penalized; extraneous file edits outside plan scope incur minimality penalties.
 2. **Statistical Reliability & Sample Sizes**: Added `min_statistical_sample_size = 5` threshold. Strategies with $N < 5$ past runs are flagged as observing trends without penalizing current repair scores.
 3. **Context-Aware Risk Classification**: Implemented `_strip_comments_and_strings()` in `RepairRiskAnalyzer` to prevent false positives from comments, docstrings, or log strings while accurately catching genuine executable calls (`eval(...)`, `subprocess.run(...)`) and credential leaks.
 4. **Policy Integrity & Validation**: Enforced strict validation preventing tampering with `allow_regressions` (strictly `False`) or negative dimension weights.
+5. **SQLite History Corruption & Fail-Closed Scoring**:
+   - Implemented `HistoricalReliabilityStore.check_health()` using `PRAGMA quick_check` and schema validation.
+   - Updated `get_strategy_stats()` to return explicit availability status (`available`, `empty`, `corrupted`, `unavailable`, `schema_error`) along with descriptive error messages.
+   - In the event of SQLite corruption or query failure, the reliability analyzer records `historical_error_observed = True`, classifies confidence as `INSUFFICIENT_EVIDENCE`, and clamps the reliability score to $\le 0.50$.
+   - The quality scorer and gatekeeper strictly block repairs (`historical_error_observed -> BLOCKED`) and clamp overall scores to $\le 0.50$ when database health is compromised, preventing database failures from masquerading as clean historical records.
+6. **Scoring-Policy Manipulation & Cryptographic Digest Binding**:
+   - Bound all `RepairQualityPolicy` thresholds to strictly safe boundaries (`max_patch_lines <= 2000`, `max_files_changed <= 25`, `max_complexity_increase <= 15`, `max_scope_expansion_files == 0`, `allow_regressions == False`, `min_overall_score >= 0.50`, `min_dimension_score >= 0.30`).
+   - Dimension weights strictly require all 6 dimensions with floors ($0.05$), ceilings ($0.50$), and normalized sum ($0.95 - 1.05$).
+   - Added deterministic cryptographic policy digest computation (`compute_digest()`, SHA-256).
+   - `RepairQualityGateKeeper` and `RepairQualityResult` enforce cryptographic policy digest parity across scoring and evaluation; policy substitution or tampering immediately triggers a `BLOCKED` gate decision.
+7. **Adversarial Risk-Scanner AST Hardening**:
+   - Replaced fragile line-based scanning with an AST `NodeVisitor` (`_PatchRiskVisitor`) complemented by a stateful tokenize fallback.
+   - Accurately detects multiline function calls (`subprocess.run(...)`), aliased module imports (`import subprocess as sp; sp.Popen(...)`, `from subprocess import run as r; r(...)`), and indirect `getattr` invocations (`getattr(os, "system")(...)`).
+   - Completely immunizes docstrings and comments from false positives, including multiline triple-quoted strings containing security-sensitive keywords.
+   - Enforces regex detection for active production credentials (AWS keys, GitHub tokens, Slack webhooks, Private Keys) while permitting strict dummy placeholders.
 
 ### Full Project Regression Suite
-- **Total Tests:** 1,947
-- **Passed:** 1,946
-- **Skipped:** 1 (optional Docker daemon unavailable in sandboxed run)
+- **Total Tests:** 1,963
+- **Passed:** 1,961
+- **Skipped:** 2 (sandboxed environment skips)
 - **Failed:** 0
-- **Duration:** ~175s
+- **Duration:** 376.75s
 
 ### Microbenchmark Suite (`app/forge/benchmarks/benchmark_phase12_m6_repair_quality.py`)
 - **Evidence Validation (100 ops):** 0.65 ms total (0.007 ms/op)
@@ -151,8 +166,8 @@ All 12 quality tools are registered in FORGE's central `ToolRegistry`:
 - **Composite Scoring (500 ops):** 0.02 ms total (0.0000 ms/op)
 - **Gatekeeper Evaluation (500 ops):** 0.03 ms total (0.0001 ms/op)
 - **Event Recording & Hash Chaining (50 ops):** 3.97 ms
-- **End-to-End Orchestration Latency:** 9.93 ms
-- **Peak Memory Footprint:** 430.48 KB
+- **End-to-End Orchestration Latency:** 9.98 ms
+- **Peak Memory Footprint:** 433.18 KB
 
 ---
 
@@ -169,4 +184,4 @@ All 12 quality tools are registered in FORGE's central `ToolRegistry`:
 
 **Verdict:** `APPROVED FOR HUMAN MERGE`
 
-All Phase 12 Milestone 6 capabilities, data contracts, AST maintainability analyzers, historical reliability storage, 12 ToolRegistry tools, adversarial tests, benchmarks, and documentation have passed verification with zero regressions.
+All Phase 12 Milestone 6 capabilities, data contracts, AST maintainability analyzers, historical reliability storage, 12 ToolRegistry tools, adversarial closure audit tests, benchmarks, and documentation have passed verification with zero regressions.

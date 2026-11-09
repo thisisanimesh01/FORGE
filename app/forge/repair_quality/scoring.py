@@ -73,6 +73,14 @@ class RepairQualityScorer:
         if correctness_dim and (correctness_dim.score is None or correctness_dim.score <= 0.0):
             raw_overall = min(raw_overall, 0.30)
 
+        # Check reliability dimension: if evidence is insufficient (e.g. database corrupted), clamp score
+        reliability_dim = dimension_scores.get(QualityDimension.RELIABILITY)
+        if reliability_dim and reliability_dim.status == QualityStatus.INSUFFICIENT_EVIDENCE:
+            policy_violations.append(
+                "Policy violation: reliability dimension has insufficient evidence (historical data unavailable or corrupted)"
+            )
+            raw_overall = min(raw_overall, 0.50)
+
         final_score = round(max(0.0, min(1.0, raw_overall)), 4)
 
         if final_score < self.policy.min_overall_score:

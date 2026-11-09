@@ -34,14 +34,33 @@ class RepairQualityGateKeeper:
         risk_level: RiskSeverity,
         verification_status: str,
         is_evidence_valid: bool = True,
+        policy_digest: Optional[str] = None,
     ) -> Tuple[QualityStatus, QualityGateDecision, List[str]]:
         """Evaluate all quality gates and determine final status and decision."""
         reasons: List[str] = []
+
+        # 0. Policy provenance & digest verification (prevent policy substitution attacks)
+        if policy_digest is not None:
+            expected_digest = self.policy.compute_digest()
+            if policy_digest != expected_digest:
+                reasons.append(
+                    f"Policy substitution detected: score was computed under digest {policy_digest[:8]}... "
+                    f"but gatekeeper was configured with {expected_digest[:8]}..."
+                )
+                return QualityStatus.FAILED, QualityGateDecision.BLOCKED, reasons
 
         # 1. Missing evidence or invalid bindings
         if not is_evidence_valid or missing_evidence:
             reasons.append(f"Evidence validation failed or missing evidence: {missing_evidence}")
             return QualityStatus.INSUFFICIENT_EVIDENCE, QualityGateDecision.BLOCKED, reasons
+
+        # 1b. Historical reliability store corruption / unavailability
+        if metrics.historical_error_observed or metrics.historical_status in ("corrupted", "unavailable", "schema_error"):
+            if self.policy.require_all_evidence:
+                reasons.append(
+                    f"Historical reliability store is {metrics.historical_status}; required historical evidence cannot be verified"
+                )
+                return QualityStatus.INSUFFICIENT_EVIDENCE, QualityGateDecision.BLOCKED, reasons
 
         # 2. Regressions detected
         if metrics.regressions_detected_count > 0:

@@ -50,6 +50,8 @@ class RepairReliabilityAnalyzer:
 
         # 2. Historical Records & Statistical Significance
         historical_available = False
+        historical_status = "empty"
+        historical_error_observed = False
         strategy_success_rate = 1.0
         past_attempts = 0
         past_regressions = 0
@@ -58,33 +60,51 @@ class RepairReliabilityAnalyzer:
         if self.history_store and strategy_id:
             try:
                 stats = self.history_store.get_strategy_stats(strategy_id)
-                past_attempts = stats.get("total_attempts", 0)
-                if past_attempts > 0:
-                    historical_available = True
-                    strategy_success_rate = stats.get("success_rate", 0.0)
-                    past_regressions = stats.get("regressions_count", 0)
+                historical_status = stats.get("status", "empty")
+                is_available = stats.get("is_available", True)
 
-                    min_sample = self.policy.min_statistical_sample_size
-                    if past_attempts >= min_sample:
-                        is_statistically_significant = True
-                        if past_regressions > 0:
+                if not is_available or historical_status in ("corrupted", "unavailable", "schema_error"):
+                    historical_error_observed = True
+                    findings.append(
+                        f"Historical reliability store is {historical_status}: "
+                        f"{stats.get('error_message', 'database unavailable')}. "
+                        "Fail-closed policy active: historical reliability cannot be verified."
+                    )
+                else:
+                    past_attempts = stats.get("total_attempts", 0)
+                    if past_attempts > 0:
+                        historical_available = True
+                        historical_status = "available"
+                        strategy_success_rate = stats.get("success_rate", 0.0)
+                        past_regressions = stats.get("regressions_count", 0)
+
+                        min_sample = self.policy.min_statistical_sample_size
+                        if past_attempts >= min_sample:
+                            is_statistically_significant = True
+                            if past_regressions > 0:
+                                findings.append(
+                                    f"Historical warning (N={past_attempts}): strategy '{strategy_id}' previously caused {past_regressions} regression(s)"
+                                )
+                            if strategy_success_rate < 0.50:
+                                findings.append(
+                                    f"Statistically significant reliability concern (N={past_attempts}): strategy '{strategy_id}' has a low historical success rate of {strategy_success_rate:.1%}"
+                                )
+                            elif strategy_success_rate >= 0.80:
+                                findings.append(
+                                    f"High historical stability (N={past_attempts}): strategy '{strategy_id}' has a {strategy_success_rate:.1%} success rate"
+                                )
+                        else:
                             findings.append(
-                                f"Historical warning (N={past_attempts}): strategy '{strategy_id}' previously caused {past_regressions} regression(s)"
-                            )
-                        if strategy_success_rate < 0.50:
-                            findings.append(
-                                f"Statistically significant reliability concern (N={past_attempts}): strategy '{strategy_id}' has a low historical success rate of {strategy_success_rate:.1%}"
-                            )
-                        elif strategy_success_rate >= 0.80:
-                            findings.append(
-                                f"High historical stability (N={past_attempts}): strategy '{strategy_id}' has a {strategy_success_rate:.1%} success rate"
+                                f"Historical sample size for strategy '{strategy_id}' (N={past_attempts}) is below statistical threshold ({min_sample}); observing trends without penalizing current repair"
                             )
                     else:
-                        findings.append(
-                            f"Historical sample size for strategy '{strategy_id}' (N={past_attempts}) is below statistical threshold ({min_sample}); observing trends without penalizing current repair"
-                        )
+                        historical_available = False
+                        historical_status = "empty"
+                        findings.append("No historical data available for strategy; evaluation based solely on current run")
             except Exception as e:
-                findings.append(f"Historical query degraded: {e}")
+                historical_error_observed = True
+                historical_status = "error"
+                findings.append(f"Historical query error: {e}")
 
         # 3. Score & Status Calculation
         if regressions_detected:
@@ -105,8 +125,13 @@ class RepairReliabilityAnalyzer:
             if pre_existing:
                 findings.append("Pre-existing baseline failures observed; repair did not exacerbate them")
 
-            # Historical adjustment only when statistically significant
-            if historical_available:
+            # Historical adjustment
+            if historical_error_observed:
+                confidence = ConfidenceClassification.INSUFFICIENT_EVIDENCE
+                score = min(score, self.policy.min_dimension_score)
+                status = QualityStatus.INSUFFICIENT_EVIDENCE
+                findings.append("Reliability dimension marked INSUFFICIENT_EVIDENCE due to historical database failure")
+            elif historical_available:
                 if is_statistically_significant:
                     if strategy_success_rate >= 0.80:
                         confidence = ConfidenceClassification.VERY_HIGH
@@ -122,12 +147,13 @@ class RepairReliabilityAnalyzer:
                 confidence = ConfidenceClassification.MEDIUM
                 findings.append("No historical data available for strategy; evaluation based solely on current run")
 
-            score = max(0.0, min(1.0, score))
-            status = (
-                QualityStatus.PASSED
-                if score >= self.policy.min_dimension_score
-                else QualityStatus.FAILED
-            )
+            if not historical_error_observed:
+                score = max(0.0, min(1.0, score))
+                status = (
+                    QualityStatus.PASSED
+                    if score >= self.policy.min_dimension_score
+                    else QualityStatus.FAILED
+                )
 
         metrics = {
             "regression_classification": regression_class,
@@ -135,6 +161,8 @@ class RepairReliabilityAnalyzer:
             "pre_existing_failures_observed": pre_existing,
             "improvements_observed": improved,
             "historical_data_available": historical_available,
+            "historical_status": historical_status,
+            "historical_error_observed": historical_error_observed,
             "past_attempts": past_attempts,
             "past_regressions": past_regressions,
             "strategy_success_rate": strategy_success_rate,

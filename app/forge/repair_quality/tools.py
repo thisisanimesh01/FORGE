@@ -274,6 +274,7 @@ class RepairQualityTools:
             except Exception:
                 pass
 
+        active_policy = self.policy
         scorer = self.scorer
         if inp.policy:
             try:
@@ -286,6 +287,7 @@ class RepairQualityTools:
         return json.dumps({
             "overall_score": score,
             "policy_violations": violations,
+            "policy_digest": active_policy.compute_digest(),
         })
 
     def evaluate_repair_quality_gates(self, args: Dict[str, Any]) -> str:
@@ -320,6 +322,7 @@ class RepairQualityTools:
             missing_evidence=inp.missing_evidence,
             risk_level=RiskSeverity(inp.risk_level),
             verification_status=inp.verification_status,
+            policy_digest=inp.policy_digest,
         )
         return json.dumps({
             "quality_status": status.value,

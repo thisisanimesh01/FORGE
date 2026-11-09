@@ -12,6 +12,7 @@ and tool contracts:
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
+import json
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -166,16 +167,16 @@ class RepairQualityPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     policy_version: str = Field(default="1.0.0")
-    max_patch_lines: int = Field(default=500, ge=1)
-    max_files_changed: int = Field(default=10, ge=1)
-    max_complexity_increase: int = Field(default=5, ge=0)
-    max_duplication_increase_lines: int = Field(default=20, ge=0)
-    max_scope_expansion_files: int = Field(default=0, ge=0)
+    max_patch_lines: int = Field(default=500, ge=1, le=2000)
+    max_files_changed: int = Field(default=10, ge=1, le=25)
+    max_complexity_increase: int = Field(default=5, ge=0, le=15)
+    max_duplication_increase_lines: int = Field(default=20, ge=0, le=100)
+    max_scope_expansion_files: int = Field(default=0, ge=0, le=0)
     allow_regressions: bool = Field(default=False)
-    min_verification_completeness: float = Field(default=1.0, ge=0.0, le=1.0)
-    min_overall_score: float = Field(default=0.70, ge=0.0, le=1.0)
-    min_dimension_score: float = Field(default=0.50, ge=0.0, le=1.0)
-    min_statistical_sample_size: int = Field(default=5, ge=1)
+    min_verification_completeness: float = Field(default=1.0, ge=0.80, le=1.0)
+    min_overall_score: float = Field(default=0.70, ge=0.50, le=0.95)
+    min_dimension_score: float = Field(default=0.50, ge=0.30, le=0.90)
+    min_statistical_sample_size: int = Field(default=5, ge=3, le=50)
     dimension_weights: Dict[QualityDimension, float] = Field(
         default_factory=lambda: {
             QualityDimension.CORRECTNESS: 0.25,
@@ -195,15 +196,60 @@ class RepairQualityPolicy(BaseModel):
             raise ValueError("Safety invariant breach: allow_regressions cannot be True")
         return False
 
+    @field_validator("max_scope_expansion_files")
+    @classmethod
+    def enforce_zero_scope_expansion(cls, v: int) -> int:
+        if v != 0:
+            raise ValueError("Safety invariant breach: max_scope_expansion_files must strictly be 0")
+        return 0
+
     @field_validator("dimension_weights")
     @classmethod
     def validate_weights(cls, weights: Dict[QualityDimension, float]) -> Dict[QualityDimension, float]:
+        required_dimensions = set(QualityDimension)
+        provided_dimensions = set(weights.keys())
+        missing = required_dimensions - provided_dimensions
+        if missing:
+            raise ValueError(f"Missing mandatory quality dimensions in weights: {[d.value for d in missing]}")
+
         for dim, w in weights.items():
-            if w < 0.0:
-                raise ValueError(f"Weight for dimension '{dim.value}' cannot be negative: {w}")
-        if sum(weights.values()) <= 0.0:
-            raise ValueError("Sum of dimension weights must be greater than zero")
+            if w < 0.05:
+                raise ValueError(
+                    f"Weight for dimension '{dim.value}' is too low ({w}). Minimum allowed is 0.05 to prevent bypassing dimensions."
+                )
+            if w > 0.50:
+                raise ValueError(
+                    f"Weight for dimension '{dim.value}' is too high ({w}). Maximum allowed is 0.50 to prevent single-dimension dominance."
+                )
+
+        total_weight = sum(weights.values())
+        if not (0.95 <= total_weight <= 1.05):
+            raise ValueError(f"Sum of dimension weights must equal approximately 1.0 (got {total_weight:.4f})")
         return weights
+
+    def compute_digest(self) -> str:
+        """Compute deterministic cryptographic SHA-256 digest of policy configuration."""
+        canonical_weights = {
+            dim.value: self.dimension_weights[dim]
+            for dim in sorted(self.dimension_weights.keys(), key=lambda d: d.value)
+        }
+        canonical_dict = {
+            "policy_version": self.policy_version,
+            "max_patch_lines": self.max_patch_lines,
+            "max_files_changed": self.max_files_changed,
+            "max_complexity_increase": self.max_complexity_increase,
+            "max_duplication_increase_lines": self.max_duplication_increase_lines,
+            "max_scope_expansion_files": self.max_scope_expansion_files,
+            "allow_regressions": self.allow_regressions,
+            "min_verification_completeness": self.min_verification_completeness,
+            "min_overall_score": self.min_overall_score,
+            "min_dimension_score": self.min_dimension_score,
+            "min_statistical_sample_size": self.min_statistical_sample_size,
+            "dimension_weights": canonical_weights,
+            "require_all_evidence": self.require_all_evidence,
+        }
+        canonical_json = json.dumps(canonical_dict, sort_keys=True)
+        return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -237,10 +283,12 @@ class RepairQualityMetrics(BaseModel):
     pre_existing_failures_count: int = Field(default=0, ge=0)
     improvements_count: int = Field(default=0, ge=0)
 
-    # Measurement flags
+    # Measurement flags & historical health
     complexity_measured: bool = Field(default=False)
     coverage_measured: bool = Field(default=False)
     historical_data_available: bool = Field(default=False)
+    historical_status: str = Field(default="empty", description="Status of historical reliability store: available, empty, unavailable, corrupted")
+    historical_error_observed: bool = Field(default=False, description="True if database failure occurred during historical analysis")
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +349,7 @@ class RepairQualityResult(BaseModel):
     confidence: ConfidenceClassification = Field(default=ConfidenceClassification.MEDIUM)
     gate_decision: QualityGateDecision = Field(description="Quality gatekeeper decision")
     policy_version: str = Field(default="1.0.0", description="Policy version bound to this evaluation")
+    policy_digest: str = Field(default="", description="Cryptographic SHA-256 digest of policy used")
     requires_human_review: bool = Field(default=True, description="Strictly True. Cannot be disabled.")
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -338,6 +387,10 @@ class RepairQualityResult(BaseModel):
             if self.risk_level in (RiskSeverity.CRITICAL, RiskSeverity.HIGH):
                 raise ValueError(
                     f"Integrity violation: cannot mark PASSED with {self.risk_level.value} risk level"
+                )
+            if self.metrics.historical_error_observed or self.metrics.historical_status in ("corrupted", "unavailable"):
+                raise ValueError(
+                    f"Integrity violation: cannot mark PASSED when historical reliability store is {self.metrics.historical_status}"
                 )
             if self.overall_score is None:
                 raise ValueError(
@@ -441,6 +494,7 @@ class EvaluateRepairQualityGatesInput(BaseModel):
     risk_level: str = "low"
     verification_status: str = "passed"
     policy: Optional[Dict[str, Any]] = None
+    policy_digest: Optional[str] = None
 
 
 class InspectRepairQualityHistoryInput(BaseModel):

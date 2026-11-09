@@ -222,6 +222,8 @@ class RepairQualityExecutor:
             improvements_count=1 if rel_metrics.get("improvements_observed") else 0,
             complexity_measured=maint_metrics.get("complexity_measured", False),
             historical_data_available=rel_metrics.get("historical_data_available", False),
+            historical_status=rel_metrics.get("historical_status", "empty"),
+            historical_error_observed=rel_metrics.get("historical_error_observed", False),
         )
 
         # 11. Evaluate Quality Gates
@@ -235,6 +237,7 @@ class RepairQualityExecutor:
             risk_level=risk_level,
             verification_status=verif_status,
             is_evidence_valid=is_evidence_valid,
+            policy_digest=self.policy.compute_digest(),
         )
         all_findings.extend(gate_reasons)
         events.record_event(
@@ -280,6 +283,7 @@ class RepairQualityExecutor:
             confidence=confidence,
             gate_decision=gate_decision,
             policy_version=self.policy.policy_version,
+            policy_digest=self.policy.compute_digest(),
             requires_human_review=True,
         )
 

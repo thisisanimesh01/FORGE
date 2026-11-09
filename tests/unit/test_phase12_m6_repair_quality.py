@@ -1316,24 +1316,45 @@ def test_policy_invariants_and_tamper_rejection():
     """Audit 4: Invariants reject attempts to enable regressions or supply invalid weights."""
     from pydantic import ValidationError
 
-    # allow_regressions cannot be True
+    # 1. allow_regressions cannot be True
     with pytest.raises(ValidationError, match="allow_regressions cannot be True"):
         RepairQualityPolicy(allow_regressions=True)
 
-    # Negative weight rejected
-    with pytest.raises(ValidationError, match="cannot be negative"):
-        RepairQualityPolicy(dimension_weights={QualityDimension.CORRECTNESS: -0.5})
+    # 2. Missing mandatory dimensions rejected
+    with pytest.raises(ValidationError, match="Missing mandatory quality dimensions"):
+        RepairQualityPolicy(dimension_weights={QualityDimension.CORRECTNESS: 1.0})
 
-    # Zero total weights rejected
-    with pytest.raises(ValidationError, match="Sum of dimension weights must be greater than zero"):
-        RepairQualityPolicy(dimension_weights={
-            QualityDimension.CORRECTNESS: 0.0,
-            QualityDimension.COMPLETENESS: 0.0,
-            QualityDimension.MAINTAINABILITY: 0.0,
-            QualityDimension.PATCH_QUALITY: 0.0,
-            QualityDimension.RELIABILITY: 0.0,
-            QualityDimension.SECURITY_RISK: 0.0,
-        })
+    # 3. Too low / negative weight rejected
+    bad_weights_low = {
+        QualityDimension.CORRECTNESS: -0.5,
+        QualityDimension.COMPLETENESS: 0.3,
+        QualityDimension.MAINTAINABILITY: 0.3,
+        QualityDimension.PATCH_QUALITY: 0.3,
+        QualityDimension.RELIABILITY: 0.3,
+        QualityDimension.SECURITY_RISK: 0.3,
+    }
+    with pytest.raises(ValidationError, match="is too low"):
+        RepairQualityPolicy(dimension_weights=bad_weights_low)
+
+    # 4. Overwhelmingly dominant weight (> 0.50) rejected
+    bad_weights_dominant = {
+        QualityDimension.CORRECTNESS: 0.75,
+        QualityDimension.COMPLETENESS: 0.05,
+        QualityDimension.MAINTAINABILITY: 0.05,
+        QualityDimension.PATCH_QUALITY: 0.05,
+        QualityDimension.RELIABILITY: 0.05,
+        QualityDimension.SECURITY_RISK: 0.05,
+    }
+    with pytest.raises(ValidationError, match="is too high"):
+        RepairQualityPolicy(dimension_weights=bad_weights_dominant)
+
+    # 5. Non-zero scope expansion strictly rejected
+    with pytest.raises(ValidationError, match="less than or equal to 0"):
+        RepairQualityPolicy(max_scope_expansion_files=1)
+
+    # 6. Out of bounds minimum score rejected
+    with pytest.raises(ValidationError, match="greater than or equal to 0.5"):
+        RepairQualityPolicy(min_overall_score=0.1)
 
 
 def test_tool_custom_policy_validation(tmp_path: Path):
@@ -1351,7 +1372,7 @@ def test_tool_custom_policy_validation(tmp_path: Path):
     assert "error" in data
     assert "allow_regressions cannot be True" in data["error"]
 
-    # 2. Gate evaluation with illegal weights
+    # 2. Gate evaluation with illegal weights (missing dimensions)
     gate_resp = tools.evaluate_repair_quality_gates({
         "overall_score": 0.95,
         "dimension_scores": {
@@ -1362,7 +1383,7 @@ def test_tool_custom_policy_validation(tmp_path: Path):
     })
     gate_data = json.loads(gate_resp)
     assert "error" in gate_data
-    assert "cannot be negative" in gate_data["error"]
+    assert "Missing mandatory quality dimensions" in gate_data["error"]
 
 
 def test_history_store_sqlite_resilience(tmp_path: Path):
@@ -1373,8 +1394,304 @@ def test_history_store_sqlite_resilience(tmp_path: Path):
 
     store = HistoricalReliabilityStore(db_path=corrupt_db)
     stats = store.get_strategy_stats("test_strategy")
+    assert stats["is_available"] is False
+    assert stats["status"] == "corrupted"
     assert stats["total_attempts"] == 0
     assert stats["success_rate"] == 0.0
 
     history = store.get_history(strategy_id="test_strategy")
     assert history == []
+
+
+def test_history_sqlite_corruption_cannot_improve_score_or_bypass_gate(tmp_path: Path):
+    """Audit Area 1: SQLite corruption cannot improve score or turn a failing/blocked result into PASSED."""
+    corrupt_db = tmp_path / "corrupt_eval.db"
+    corrupt_db.write_bytes(b"MALFORMED_SQLITE_HEADER_CORRUPTION_DATA")
+
+    store = HistoricalReliabilityStore(db_path=corrupt_db)
+    analyzer = RepairReliabilityAnalyzer(history_store=store)
+
+    clean_verif = {
+        "verification_status": "passed",
+        "regression_classification": "no_regression_observed",
+    }
+
+    # Evaluate reliability under database corruption
+    metrics, score, conf = analyzer.analyze_reliability(
+        verification_result=clean_verif,
+        strategy_id="any_strategy",
+    )
+
+    # Invariant: Score is capped at 0.50, confidence is INSUFFICIENT_EVIDENCE
+    assert score.score <= 0.50
+    assert score.status == QualityStatus.INSUFFICIENT_EVIDENCE
+    assert conf == ConfidenceClassification.INSUFFICIENT_EVIDENCE
+    assert metrics["historical_error_observed"] is True
+    assert metrics["historical_status"] == "corrupted"
+
+    # Invariant: Composite scoring with insufficient reliability evidence caps overall score
+    scorer = RepairQualityScorer()
+    dim_scores = {
+        QualityDimension.CORRECTNESS: QualityDimensionScore(
+            dimension=QualityDimension.CORRECTNESS,
+            score=1.0,
+            weight=0.25,
+            status=QualityStatus.PASSED,
+            explanation="Passed",
+        ),
+        QualityDimension.COMPLETENESS: QualityDimensionScore(
+            dimension=QualityDimension.COMPLETENESS,
+            score=1.0,
+            weight=0.20,
+            status=QualityStatus.PASSED,
+            explanation="Passed",
+        ),
+        QualityDimension.MAINTAINABILITY: QualityDimensionScore(
+            dimension=QualityDimension.MAINTAINABILITY,
+            score=1.0,
+            weight=0.15,
+            status=QualityStatus.PASSED,
+            explanation="Passed",
+        ),
+        QualityDimension.PATCH_QUALITY: QualityDimensionScore(
+            dimension=QualityDimension.PATCH_QUALITY,
+            score=1.0,
+            weight=0.15,
+            status=QualityStatus.PASSED,
+            explanation="Passed",
+        ),
+        QualityDimension.RELIABILITY: score,
+        QualityDimension.SECURITY_RISK: QualityDimensionScore(
+            dimension=QualityDimension.SECURITY_RISK,
+            score=1.0,
+            weight=0.10,
+            status=QualityStatus.PASSED,
+            explanation="Passed",
+        ),
+    }
+
+    overall, violations = scorer.calculate_score(dimension_scores=dim_scores)
+    assert overall is not None
+    assert overall <= 0.50  # Strictly capped: cannot reach passing threshold 0.70!
+    assert any("insufficient evidence" in v.lower() for v in violations)
+
+    # Invariant: Gatekeeper strictly blocks when historical store is corrupted
+    gatekeeper = RepairQualityGateKeeper()
+    gate_metrics = RepairQualityMetrics(
+        historical_status="corrupted",
+        historical_error_observed=True,
+    )
+    status, decision, reasons = gatekeeper.evaluate_gates(
+        overall_score=overall,
+        dimension_scores=dim_scores,
+        metrics=gate_metrics,
+        policy_violations=violations,
+        missing_evidence=[],
+        risk_level=RiskSeverity.LOW,
+        verification_status="passed",
+    )
+    assert decision == QualityGateDecision.BLOCKED
+    assert status == QualityStatus.INSUFFICIENT_EVIDENCE
+    assert any("corrupted" in r.lower() for r in reasons)
+
+
+def test_history_empty_db_vs_corrupted_db(tmp_path: Path):
+    """Audit Area 1: Distinguish genuinely empty history from corrupted/unavailable history."""
+    # 1. Healthy empty database
+    empty_db = tmp_path / "healthy_empty.db"
+    store_empty = HistoricalReliabilityStore(db_path=empty_db)
+    stats_empty = store_empty.get_strategy_stats("new_strategy")
+    assert stats_empty["is_available"] is True
+    assert stats_empty["status"] == "empty"
+    assert stats_empty["total_attempts"] == 0
+
+    analyzer_empty = RepairReliabilityAnalyzer(history_store=store_empty)
+    clean_verif = {
+        "verification_status": "passed",
+        "regression_classification": "no_regression_observed",
+    }
+    m_empty, s_empty, c_empty = analyzer_empty.analyze_reliability(
+        verification_result=clean_verif,
+        strategy_id="new_strategy",
+    )
+    # Healthy empty DB allows clean evaluation without penalty
+    assert s_empty.score == 1.0
+    assert s_empty.status == QualityStatus.PASSED
+    assert c_empty == ConfidenceClassification.MEDIUM
+    assert m_empty["historical_error_observed"] is False
+    assert m_empty["historical_status"] == "empty"
+
+    # 2. Corrupted database
+    corrupt_db = tmp_path / "corrupted.db"
+    corrupt_db.write_bytes(b"CORRUPTED_BYTES")
+    store_corrupt = HistoricalReliabilityStore(db_path=corrupt_db)
+    stats_corrupt = store_corrupt.get_strategy_stats("any")
+    assert stats_corrupt["is_available"] is False
+    assert stats_corrupt["status"] == "corrupted"
+
+
+def test_policy_provenance_and_substitution_attack(tmp_path: Path):
+    """Audit Area 2: Policy digest binding prevents policy substitution attacks between scoring and gating."""
+    policy_standard = RepairQualityPolicy()
+    digest_standard = policy_standard.compute_digest()
+
+    # Create modified policy (e.g. relaxed min overall score)
+    policy_modified = RepairQualityPolicy(min_overall_score=0.60)
+    digest_modified = policy_modified.compute_digest()
+
+    assert digest_standard != digest_modified
+
+    # Gatekeeper initialized with policy_standard
+    gatekeeper = RepairQualityGateKeeper(policy=policy_standard)
+
+    dim_scores = {
+        dim: QualityDimensionScore(
+            dimension=dim,
+            score=0.9,
+            weight=0.16,
+            status=QualityStatus.PASSED,
+            explanation="Ok",
+        )
+        for dim in QualityDimension
+    }
+    metrics = RepairQualityMetrics()
+
+    # Simulate attack: score computed under policy_modified digest, passed to standard gatekeeper
+    status, decision, reasons = gatekeeper.evaluate_gates(
+        overall_score=0.90,
+        dimension_scores=dim_scores,
+        metrics=metrics,
+        policy_violations=[],
+        missing_evidence=[],
+        risk_level=RiskSeverity.LOW,
+        verification_status="passed",
+        policy_digest=digest_modified,  # Mismatched digest!
+    )
+
+    assert decision == QualityGateDecision.BLOCKED
+    assert status == QualityStatus.FAILED
+    assert any("policy substitution detected" in r.lower() for r in reasons)
+
+
+def test_risk_scanner_adversarial_multiline_and_aliasing():
+    """Audit Area 3: Multiline calls, aliased imports, indirect invocation, and comments."""
+    analyzer = RepairRiskAnalyzer()
+
+    # 1. Multiline subprocess call across lines
+    multiline_patch = """diff --git a/src/worker.py b/src/worker.py
++++ b/src/worker.py
+@@ -1,2 +1,6 @@
++def run_task():
++    proc = subprocess.run(
++        ["rm", "-rf", "/"]
++    )
++    return proc
+"""
+    _, _, sev1 = analyzer.analyze_risk(multiline_patch, ["src/worker.py"])
+    assert sev1 == RiskSeverity.HIGH
+
+    # 2. Aliased import: import subprocess as sp; sp.Popen(...)
+    alias_patch = """diff --git a/src/worker.py b/src/worker.py
++++ b/src/worker.py
+@@ -1,1 +1,4 @@
++import subprocess as sp
++def spawn():
++    return sp.Popen(["bash"])
+"""
+    _, _, sev2 = analyzer.analyze_risk(alias_patch, ["src/worker.py"])
+    assert sev2 == RiskSeverity.HIGH
+
+    # 3. from subprocess import run as r; r(...)
+    from_alias_patch = """diff --git a/src/worker.py b/src/worker.py
++++ b/src/worker.py
+@@ -1,1 +1,4 @@
++from subprocess import run as r
++def exec_cmd():
++    return r(["bash"])
+"""
+    _, _, sev3 = analyzer.analyze_risk(from_alias_patch, ["src/worker.py"])
+    assert sev3 == RiskSeverity.HIGH
+
+    # 4. Indirect invocation via getattr(os, "system")
+    getattr_patch = """diff --git a/src/worker.py b/src/worker.py
++++ b/src/worker.py
+@@ -1,1 +1,3 @@
++def indirect():
++    return getattr(os, "system")("id")
+"""
+    _, _, sev4 = analyzer.analyze_risk(getattr_patch, ["src/worker.py"])
+    assert sev4 == RiskSeverity.HIGH
+
+    # 5. Multiline triple-quoted docstring containing dangerous examples -> ZERO false positives
+    docstring_patch = """diff --git a/src/worker.py b/src/worker.py
++++ b/src/worker.py
+@@ -1,1 +1,8 @@
++def helper():
++    \"\"\"
++    Documentation example:
++    eval(expression)
++    subprocess.run(["cmd"])
++    \"\"\"
++    return True
+"""
+    _, s5, sev5 = analyzer.analyze_risk(docstring_patch, ["src/worker.py"])
+    assert sev5 == RiskSeverity.LOW
+    assert s5.score == 1.0
+
+    # 6. Escaped and raw strings -> ZERO false positives
+    strings_patch = """diff --git a/src/worker.py b/src/worker.py
++++ b/src/worker.py
+@@ -1,1 +1,4 @@
++def regex_def():
++    pat = r"eval\\("
++    msg = "subprocess.run(\\"cmd\\")"
++    return pat + msg
+"""
+    _, s6, sev6 = analyzer.analyze_risk(strings_patch, ["src/worker.py"])
+    assert sev6 == RiskSeverity.LOW
+    assert s6.score == 1.0
+
+
+def test_risk_scanner_adversarial_credentials():
+    """Audit Area 3: Credential assignments split across lines and live tokens with misleading safe names."""
+    analyzer = RepairRiskAnalyzer()
+
+    # 1. Credential assignment split across lines
+    multiline_cred_patch = """diff --git a/src/config.py b/src/config.py
++++ b/src/config.py
+@@ -1,1 +1,4 @@
++api_key = (
++    "ghp_1234567890abcdef1234567890abcdef1234"
++)
+"""
+    _, _, sev1 = analyzer.analyze_risk(multiline_cred_patch, ["src/config.py"])
+    assert sev1 == RiskSeverity.CRITICAL
+
+    # 2. Real credential whose variable name or value contains misleading 'sample' substring
+    misleading_safe_patch = """diff --git a/src/config.py b/src/config.py
++++ b/src/config.py
+@@ -1,1 +1,3 @@
++# Live token disguised in sample variable
++sample_test_token = "ghp_RealLiveProductionSecretToken99881122"
+"""
+    _, _, sev2 = analyzer.analyze_risk(misleading_safe_patch, ["src/config.py"])
+    assert sev2 == RiskSeverity.CRITICAL
+
+    # 3. AWS live access key in test variable
+    aws_patch = """diff --git a/src/config.py b/src/config.py
++++ b/src/config.py
+@@ -1,1 +1,2 @@
++test_aws_key = "AKIAIOSFODNN7EXAMPLE"
+"""
+    _, _, sev3 = analyzer.analyze_risk(aws_patch, ["src/config.py"])
+    assert sev3 == RiskSeverity.CRITICAL
+
+    # 4. Genuine test placeholder -> recognized as safe
+    placeholder_patch = """diff --git a/src/config.py b/src/config.py
++++ b/src/config.py
+@@ -1,1 +1,2 @@
++password = "dummy_placeholder_password"
+"""
+    _, s4, sev4 = analyzer.analyze_risk(placeholder_patch, ["src/config.py"])
+    assert sev4 == RiskSeverity.LOW
+    assert s4.score == 1.0

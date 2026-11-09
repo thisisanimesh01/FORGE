@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 import sqlite3
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from forge.repair_quality.schemas import MAX_HISTORY_RECORDS
 
@@ -57,6 +57,28 @@ class HistoricalReliabilityStore:
                 conn.commit()
         except sqlite3.DatabaseError as e:
             logger.warning(f"Failed to initialize HistoricalReliabilityStore: {e}")
+
+    def check_health(self) -> Tuple[bool, str]:
+        """Verify that the SQLite database is accessible, readable, and schema is intact."""
+        if self.db_path != Path(":memory:") and not self.db_path.exists():
+            self._init_db()
+
+        try:
+            with self._lock, sqlite3.connect(str(self.db_path), timeout=5.0) as conn:
+                cursor = conn.execute("PRAGMA quick_check")
+                row = cursor.fetchone()
+                if not row or row[0] != "ok":
+                    return False, f"Database integrity check failed: {row[0] if row else 'unknown'}"
+                cursor = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='repair_quality_records'"
+                )
+                if not cursor.fetchone():
+                    return False, "Schema error: repair_quality_records table missing"
+                return True, "healthy"
+        except sqlite3.DatabaseError as e:
+            return False, f"Database error: {e}"
+        except Exception as e:
+            return False, f"Unexpected error accessing database: {e}"
 
     def record_quality_result(
         self,
@@ -179,7 +201,30 @@ class HistoricalReliabilityStore:
         strategy_id: str,
         max_age_days: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Aggregate statistical performance metrics for a repair strategy."""
+        """Aggregate statistical performance metrics for a repair strategy.
+
+        Returns explicit status ('available', 'empty', 'corrupted', 'unavailable',
+        or 'schema_error') and never reports database errors as zero failures.
+        """
+        is_healthy, health_msg = self.check_health()
+        if not is_healthy:
+            status = "corrupted" if any(k in health_msg.lower() for k in ("integrity", "database disk image is malformed", "file is not a database")) else "unavailable"
+            if "schema" in health_msg.lower():
+                status = "schema_error"
+            logger.warning(f"Historical store health check failed: {health_msg}")
+            return {
+                "strategy_id": strategy_id,
+                "status": status,
+                "is_available": False,
+                "total_attempts": 0,
+                "passed_count": 0,
+                "failed_count": 0,
+                "regressions_count": 0,
+                "success_rate": 0.0,
+                "avg_score": 0.0,
+                "error_message": health_msg,
+            }
+
         query = """
             SELECT
                 COUNT(*) as total,
@@ -197,7 +242,7 @@ class HistoricalReliabilityStore:
             params.append(cutoff)
 
         try:
-            with self._lock, sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+            with self._lock, sqlite3.connect(str(self.db_path), timeout=5.0) as conn:
                 cursor = conn.execute(query, params)
                 row = cursor.fetchone()
                 total = row[0] or 0
@@ -208,21 +253,29 @@ class HistoricalReliabilityStore:
 
                 return {
                     "strategy_id": strategy_id,
+                    "status": "available" if total > 0 else "empty",
+                    "is_available": True,
                     "total_attempts": total,
                     "passed_count": passed,
                     "failed_count": failed,
                     "regressions_count": regressions,
                     "success_rate": (passed / total) if total > 0 else 0.0,
                     "avg_score": round(avg_score, 4),
+                    "error_message": None,
                 }
         except sqlite3.DatabaseError as e:
             logger.warning(f"Failed to calculate strategy stats: {e}")
+            err_str = str(e).lower()
+            status = "corrupted" if any(k in err_str for k in ("corrupt", "malformed", "file is not a database")) else "unavailable"
             return {
                 "strategy_id": strategy_id,
+                "status": status,
+                "is_available": False,
                 "total_attempts": 0,
                 "passed_count": 0,
                 "failed_count": 0,
                 "regressions_count": 0,
                 "success_rate": 0.0,
                 "avg_score": 0.0,
+                "error_message": str(e),
             }
