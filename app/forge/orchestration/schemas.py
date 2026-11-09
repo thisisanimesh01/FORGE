@@ -324,8 +324,8 @@ class SubmitOrchestrationApprovalInput(BaseModel):
     approver_identity: str
     repair_plan_id: str
     repair_plan_digest: str
-    approved_strategy_id: Optional[str] = None
-    approved_scope_file_paths: Optional[List[str]] = None
+    approved_strategy_id: str
+    approved_scope_file_paths: List[str]
     risk_acknowledgement: bool = False
     comments: Optional[str] = None
 

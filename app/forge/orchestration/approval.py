@@ -5,9 +5,10 @@ Enforces strict human authorization before autonomous repair execution:
 - Verifies strategy ID and permitted file scope allowlists.
 - Interrogates M4 durable ApprovalLedger for revocation and replay protection.
 - Fails closed on plan changes, scope expansion, expiration, or replay.
+- Prevents cross-workflow approval substitution and rejects synthetic/AI identities.
 """
 
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from forge.repair_execution.approval import RepairApprovalValidator, compute_plan_digest
 from forge.repair_execution.ledger import ApprovalLedger
@@ -45,11 +46,13 @@ class OrchestrationApprovalManager:
         self.trusted_approvers = trusted_approvers
         self._m4_validator = RepairApprovalValidator()
         self._approved_plans: Dict[str, RepairApproval] = {}
+        self._approved_workflows: Dict[str, str] = {}
 
     def verify_approval(
         self,
         approval: RepairApproval,
         plan: RepairPlan,
+        workflow_id: Optional[str] = None,
     ) -> ApprovalVerificationOutcome:
         """Validate human approval against the active repair plan.
 
@@ -57,10 +60,11 @@ class OrchestrationApprovalManager:
         1. Plan existence and strategy selection.
         2. Exact SHA-256 canonical plan digest match.
         3. Strategy ID alignment.
-        4. Approved scope coverage (no unapproved file modifications).
+        4. Approved scope coverage (no unapproved file modifications or scope expansion).
         5. Expiration and revocation status.
         6. Replay protection via durable ApprovalLedger.
-        7. Trusted approver identity (if configured).
+        7. Trusted approver identity and rejection of AI/synthetic identities.
+        8. Cross-workflow approval substitution protection.
 
         Returns:
             ApprovalVerificationOutcome with is_valid=True/False and detailed errors.
@@ -128,15 +132,51 @@ class OrchestrationApprovalManager:
                 f"by execution '{consumed_map[approval.approval_id]}'."
             )
 
-        # 7. Trusted approvers check
-        if self.trusted_approvers is not None:
-            if approval.approver_reference not in self.trusted_approvers:
+        # 7. Human approver identity verification & rejection of AI/synthetic identities
+        prohibited_identities = {
+            "unknown",
+            "none",
+            "auto",
+            "llm",
+            "ai",
+            "model",
+            "agent",
+            "forge",
+            "assistant",
+            "subagent",
+            "bot",
+            "synthetic",
+            "system",
+        }
+        approver_raw = approval.approver_reference.strip() if approval.approver_reference else ""
+        approver_lower = approver_raw.lower()
+
+        if (
+            not approver_raw
+            or approver_lower in prohibited_identities
+            or any(term in approver_lower for term in ("llm", "subagent", "synthetic", "auto"))
+        ):
+            errors.append(
+                f"Invalid approver identity '{approval.approver_reference}': Explicit human approver identity "
+                "is required (AI, model, agent, auto, or synthetic identities are strictly forbidden)."
+            )
+        elif self.trusted_approvers is not None:
+            if approver_raw not in self.trusted_approvers:
                 errors.append(
-                    f"Untrusted approver: identity '{approval.approver_reference}' is not in "
-                    f"the configured trusted approvers allowlist."
+                    f"Untrusted approver: identity '{approver_raw}' is not in the configured "
+                    f"trusted human approver registry."
                 )
 
-        # 8. Defense-in-depth with M4 validator
+        # 8. Cross-workflow approval substitution check
+        if workflow_id:
+            bound_wf = self._approved_workflows.get(approval.approval_id)
+            if bound_wf and bound_wf != workflow_id:
+                errors.append(
+                    f"Cross-workflow approval substitution: approval '{approval.approval_id}' was registered "
+                    f"for workflow '{bound_wf}', cannot be reused for workflow '{workflow_id}'."
+                )
+
+        # 9. Defense-in-depth with M4 validator
         m4_check = self._m4_validator.validate_approval(
             approval=approval,
             plan=plan,
@@ -155,12 +195,15 @@ class OrchestrationApprovalManager:
         self,
         approval: RepairApproval,
         plan: RepairPlan,
+        workflow_id: Optional[str] = None,
     ) -> None:
         """Validate human approval and record it, raising ApprovalValidationError on failure."""
-        outcome = self.verify_approval(approval, plan)
+        outcome = self.verify_approval(approval, plan, workflow_id=workflow_id)
         if not outcome.is_valid:
             raise ApprovalValidationError("; ".join(outcome.errors))
         self._approved_plans[plan.plan_id] = approval
+        if workflow_id:
+            self._approved_workflows[approval.approval_id] = workflow_id
 
     def is_approved(self, plan_id: str) -> bool:
         """Check if a plan has an active validated approval."""
@@ -174,4 +217,5 @@ class OrchestrationApprovalManager:
         """Revoke approval for a plan."""
         appr = self._approved_plans.pop(plan_id, None)
         if appr:
+            self._approved_workflows.pop(appr.approval_id, None)
             self.ledger.record_revoked(appr.approval_id, reason)

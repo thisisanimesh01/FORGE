@@ -37,6 +37,7 @@ from forge.orchestration.state import (
     validate_transition,
 )
 from forge.orchestration.events import (
+    AuditTrailTamperedError,
     OrchestrationEvent,
     OrchestrationEventRecorder,
     OrchestrationEventType,

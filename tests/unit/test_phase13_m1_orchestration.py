@@ -47,8 +47,17 @@ from forge.orchestration.adapters import (
     FakeRootCauseAdapter,
     FakeVerificationAdapter,
 )
-from forge.orchestration.approval import ApprovalValidationError, OrchestrationApprovalManager
-from forge.orchestration.events import OrchestrationEvent, OrchestrationEventRecorder, OrchestrationEventType
+from forge.orchestration.approval import (
+    ApprovalValidationError,
+    OrchestrationApprovalError,
+    OrchestrationApprovalManager,
+)
+from forge.orchestration.events import (
+    AuditTrailTamperedError,
+    OrchestrationEvent,
+    OrchestrationEventRecorder,
+    OrchestrationEventType,
+)
 from forge.orchestration.orchestrator import EngineeringOrchestrator
 from forge.orchestration.report import EngineeringReportGenerator
 from forge.orchestration.schemas import (
@@ -64,6 +73,7 @@ from forge.orchestration.state import (
     TERMINAL_STATES,
     IllegalStateTransitionError,
     TerminalStateError,
+    WorkflowStateError,
     is_terminal_state,
     validate_transition,
 )
@@ -763,3 +773,463 @@ def test_cli_orchestrate_run_and_status(tmp_repo: Path):
     assert result.exit_code == 0
     assert "Initialized workflow" in result.output
     assert "Workflow State:" in result.output
+
+
+# ---------------------------------------------------------------------------
+# 7. Comprehensive Approval-Boundary Adversarial Bypass Tests (15 Scenarios)
+# ---------------------------------------------------------------------------
+
+def test_bypass_1_auto_approve_flag_rejected(tmp_repo: Path):
+    """Bypass 1: --auto-approve CLI flag is rejected and unavailable."""
+    result = runner.invoke(
+        app,
+        ["orchestrate", "run", "--repo", str(tmp_repo), "--desc", "test bug", "--auto-approve"],
+    )
+    assert result.exit_code != 0
+    assert "no such option" in result.output.lower() or "error" in result.output.lower()
+
+    # Also verify --help does not advertise --auto-approve
+    help_result = runner.invoke(app, ["orchestrate", "run", "--help"])
+    assert help_result.exit_code == 0
+    assert "--auto-approve" not in help_result.output
+
+
+def test_bypass_2_workflow_creation_cannot_authorize_itself(tmp_repo: Path):
+    """Bypass 2: Newly created workflow cannot execute repair without human approval."""
+    ctx = WorkflowContext(repository_path=str(tmp_repo))
+    orchestrator = EngineeringOrchestrator(context=ctx)
+    assert orchestrator.state == WorkflowState.CREATED
+    assert orchestrator.stage_outputs.approval is None
+
+    with pytest.raises(IllegalStateTransitionError):
+        orchestrator.run_repair()
+
+
+def test_bypass_3_stage_execution_cannot_authorize_itself(tmp_repo: Path):
+    """Bypass 3: Sequential stage execution stops at approval gate without self-authorization."""
+    ctx = WorkflowContext(repository_path=str(tmp_repo))
+    orchestrator = EngineeringOrchestrator(
+        context=ctx,
+        diagnosis_adapter=FakeDiagnosisAdapter(),
+        root_cause_adapter=FakeRootCauseAdapter(),
+        planning_adapter=FakePlanningAdapter(),
+    )
+    orchestrator.run_until_approval_or_completion()
+    assert orchestrator.state == WorkflowState.AWAITING_HUMAN_APPROVAL
+
+    # Advancing stage does NOT self-authorize
+    next_state = orchestrator.execute_next_stage()
+    assert next_state == WorkflowState.AWAITING_HUMAN_APPROVAL
+    assert orchestrator.state == WorkflowState.AWAITING_HUMAN_APPROVAL
+
+    with pytest.raises(IllegalStateTransitionError):
+        orchestrator.run_repair()
+
+
+def test_bypass_4_tool_callers_cannot_fabricate_trusted_approval(tmp_repo: Path):
+    """Bypass 4: Tool callers cannot fabricate approval with AI/synthetic or untrusted identities."""
+    ctx = WorkflowContext(
+        repository_path=str(tmp_repo),
+        trusted_approvers={"senior_staff@example.com"},
+    )
+    def _make_ready_orchestrator():
+        orch = EngineeringOrchestrator(
+            context=ctx,
+            diagnosis_adapter=FakeDiagnosisAdapter(),
+            root_cause_adapter=FakeRootCauseAdapter(),
+            planning_adapter=FakePlanningAdapter(),
+        )
+        orch.run_until_approval_or_completion()
+        p = orch.stage_outputs.repair_plan
+        assert p is not None
+        d = compute_plan_digest(p)
+        t = OrchestrationTools(repository_path=tmp_repo)
+        t.register_orchestrator(orch)
+        return orch, p, d, t
+
+    # 4a: Synthetic AI approver rejected
+    orch_a, plan_a, digest_a, tools_a = _make_ready_orchestrator()
+    res_ai = json.loads(tools_a.submit_orchestration_approval({
+        "workflow_id": orch_a.workflow_id,
+        "approver_identity": "llm",
+        "repair_plan_id": plan_a.plan_id,
+        "repair_plan_digest": digest_a,
+        "approved_strategy_id": plan_a.selected_strategy_id,
+        "approved_scope_file_paths": plan_a.affected_files,
+    }))
+    assert res_ai["is_valid"] is False
+    assert any("forbidden" in e.lower() or "invalid" in e.lower() for e in res_ai["errors"])
+    assert orch_a.state == WorkflowState.BLOCKED
+
+    # 4b: Auto approver rejected
+    orch_b, plan_b, digest_b, tools_b = _make_ready_orchestrator()
+    res_auto = json.loads(tools_b.submit_orchestration_approval({
+        "workflow_id": orch_b.workflow_id,
+        "approver_identity": "auto",
+        "repair_plan_id": plan_b.plan_id,
+        "repair_plan_digest": digest_b,
+        "approved_strategy_id": plan_b.selected_strategy_id,
+        "approved_scope_file_paths": plan_b.affected_files,
+    }))
+    assert res_auto["is_valid"] is False
+    assert orch_b.state == WorkflowState.BLOCKED
+
+    # 4c: Untrusted human approver rejected
+    orch_c, plan_c, digest_c, tools_c = _make_ready_orchestrator()
+    res_untrusted = json.loads(tools_c.submit_orchestration_approval({
+        "workflow_id": orch_c.workflow_id,
+        "approver_identity": "intruder@external.com",
+        "repair_plan_id": plan_c.plan_id,
+        "repair_plan_digest": digest_c,
+        "approved_strategy_id": plan_c.selected_strategy_id,
+        "approved_scope_file_paths": plan_c.affected_files,
+    }))
+    assert res_untrusted["is_valid"] is False
+    assert any("untrusted approver" in e.lower() for e in res_untrusted["errors"])
+    assert orch_c.state == WorkflowState.BLOCKED
+
+    # 4d: Authorized approver accepted
+    orch_d, plan_d, digest_d, tools_d = _make_ready_orchestrator()
+    res_trusted = json.loads(tools_d.submit_orchestration_approval({
+        "workflow_id": orch_d.workflow_id,
+        "approver_identity": "senior_staff@example.com",
+        "repair_plan_id": plan_d.plan_id,
+        "repair_plan_digest": digest_d,
+        "approved_strategy_id": plan_d.selected_strategy_id,
+        "approved_scope_file_paths": plan_d.affected_files,
+    }))
+    assert res_trusted["is_valid"] is True
+    assert orch_d.state == WorkflowState.APPROVED
+
+
+def test_bypass_5_missing_approval_blocks_repair_execution(tmp_repo: Path):
+    """Bypass 5: Calling run_repair with missing approval strictly raises IllegalStateTransitionError."""
+    ctx = WorkflowContext(repository_path=str(tmp_repo))
+    orchestrator = EngineeringOrchestrator(
+        context=ctx,
+        diagnosis_adapter=FakeDiagnosisAdapter(),
+        root_cause_adapter=FakeRootCauseAdapter(),
+        planning_adapter=FakePlanningAdapter(),
+    )
+    orchestrator.run_until_approval_or_completion()
+    assert orchestrator.state == WorkflowState.AWAITING_HUMAN_APPROVAL
+
+    with pytest.raises(IllegalStateTransitionError, match="expected 'APPROVED'"):
+        orchestrator.run_repair()
+
+
+def test_bypass_6_expired_approval_blocks_repair_execution(tmp_repo: Path, tmp_path: Path):
+    """Bypass 6: Expired approvals block repair execution immediately."""
+    ledger = ApprovalLedger(db_path=tmp_path / "ledger.db")
+    ctx = WorkflowContext(repository_path=str(tmp_repo))
+    orchestrator = EngineeringOrchestrator(
+        context=ctx,
+        approval_manager=OrchestrationApprovalManager(ledger=ledger),
+        diagnosis_adapter=FakeDiagnosisAdapter(),
+        root_cause_adapter=FakeRootCauseAdapter(),
+        planning_adapter=FakePlanningAdapter(),
+    )
+    orchestrator.run_until_approval_or_completion()
+    plan = orchestrator.stage_outputs.repair_plan
+    expired_appr = _create_sample_approval(plan, expired=True)
+
+    outcome = orchestrator.submit_approval(expired_appr)
+    assert outcome.is_valid is False
+    assert orchestrator.state == WorkflowState.BLOCKED
+
+    with pytest.raises(IllegalStateTransitionError):
+        orchestrator.run_repair()
+
+
+def test_bypass_7_revoked_approval_blocks_repair_execution(tmp_repo: Path, tmp_path: Path):
+    """Bypass 7: Revoked approvals are detected before workspace mutation and block execution."""
+    ledger = ApprovalLedger(db_path=tmp_path / "ledger.db")
+    mgr = OrchestrationApprovalManager(ledger=ledger)
+    ctx = WorkflowContext(repository_path=str(tmp_repo))
+    orchestrator = EngineeringOrchestrator(
+        context=ctx,
+        approval_manager=mgr,
+        diagnosis_adapter=FakeDiagnosisAdapter(),
+        root_cause_adapter=FakeRootCauseAdapter(),
+        planning_adapter=FakePlanningAdapter(),
+        execution_adapter=FakeExecutionAdapter(),
+    )
+    orchestrator.run_until_approval_or_completion()
+    plan = orchestrator.stage_outputs.repair_plan
+    valid_appr = _create_sample_approval(plan)
+
+    # First accept approval
+    outcome = orchestrator.submit_approval(valid_appr)
+    assert outcome.is_valid is True
+    assert orchestrator.state == WorkflowState.APPROVED
+
+    # Now operator revokes approval before execution
+    mgr.revoke_approval(plan.plan_id, "Revoked due to detected vulnerability")
+
+    # Attempting to execute repair must detect revocation and fail closed
+    with pytest.raises(OrchestrationApprovalError, match="revoked"):
+        orchestrator.run_repair()
+
+    assert orchestrator.state == WorkflowState.BLOCKED
+
+
+def test_bypass_8_replayed_approval_blocks_subsequent_execution(tmp_repo: Path, tmp_path: Path):
+    """Bypass 8: Replaying a consumed approval across workflows is blocked."""
+    shared_ledger = ApprovalLedger(db_path=tmp_path / "shared.db")
+
+    # Workflow 1 consumes the approval
+    ctx1 = WorkflowContext(repository_path=str(tmp_repo))
+    orch1 = EngineeringOrchestrator(
+        context=ctx1,
+        approval_manager=OrchestrationApprovalManager(ledger=shared_ledger),
+        diagnosis_adapter=FakeDiagnosisAdapter(),
+        root_cause_adapter=FakeRootCauseAdapter(),
+        planning_adapter=FakePlanningAdapter(),
+        execution_adapter=FakeExecutionAdapter(),
+        verification_adapter=FakeVerificationAdapter(),
+        quality_adapter=FakeQualityAdapter(),
+    )
+    orch1.run_until_approval_or_completion()
+    plan1 = orch1.stage_outputs.repair_plan
+    appr1 = _create_sample_approval(plan1)
+    orch1.submit_approval(appr1)
+    orch1.run_until_approval_or_completion()
+    assert orch1.state == WorkflowState.COMPLETED
+
+    # Workflow 2 tries to reuse the exact same approval
+    ctx2 = WorkflowContext(repository_path=str(tmp_repo))
+    orch2 = EngineeringOrchestrator(
+        context=ctx2,
+        approval_manager=OrchestrationApprovalManager(ledger=shared_ledger),
+        diagnosis_adapter=FakeDiagnosisAdapter(),
+        root_cause_adapter=FakeRootCauseAdapter(),
+        planning_adapter=FakePlanningAdapter(),
+    )
+    orch2.run_until_approval_or_completion()
+    outcome2 = orch2.submit_approval(appr1)
+    assert outcome2.is_valid is False
+    assert any("already been consumed" in e.lower() or "replay" in e.lower() for e in outcome2.errors)
+    assert orch2.state == WorkflowState.BLOCKED
+
+
+def test_bypass_9_changed_plan_digest_blocks_approval(tmp_repo: Path):
+    """Bypass 9: Changed or mismatched plan digest is strictly rejected."""
+    ctx = WorkflowContext(repository_path=str(tmp_repo))
+    orchestrator = EngineeringOrchestrator(
+        context=ctx,
+        diagnosis_adapter=FakeDiagnosisAdapter(),
+        root_cause_adapter=FakeRootCauseAdapter(),
+        planning_adapter=FakePlanningAdapter(),
+    )
+    orchestrator.run_until_approval_or_completion()
+    plan = orchestrator.stage_outputs.repair_plan
+
+    bad_digest_appr = RepairApproval(
+        approval_id="appr_fake_digest",
+        repair_plan_id=plan.plan_id,
+        plan_digest="0" * 64,
+        approved_strategy_id=plan.selected_strategy_id,
+        approved_file_paths=plan.affected_files,
+        approval_timestamp=datetime.now(timezone.utc).isoformat(),
+        approval_expiry=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        approver_reference="auditor@corp.com",
+    )
+    outcome = orchestrator.submit_approval(bad_digest_appr)
+    assert outcome.is_valid is False
+    assert any("plan digest mismatch" in e.lower() for e in outcome.errors)
+    assert orchestrator.state == WorkflowState.BLOCKED
+
+
+def test_bypass_10_changed_strategy_blocks_approval(tmp_repo: Path):
+    """Bypass 10: Approving a strategy different from the selected strategy is rejected."""
+    ctx = WorkflowContext(repository_path=str(tmp_repo))
+    orchestrator = EngineeringOrchestrator(
+        context=ctx,
+        diagnosis_adapter=FakeDiagnosisAdapter(),
+        root_cause_adapter=FakeRootCauseAdapter(),
+        planning_adapter=FakePlanningAdapter(),
+    )
+    orchestrator.run_until_approval_or_completion()
+    plan = orchestrator.stage_outputs.repair_plan
+
+    bad_strat_appr = _create_sample_approval(plan, strategy_id="strat_unselected_002")
+    outcome = orchestrator.submit_approval(bad_strat_appr)
+    assert outcome.is_valid is False
+    assert any("strategy mismatch" in e.lower() for e in outcome.errors)
+    assert orchestrator.state == WorkflowState.BLOCKED
+
+
+def test_bypass_11_expanded_file_scope_blocks_approval(tmp_repo: Path):
+    """Bypass 11: Scope expansion and scope breach are strictly rejected."""
+    ctx = WorkflowContext(repository_path=str(tmp_repo))
+    orchestrator = EngineeringOrchestrator(
+        context=ctx,
+        diagnosis_adapter=FakeDiagnosisAdapter(),
+        root_cause_adapter=FakeRootCauseAdapter(),
+        planning_adapter=FakePlanningAdapter(affected_files=["src/logic.py"]),
+    )
+    orchestrator.run_until_approval_or_completion()
+    plan = orchestrator.stage_outputs.repair_plan
+
+    # Scope expansion
+    bad_scope_appr = _create_sample_approval(plan, scope=["src/logic.py", "unauthorized/file.py"])
+    outcome = orchestrator.submit_approval(bad_scope_appr)
+    assert outcome.is_valid is False
+    assert any("scope expansion" in e.lower() for e in outcome.errors)
+    assert orchestrator.state == WorkflowState.BLOCKED
+
+
+def test_bypass_12_cross_workflow_approval_substitution_fails(tmp_repo: Path):
+    """Bypass 12: An approval bound to one workflow cannot be submitted to another."""
+    shared_mgr = OrchestrationApprovalManager()
+    plan = _create_sample_plan()
+    appr = _create_sample_approval(plan)
+
+    # Validate and record for workflow A
+    shared_mgr.validate_and_record_approval(appr, plan, workflow_id="wf_alpha")
+    assert shared_mgr.is_approved(plan.plan_id)
+
+    # Attempt to submit same approval for workflow B
+    outcome = shared_mgr.verify_approval(appr, plan, workflow_id="wf_beta")
+    assert outcome.is_valid is False
+    assert any("cross-workflow approval substitution" in e.lower() for e in outcome.errors)
+
+
+def test_bypass_13_concurrent_approval_consumption_allows_at_most_one(tmp_path: Path):
+    """Bypass 13: Concurrent approval consumption allows at most one execution."""
+    import concurrent.futures
+    db_file = tmp_path / "concurrent_ledger.db"
+    ledger = ApprovalLedger(db_path=db_file)
+    appr_id = "appr_concurrent_test"
+
+    results = []
+    def try_consume(exec_id: str) -> bool:
+        return ledger.record_consumed(appr_id, exec_id)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+        futures = [pool.submit(try_consume, f"exec_{i}") for i in range(5)]
+        for f in concurrent.futures.as_completed(futures):
+            results.append(f.result())
+
+    # Exactly one consumption succeeded; all other 4 attempts failed
+    assert results.count(True) == 1
+    assert results.count(False) == 4
+
+
+def test_bypass_14_direct_state_mutation_cannot_transition_into_repair_executing(tmp_repo: Path):
+    """Bypass 14: Direct state mutation cannot bypass authorization checks."""
+    ctx = WorkflowContext(repository_path=str(tmp_repo))
+    orchestrator = EngineeringOrchestrator(context=ctx)
+
+    # Direct illegal transition
+    with pytest.raises(IllegalStateTransitionError):
+        orchestrator._transition(WorkflowState.REPAIR_EXECUTING, "Direct jump")
+
+    # Manual state property override without plan or approval
+    orchestrator.state = WorkflowState.APPROVED
+    with pytest.raises(WorkflowStateError, match="valid plan and approval"):
+        orchestrator.run_repair()
+
+
+def test_bypass_15_serialized_or_copied_workflow_state_cannot_bypass_approval(tmp_repo: Path):
+    """Bypass 15: Serialized or forged workflow result cannot claim COMPLETED without human review."""
+    now = datetime.now(timezone.utc)
+    # Attempting to forge a COMPLETED result without human review
+    with pytest.raises(ValueError, match="Safety invariant violated"):
+        EngineeringWorkflowResult(
+            workflow_id="wf_forged",
+            state=WorkflowState.COMPLETED,
+            repository_path=str(tmp_repo),
+            created_at=now,
+            verification_status="passed",
+            regression_classification="no_regression_observed",
+            requires_human_review=False,  # Forbidden
+        )
+
+    # Attempting to claim COMPLETED with failed verification
+    with pytest.raises(ValueError, match="cannot be COMPLETED with verification status"):
+        EngineeringWorkflowResult(
+            workflow_id="wf_forged",
+            state=WorkflowState.COMPLETED,
+            repository_path=str(tmp_repo),
+            created_at=now,
+            repair_plan_id="plan_001",
+            approval_id="appr_001",
+            execution_id="exec_001",
+            verification_status="failed",
+            regression_classification="no_regression_observed",
+            requires_human_review=True,
+        )
+
+
+def test_tampered_audit_trail_prevents_get_result(tmp_repo: Path, tmp_path: Path):
+    """Event chain tampering prevents report generation with AuditTrailTamperedError."""
+    ctx = WorkflowContext(repository_path=str(tmp_repo))
+    orchestrator = EngineeringOrchestrator(
+        context=ctx,
+        approval_manager=OrchestrationApprovalManager(ledger=ApprovalLedger(db_path=tmp_path / "ledger.db")),
+        diagnosis_adapter=FakeDiagnosisAdapter(),
+        root_cause_adapter=FakeRootCauseAdapter(),
+        planning_adapter=FakePlanningAdapter(),
+        execution_adapter=FakeExecutionAdapter(),
+        verification_adapter=FakeVerificationAdapter(),
+        quality_adapter=FakeQualityAdapter(),
+    )
+    orchestrator.run_until_approval_or_completion()
+    plan = orchestrator.stage_outputs.repair_plan
+    orchestrator.submit_approval(_create_sample_approval(plan))
+    orchestrator.run_until_approval_or_completion()
+
+    # Tamper with an event in the chain
+    events = orchestrator.event_recorder.get_events(orchestrator.workflow_id)
+    tampered = OrchestrationEvent(
+        event_id=events[2].event_id,
+        workflow_id=events[2].workflow_id,
+        sequence=events[2].sequence,
+        timestamp=events[2].timestamp,
+        event_type=events[2].event_type,
+        stage=events[2].stage,
+        state=events[2].state,
+        action_description="TAMPERED ACTION",
+        details=events[2].details,
+        prev_event_hash=events[2].prev_event_hash,
+        event_hash=events[2].event_hash,
+    )
+    orchestrator.event_recorder._events[orchestrator.workflow_id][2] = tampered
+
+    with pytest.raises(AuditTrailTamperedError, match="integrity verification failed"):
+        orchestrator.get_result()
+
+
+def test_cli_orchestrate_approve_command():
+    """Test forge orchestrate approve command via CLI runner."""
+    # Test rejection of AI approver
+    res_bad = runner.invoke(
+        app,
+        [
+            "orchestrate", "approve", "wf_123",
+            "--approver", "llm",
+            "--plan-id", "plan_001",
+            "--plan-digest", "a" * 64,
+            "--strategy", "strat_001",
+            "--file", "src/logic.py",
+        ],
+    )
+    assert res_bad.exit_code == 1
+    assert "Authorization error" in res_bad.output or "strictly forbidden" in res_bad.output
+
+    # Test valid human approver
+    res_good = runner.invoke(
+        app,
+        [
+            "orchestrate", "approve", "wf_123",
+            "--approver", "lead_engineer@example.com",
+            "--plan-id", "plan_001",
+            "--plan-digest", "a" * 64,
+            "--strategy", "strat_001",
+            "--file", "src/logic.py",
+        ],
+    )
+    assert res_good.exit_code == 0
+    assert "Generated human approval contract" in res_good.output
+    assert "lead_engineer@example.com" in res_good.output

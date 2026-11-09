@@ -162,15 +162,20 @@ Exposes 6 typed tools to `ToolRegistry` (total tool count: 65):
 
 ### CLI Commands
 Integrated under `forge orchestrate`:
-- `forge orchestrate run --repo <path> [--desc <text>] [--error <msg>] [--trace <stack>]`: Run workflow until approval or completion.
+- `forge orchestrate run --repo <path> [--desc <text>] [--error <msg>] [--trace <stack>]`: Run workflow until approval gate (`AWAITING_HUMAN_APPROVAL`) or terminal completion. Automatic approval is strictly forbidden.
+- `forge orchestrate approve <workflow_id> --approver <name> --plan-id <id> --plan-digest <digest> --strategy <id> --file <path>`: Explicitly authorize repair execution.
 - `forge orchestrate status <workflow_id>`: Inspect state, active stage, and execution timestamps.
 - `forge orchestrate report <workflow_id>`: Display generated Markdown engineering dossier.
 
 ---
 
-## 8. Empirical Microbenchmark Results
+## 8. Empirical Microbenchmark Results & Architectural Distinction
 
 Executed via `app/forge/benchmarks/benchmark_phase13_m1_orchestration.py`:
+
+> [!NOTE]
+> **Benchmark Measurement Scope**:
+> The 1.96 ms/workflow benchmark measures the **orchestration coordination pipeline** using in-memory deterministic fake adapters (state validation, context handoffs, cryptographic event chaining, and report rendering). It does **NOT** measure real-world Phase 12 execution involving disk git clones, LLM inference, or Docker container sandbox test runs (which take several seconds per check vector).
 
 | Benchmark Metric | Measured Performance | Assessment |
 |---|---|---|
@@ -178,7 +183,7 @@ Executed via `app/forge/benchmarks/benchmark_phase13_m1_orchestration.py`:
 | **Event Recording (200 events)** | **13.56 ms** (0.068 ms/event) | High-throughput cryptographic audit logging |
 | **Event Chain Verification (200 events)** | **6.92 ms** | Instantaneous cryptographic audit verification |
 | **Approval Verification (500 ops)** | **62.66 ms** (0.125 ms/op) | Fast canonical digest and scope validation |
-| **End-to-End Orchestration (50 workflows)** | **97.98 ms** (**1.96 ms/workflow**) | Deterministic multi-stage lifecycle |
+| **Simulated Pipeline Execution (50 workflows)** | **97.98 ms** (**1.96 ms/workflow**) | Pure coordination overhead using fake adapters |
 | **Report Generation (200 ops)** | **36.07 ms** (0.180 ms/report) | Rapid provenance report rendering |
 | **Peak Memory Footprint** | **478.89 KB** | Extremely low memory overhead |
 

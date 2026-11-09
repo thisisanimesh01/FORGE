@@ -205,8 +205,11 @@ The orchestration engine exposes 6 typed, read-only tools to FORGE's `ToolRegist
 Integrated into `forge cli` under the `orchestrate` subcommand group:
 
 ```bash
-# Run end-to-end workflow
-forge orchestrate run --repo /path/to/repo --desc "Fix KeyError in config parser" --auto-approve
+# Run workflow until human approval gate (stops at AWAITING_HUMAN_APPROVAL)
+forge orchestrate run --repo /path/to/repo --desc "Fix KeyError in config parser"
+
+# Authorize repair execution via explicit human approval (automatic approval is strictly prohibited)
+forge orchestrate approve <workflow_id> --approver "lead_engineer@example.com" --plan-id <plan_id> --plan-digest <digest> --strategy <strategy_id> --file src/config.py
 
 # Inspect workflow status
 forge orchestrate status <workflow_id>
@@ -217,15 +220,21 @@ forge orchestrate report <workflow_id> --format markdown
 
 ---
 
-## 8. Empirical Performance Benchmarks
+## 8. Empirical Performance Benchmarks & Measurement Scope
 
-Microbenchmarking conducted across 1,000+ iterations:
+The Phase 13 M1 microbenchmark suite (`app/forge/benchmarks/benchmark_phase13_m1_orchestration.py`) evaluates the latency and memory overhead of the orchestration coordination machinery itself.
 
-| Operation | Scale / Iterations | Total / Mean Latency | Throughput |
+### Important Architectural Distinction
+- **State-Machine & Coordination Microbenchmarks**: Measures in-memory state transition validation, cryptographic event hashing, and approval contract validation.
+- **Fake-Adapter Orchestration**: Measures orchestrator pipeline transitions, context passing, stage record generation, and event logging using in-memory mock adapters.
+- **Phase 12 Engine Integration**: Real-world integration with Phase 12 M1–M6 production engines invokes AST visitors, dependency graph analyzers, and SQLite persistence.
+- **Sandbox Execution**: Full runtime defect reproduction, patch application, and regression test suites inside isolated Docker containers involve container initialization, filesystem copying, and pytest execution (typically taking several seconds per check vector). The simulated ~1.96 ms latency reflects pure coordination overhead, not containerized test execution.
+
+| Operation | Benchmark Scope | Measured Performance | Throughput |
 |:---|:---|:---|:---|
-| State Transition Validation | 7,000 transitions | 3.70 ms | ~1,891,891 ops/sec |
-| Event Recording & Hashing | 200 events | 13.56 ms | ~14,749 ops/sec |
-| Event Chain Verification | 200 events | 6.92 ms | ~28,901 ops/sec |
-| Human Approval Validation | 500 validations | 62.66 ms | ~7,979 ops/sec |
-| End-to-End Workflow Execution | 50 workflows | 97.98 ms | ~1.96 ms / workflow |
-| Peak Memory Overhead | 50 workflows | 478.89 KB | Negligible footprint |
+| State Transition Validation | 7,000 in-memory state validations | 3.70 ms | ~1,891,891 ops/sec |
+| Event Recording & Hashing | 200 append-only SHA-256 events | 13.56 ms | ~14,749 ops/sec |
+| Event Chain Verification | 200 events verified from genesis | 6.92 ms | ~28,901 ops/sec |
+| Human Approval Validation | 500 digest & scope validations | 62.66 ms | ~7,979 ops/sec |
+| Simulated Pipeline Execution | 50 fake-adapter e2e workflows | 97.98 ms | ~1.96 ms / workflow |
+| Peak Memory Overhead | 50 fake-adapter e2e workflows | 478.89 KB | Negligible footprint |

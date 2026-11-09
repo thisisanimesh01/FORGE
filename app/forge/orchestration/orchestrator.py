@@ -44,6 +44,7 @@ from forge.orchestration.adapters import (
     DefaultVerificationAdapter,
     DiagnosisAdapter,
     ExecutionAdapter,
+    FakeExecutionAdapter,
     PlanningAdapter,
     QualityAdapter,
     RootCauseAdapter,
@@ -51,9 +52,11 @@ from forge.orchestration.adapters import (
 )
 from forge.orchestration.approval import (
     ApprovalVerificationOutcome,
+    OrchestrationApprovalError,
     OrchestrationApprovalManager,
 )
 from forge.orchestration.events import (
+    AuditTrailTamperedError,
     OrchestrationEvent,
     OrchestrationEventRecorder,
     OrchestrationEventType,
@@ -412,10 +415,12 @@ class EngineeringOrchestrator:
             if not plan:
                 raise WorkflowStateError("No active repair plan found to evaluate approval against.")
 
-            outcome = self.approval_manager.verify_approval(approval, plan)
+            outcome = self.approval_manager.verify_approval(approval, plan, workflow_id=self.workflow_id)
             started_at = datetime.now(timezone.utc)
 
             if outcome.is_valid:
+                self.approval_manager._approved_plans[plan.plan_id] = approval
+                self.approval_manager._approved_workflows[approval.approval_id] = self.workflow_id
                 self.stage_outputs.approval = approval
                 self.stage_records[WorkflowStage.APPROVAL.value] = StageExecutionRecord(
                     stage=WorkflowStage.APPROVAL,
@@ -469,6 +474,29 @@ class EngineeringOrchestrator:
             approval = self.stage_outputs.approval
             if not plan or not approval:
                 raise WorkflowStateError("Cannot execute repair without valid plan and approval.")
+
+            # Immediate pre-execution authorization check (immediately before any workspace mutation)
+            pre_check = self.approval_manager.verify_approval(
+                approval=approval,
+                plan=plan,
+                workflow_id=self.workflow_id,
+            )
+            if not pre_check.is_valid:
+                err_msg = f"Pre-execution approval verification failed: {'; '.join(pre_check.errors)}"
+                self.stage_records[WorkflowStage.EXECUTION.value] = StageExecutionRecord(
+                    stage=WorkflowStage.EXECUTION,
+                    status=StageStatus.BLOCKED,
+                    started_at=datetime.now(timezone.utc),
+                    completed_at=datetime.now(timezone.utc),
+                    error_message=err_msg,
+                    metadata={"approval_id": approval.approval_id, "errors": pre_check.errors},
+                )
+                self._transition(WorkflowState.BLOCKED, err_msg, stage=WorkflowStage.EXECUTION)
+                raise OrchestrationApprovalError(err_msg)
+
+            # Ensure fake execution adapters share the approval manager ledger for durable replay protection
+            if isinstance(self.execution_adapter, FakeExecutionAdapter) and self.execution_adapter.ledger is None:
+                self.execution_adapter.ledger = self.approval_manager.ledger
 
             self._transition(
                 WorkflowState.REPAIR_EXECUTING,
@@ -824,6 +852,11 @@ class EngineeringOrchestrator:
                 limitations.extend(verif.limitations)
 
             events = self.event_recorder.get_events(self.workflow_id)
+            is_valid, err = OrchestrationEventRecorder.verify_event_chain(events)
+            if not is_valid:
+                raise AuditTrailTamperedError(
+                    f"Audit event chain integrity verification failed for workflow '{self.workflow_id}': {err}"
+                )
 
             res = EngineeringWorkflowResult(
                 workflow_id=self.workflow_id,

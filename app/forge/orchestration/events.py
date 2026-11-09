@@ -20,6 +20,10 @@ GENESIS_HASH = "0" * 64
 MAX_EVENTS_PER_WORKFLOW = 250
 
 
+class AuditTrailTamperedError(Exception):
+    """Exception raised when cryptographic event chain integrity verification fails."""
+
+
 class OrchestrationEventType(str, Enum):
     """Types of audit events emitted during workflow orchestration."""
 

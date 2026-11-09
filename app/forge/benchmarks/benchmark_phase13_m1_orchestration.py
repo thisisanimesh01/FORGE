@@ -1,11 +1,16 @@
 """Phase 13 M1: Engineering Orchestration Microbenchmark Suite.
 
 Measures latency and memory footprint across the core orchestration components:
-- Workflow initialization and state transitions.
+- Workflow initialization and in-memory state transitions.
 - Append-only SHA-256 cryptographic event chaining and verification.
 - Human approval boundary validation against canonical plan digests.
-- End-to-end simulated workflow execution through all 7 stages.
+- In-memory simulated workflow execution through all 7 stages using Fake Adapters.
 - Final engineering report generation.
+
+Architectural Distinction:
+- This microbenchmark evaluates the coordination machinery and in-memory lifecycle engine.
+- It does NOT measure real Docker container sandbox execution, live git repository clones,
+  or local Ollama LLM inference (which take several seconds per check vector).
 """
 
 from datetime import datetime, timezone, timedelta

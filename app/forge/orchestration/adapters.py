@@ -46,9 +46,11 @@ from forge.repair_planning.schemas import (
 )
 from forge.repair_execution.approval import compute_plan_digest
 from forge.repair_execution.executor import ControlledRepairExecutor
+from forge.repair_execution.ledger import ApprovalLedger
 from forge.repair_execution.schemas import (
     ExecutionLimits,
     ExecutionStatus,
+    FailureClassification,
     RepairApproval,
     RepairExecutionResult,
     RepairWorkspace,
@@ -544,10 +546,12 @@ class FakeExecutionAdapter(ExecutionAdapter):
         status: ExecutionStatus = ExecutionStatus.APPLIED,
         diff_summary: str = "Applied patch to src/logic.py",
         should_raise: Optional[Exception] = None,
+        ledger: Optional[ApprovalLedger] = None,
     ) -> None:
         self.status = status
         self.diff_summary = diff_summary
         self.should_raise = should_raise
+        self.ledger = ledger
 
     def run_execution(
         self,
@@ -571,8 +575,28 @@ class FakeExecutionAdapter(ExecutionAdapter):
             workspace_status=WorkspaceStatus.READY,
         )
 
+        exec_id = f"exec_{uuid.uuid4().hex[:8]}"
+
+        # Atomically record consumption in ledger if present
+        if self.ledger:
+            recorded = self.ledger.record_consumed(approval.approval_id, exec_id)
+            if not recorded:
+                res = RepairExecutionResult(
+                    execution_id=exec_id,
+                    repair_plan_id=plan.plan_id,
+                    execution_status=ExecutionStatus.BLOCKED,
+                    workspace_id=ws.workspace_id,
+                    diff_summary=f"Execution blocked: Approval '{approval.approval_id}' was already consumed concurrently or revoked.",
+                    applied_patch_digest="0" * 64,
+                    verification_pending=True,
+                    rollback_status=RollbackStatus.NOT_TRIGGERED,
+                    failure_classification=FailureClassification.UNAUTHORIZED_EXECUTION,
+                    approval_reference=approval.approval_id,
+                )
+                return res, ws
+
         res = RepairExecutionResult(
-            execution_id=f"exec_{uuid.uuid4().hex[:8]}",
+            execution_id=exec_id,
             repair_plan_id=plan.plan_id,
             execution_status=self.status,
             workspace_id=ws.workspace_id,
@@ -580,6 +604,7 @@ class FakeExecutionAdapter(ExecutionAdapter):
             applied_patch_digest=plan_digest,
             verification_pending=True if self.status == ExecutionStatus.APPLIED else False,
             rollback_status=RollbackStatus.NOT_TRIGGERED,
+            failure_classification=FailureClassification.NONE if self.status == ExecutionStatus.APPLIED else FailureClassification.UNAUTHORIZED_EXECUTION,
             approval_reference=approval.approval_id,
         )
         return res, ws

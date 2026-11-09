@@ -4501,7 +4501,7 @@ def orchestrate_run(
         typer.secho(
             f"\n[APPROVAL REQUIRED] Repair plan '{plan.plan_id if plan else 'none'}' generated.\n"
             f"Plan Digest: {digest}\n"
-            f"Run 'forge orchestrate approve {orchestrator.workflow_id} --approver <name> --plan-id {plan.plan_id if plan else 'none'} --plan-digest {digest}' to authorize repair.",
+            f"Run 'forge orchestrate approve {orchestrator.workflow_id} --approver <name> --plan-id {plan.plan_id if plan else 'none'} --plan-digest {digest} --strategy {plan.selected_strategy_id if plan else 'none'} --file <path>' to authorize repair.",
             fg=typer.colors.YELLOW,
         )
     elif orchestrator.state == WorkflowState.COMPLETED:
@@ -4510,6 +4510,46 @@ def orchestrate_run(
         typer.secho("\n[BLOCKED] Workflow blocked by safety gate.", fg=typer.colors.RED)
     elif orchestrator.state == WorkflowState.FAILED:
         typer.secho("\n[FAILED] Workflow execution failed.", fg=typer.colors.RED)
+
+
+@orchestrate_app.command(name="approve")
+def orchestrate_approve(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to authorize"),
+    approver: str = typer.Option(..., "--approver", "-a", help="Human approver reference/identity"),
+    plan_id: str = typer.Option(..., "--plan-id", "-p", help="Repair plan ID to authorize"),
+    plan_digest: str = typer.Option(..., "--plan-digest", "-d", help="Canonical 64-char SHA-256 plan digest"),
+    strategy_id: str = typer.Option(..., "--strategy", "-s", help="Approved strategy ID"),
+    file_paths: List[str] = typer.Option(..., "--file", "-f", help="Approved file paths authorized for modification"),
+) -> None:
+    """Explicitly authorize an awaiting repair plan for execution."""
+    from datetime import datetime, timezone, timedelta
+    import uuid
+    from forge.repair_execution.schemas import ApprovalStatus, RepairApproval
+
+    prohibited = {"unknown", "none", "auto", "llm", "ai", "model", "agent", "forge", "assistant", "subagent", "bot", "synthetic", "system"}
+    approver_clean = approver.strip()
+    if not approver_clean or approver_clean.lower() in prohibited or any(term in approver_clean.lower() for term in ("llm", "subagent", "synthetic", "auto")):
+        typer.secho("Authorization error: Invalid human approver identity. AI/model/agent/auto identities are strictly forbidden.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    now = datetime.now(timezone.utc)
+    approval = RepairApproval(
+        approval_id=f"appr_{uuid.uuid4().hex[:12]}",
+        repair_plan_id=plan_id,
+        plan_digest=plan_digest,
+        approved_strategy_id=strategy_id,
+        approved_file_paths=file_paths,
+        approval_timestamp=now.isoformat(),
+        approval_expiry=(now + timedelta(days=1)).isoformat(),
+        approver_reference=approver_clean,
+        approval_status=ApprovalStatus.APPROVED,
+    )
+    typer.secho(f"Generated human approval contract '{approval.approval_id}' for workflow '{workflow_id}'.", fg=typer.colors.GREEN)
+    typer.echo(f"  Approver:    {approval.approver_reference}")
+    typer.echo(f"  Plan ID:     {approval.repair_plan_id}")
+    typer.echo(f"  Plan Digest: {approval.plan_digest}")
+    typer.echo(f"  Strategy:    {approval.approved_strategy_id}")
+    typer.echo(f"  Files:       {', '.join(approval.approved_file_paths)}")
 
 
 @orchestrate_app.command(name="status")
