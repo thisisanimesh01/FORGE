@@ -31,6 +31,7 @@ from forge.storage.store import ForgeStore
 from forge.causality.tools import CausalityTools
 from forge.repair_planning.tools import RepairPlanningTools
 from forge.repair_execution.tools import RepairExecutionTools
+from forge.repair_verification.tools import RepairVerificationTools
 from forge.llm.repo_tools import RepositoryIntelligenceTools
 from forge.repository.incremental import IncrementalRepositoryIndex
 from forge.llm.repo_tool_schemas import (
@@ -126,6 +127,10 @@ class ToolRegistry:
             max_output_chars=self.max_output_chars,
         )
         self._repair_execution_tools = RepairExecutionTools(
+            repository_path=self.workspace_path,
+            max_output_chars=self.max_output_chars,
+        )
+        self._repair_verification_tools = RepairVerificationTools(
             repository_path=self.workspace_path,
             max_output_chars=self.max_output_chars,
         )
@@ -486,6 +491,13 @@ class ToolRegistry:
             if hasattr(self, handler_name):
                 self._handlers[tool_def.name] = getattr(self, handler_name)
 
+        # Phase 12 M5: Repair Verification Tools
+        for tool_def in self._repair_verification_tools.get_tool_definitions():
+            self._definitions.append(tool_def)
+            handler_name = f"_handle_{tool_def.name}"
+            if hasattr(self, handler_name):
+                self._handlers[tool_def.name] = getattr(self, handler_name)
+
     # -------------------------------------------------------------
     # Tool Handlers
     # -------------------------------------------------------------
@@ -513,6 +525,33 @@ class ToolRegistry:
 
     def _handle_get_repair_execution_history(self, args: Dict[str, Any]) -> str:
         return self._repair_execution_tools.get_repair_execution_history(args)
+
+    def _handle_create_repair_verification_plan(self, args: Dict[str, Any]) -> str:
+        return self._repair_verification_tools.create_repair_verification_plan(args)
+
+    def _handle_discover_repair_tests(self, args: Dict[str, Any]) -> str:
+        return self._repair_verification_tools.discover_repair_tests(args)
+
+    def _handle_inspect_verification_environment(self, args: Dict[str, Any]) -> str:
+        return self._repair_verification_tools.inspect_verification_environment(args)
+
+    def _handle_run_repair_verification(self, args: Dict[str, Any]) -> str:
+        return self._repair_verification_tools.run_repair_verification(args)
+
+    def _handle_run_baseline_verification(self, args: Dict[str, Any]) -> str:
+        return self._repair_verification_tools.run_baseline_verification(args)
+
+    def _handle_compare_repair_verification(self, args: Dict[str, Any]) -> str:
+        return self._repair_verification_tools.compare_repair_verification(args)
+
+    def _handle_inspect_verification_evidence(self, args: Dict[str, Any]) -> str:
+        return self._repair_verification_tools.inspect_verification_evidence(args)
+
+    def _handle_validate_verification_integrity(self, args: Dict[str, Any]) -> str:
+        return self._repair_verification_tools.validate_verification_integrity(args)
+
+    def _handle_get_repair_verification_summary(self, args: Dict[str, Any]) -> str:
+        return self._repair_verification_tools.get_repair_verification_summary(args)
 
     def _handle_create_repair_plan(self, args: Dict[str, Any]) -> str:
         return self._repair_planning_tools.create_repair_plan(args)
