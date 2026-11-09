@@ -51,8 +51,15 @@ Phase 12 builds upon FORGE's foundational repository understanding (Phase 11) to
   - Deterministic regression engine categorizing outcomes into NO_REGRESSION_OBSERVED, REGRESSION_DETECTED, PRE_EXISTING_FAILURE, and IMPROVED.
   - Immutable VerificationResult contract enforcing permanent `requires_human_review = True`.
   - ToolRegistry integration exposing 9 structured, typed repair verification tools.
-  - Dedicated milestone documentation in [`docs/milestones/phase-12-m5-repair-verification.md`](../milestones/phase-12-m5-repair-verification.md).
-- **Milestone 6**: Repair Quality & Reliability `[PENDING]`
+- **Milestone 6**: Repair Quality & Reliability `[COMPLETED]`
+  - Multi-dimensional quality evaluation spanning correctness, completeness, maintainability, patch quality, reliability, and security risk.
+  - Strict Pydantic contracts with immutable invariants (`requires_human_review = True`), bounded metrics, and digest bindings.
+  - AST-based cyclomatic complexity delta, function length changes, code duplication, dead code markers, and public API change detection.
+  - Transparent deterministic scoring model with non-overridable score clamping on regressions and critical risks.
+  - Bounded SQLite persistence for historical reliability tracking and strategy stability analysis.
+  - Fail-closed quality gatekeeper state machine enforcing 10 non-negotiable authorization criteria.
+  - ToolRegistry integration exposing 12 structured, typed repair quality tools.
+  - Dedicated milestone documentation in [`docs/milestones/phase-12-m6-repair-quality-reliability.md`](../milestones/phase-12-m6-repair-quality-reliability.md).
 
 ---
 
@@ -284,3 +291,33 @@ Coordinates the entire pipeline:
 
 ### 6. Verification Tools (`forge.repair_verification.tools`)
 - Exposes 9 structured, typed tools to `ToolRegistry`: `create_repair_verification_plan`, `discover_repair_tests`, `inspect_verification_environment`, `run_repair_verification`, `run_baseline_verification`, `compare_repair_verification`, `inspect_verification_evidence`, `validate_verification_integrity`, `get_repair_verification_summary`.
+
+---
+
+## Milestone 6 Architecture: Repair Quality & Reliability Engine
+
+### 1. Data Contracts & Invariants (`forge.repair_quality.schemas`)
+- **Strict Pydantic Contracts**: Governed by `ConfigDict(extra="forbid", validate_assignment=True, frozen=True)`.
+- **Mandatory Safety Invariant**: `requires_human_review = True` is hardcoded with `@field_validator` and `@model_validator` rejecting `False`. Direct assignment raises `ValidationError`, and `model_copy(update=...)` revalidates all invariants through `model_validate()`.
+- **Integrity Validation**: Rejects `PASSED` status if `gate_decision != "PASSED"`, `policy_violations` is non-empty, `missing_evidence` is non-empty, `regressions_detected_count > 0`, `risk_level in (CRITICAL, HIGH)`, or historical reliability store is `corrupted` / `unavailable`.
+- **Trusted Policy Boundaries**: Enforces minimum weight floor (0.05) and maximum ceiling (0.50) across all 6 mandatory dimensions, normalized total weight (0.95–1.05), bounded thresholds (`min_overall_score >= 0.50`, `min_dimension_score >= 0.30`, `max_scope_expansion_files == 0`), and cryptographic policy digest binding (`policy_digest`) preventing policy substitution attacks.
+
+### 2. Multi-Dimensional Quality Analysis (`forge.repair_quality`)
+- **Correctness (`correctness.py`)**: Evaluates root-cause alignment, strategy conformance, and M5 verification outcome. Capped at 0.0 if verification fails or regressions are detected.
+- **Completeness (`completeness.py`)**: Audits whether all M3 `RequiredChange` items are modified, distinguishing analyzed context files from mandatory code modifications and penalizing extraneous unapproved file modifications.
+- **Maintainability (`maintainability.py`)**: AST-based cyclomatic complexity delta, function length changes, code duplication, dead code markers, and public API change detection.
+- **Patch Quality (`patch_analysis.py`)**: Measures patch proportionality, lines added/removed, change concentration, and forbids protected path touches (`.git/`, `AGENTS.md`, credentials).
+- **Reliability (`reliability.py`)**: Evaluates M5 baseline regression classification and statistical strategy stability ($N \ge 5$). Genuinely empty history is distinguished from corrupted/unavailable databases; database corruption triggers fail-closed scoring ($\le 0.50$), `INSUFFICIENT_EVIDENCE` status, and gate blocking.
+- **Security Risk (`risk.py`)**: Hybrid AST visitor and stateful scanner detecting dangerous calls (`eval`, `exec`, `subprocess.run`, `Popen`, `os.system`, `pickle.loads`), aliased imports, indirect `getattr` calls, disabled TLS (`verify=False`), and live credentials. Prevents false positives by stripping comments and docstrings.
+
+### 3. Transparent Scoring & Gatekeeper (`forge.repair_quality.scoring`, `gates`)
+- Composite scoring with configurable dimension weights and fail-closed non-overridable score clamping on regressions ($\le 0.20$), critical risks ($\le 0.20$), high risks ($\le 0.40$), and unverified historical reliability ($\le 0.50$).
+- Quality Gatekeeper evaluates non-negotiable criteria before transitioning to `PASSED`, verifying policy digest consistency between scoring and gating.
+
+### 4. Bounded Historical Storage & Events (`forge.repair_quality.history`, `events`)
+- Thread-safe SQLite table `repair_quality_records` bounded by record limits (`MAX_HISTORY_RECORDS = 1,000`).
+- Database health verification (`check_health()`) using `PRAGMA quick_check` and schema verification. Database failures are explicitly exposed and never reported as zero historical failures.
+- Append-only SHA-256 cryptographic audit event chaining with automatic secret redaction.
+
+### 5. Repair Quality Tools (`forge.repair_quality.tools`)
+- Exposes 12 structured, typed tools to `ToolRegistry`: `create_repair_quality_request`, `validate_repair_quality_evidence`, `analyze_repair_patch_quality`, `analyze_repair_maintainability`, `analyze_repair_completeness`, `evaluate_repair_correctness`, `analyze_repair_reliability`, `analyze_repair_risk`, `calculate_repair_quality_score`, `evaluate_repair_quality_gates`, `inspect_repair_quality_history`, `get_repair_quality_summary`.
