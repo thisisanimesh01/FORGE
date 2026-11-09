@@ -32,6 +32,7 @@ from forge.causality.tools import CausalityTools
 from forge.repair_planning.tools import RepairPlanningTools
 from forge.repair_execution.tools import RepairExecutionTools
 from forge.repair_verification.tools import RepairVerificationTools
+from forge.repair_quality.tools import RepairQualityTools
 from forge.llm.repo_tools import RepositoryIntelligenceTools
 from forge.repository.incremental import IncrementalRepositoryIndex
 from forge.llm.repo_tool_schemas import (
@@ -131,6 +132,10 @@ class ToolRegistry:
             max_output_chars=self.max_output_chars,
         )
         self._repair_verification_tools = RepairVerificationTools(
+            repository_path=self.workspace_path,
+            max_output_chars=self.max_output_chars,
+        )
+        self._repair_quality_tools = RepairQualityTools(
             repository_path=self.workspace_path,
             max_output_chars=self.max_output_chars,
         )
@@ -498,6 +503,13 @@ class ToolRegistry:
             if hasattr(self, handler_name):
                 self._handlers[tool_def.name] = getattr(self, handler_name)
 
+        # Phase 12 M6: Repair Quality Tools
+        for tool_def in self._repair_quality_tools.get_tool_definitions():
+            self._definitions.append(tool_def)
+            handler_name = f"_handle_{tool_def.name}"
+            if hasattr(self, handler_name):
+                self._handlers[tool_def.name] = getattr(self, handler_name)
+
     # -------------------------------------------------------------
     # Tool Handlers
     # -------------------------------------------------------------
@@ -552,6 +564,42 @@ class ToolRegistry:
 
     def _handle_get_repair_verification_summary(self, args: Dict[str, Any]) -> str:
         return self._repair_verification_tools.get_repair_verification_summary(args)
+
+    def _handle_create_repair_quality_request(self, args: Dict[str, Any]) -> str:
+        return self._repair_quality_tools.create_repair_quality_request(args)
+
+    def _handle_validate_repair_quality_evidence(self, args: Dict[str, Any]) -> str:
+        return self._repair_quality_tools.validate_repair_quality_evidence(args)
+
+    def _handle_analyze_repair_patch_quality(self, args: Dict[str, Any]) -> str:
+        return self._repair_quality_tools.analyze_repair_patch_quality(args)
+
+    def _handle_analyze_repair_maintainability(self, args: Dict[str, Any]) -> str:
+        return self._repair_quality_tools.analyze_repair_maintainability(args)
+
+    def _handle_analyze_repair_completeness(self, args: Dict[str, Any]) -> str:
+        return self._repair_quality_tools.analyze_repair_completeness(args)
+
+    def _handle_evaluate_repair_correctness(self, args: Dict[str, Any]) -> str:
+        return self._repair_quality_tools.evaluate_repair_correctness(args)
+
+    def _handle_analyze_repair_reliability(self, args: Dict[str, Any]) -> str:
+        return self._repair_quality_tools.analyze_repair_reliability(args)
+
+    def _handle_analyze_repair_risk(self, args: Dict[str, Any]) -> str:
+        return self._repair_quality_tools.analyze_repair_risk(args)
+
+    def _handle_calculate_repair_quality_score(self, args: Dict[str, Any]) -> str:
+        return self._repair_quality_tools.calculate_repair_quality_score(args)
+
+    def _handle_evaluate_repair_quality_gates(self, args: Dict[str, Any]) -> str:
+        return self._repair_quality_tools.evaluate_repair_quality_gates(args)
+
+    def _handle_inspect_repair_quality_history(self, args: Dict[str, Any]) -> str:
+        return self._repair_quality_tools.inspect_repair_quality_history(args)
+
+    def _handle_get_repair_quality_summary(self, args: Dict[str, Any]) -> str:
+        return self._repair_quality_tools.get_repair_quality_summary(args)
 
     def _handle_create_repair_plan(self, args: Dict[str, Any]) -> str:
         return self._repair_planning_tools.create_repair_plan(args)
