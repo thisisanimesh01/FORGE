@@ -49,6 +49,8 @@ app.add_typer(repair_app, name="repair")
 app.add_typer(eng_workflow_app, name="workflow")
 app.add_typer(release_app, name="release")
 app.add_typer(publish_app, name="publish")
+orchestrate_app = typer.Typer(help="Phase 13 End-to-end engineering orchestration commands.")
+app.add_typer(orchestrate_app, name="orchestrate")
 
 
 
@@ -4456,6 +4458,192 @@ def workflow_acceptance_alias(
         output_path=output_path,
         docker_live=docker_live,
     )
+
+
+# --- Phase 13 Orchestration Commands ---
+
+@orchestrate_app.command(name="run")
+def orchestrate_run(
+    repository: str = typer.Option(".", "--repo", "-r", help="Path to target repository"),
+    description: Optional[str] = typer.Option(None, "--desc", "-d", help="Defect description"),
+    error_message: Optional[str] = typer.Option(None, "--error", "-e", help="Error message"),
+    stack_trace: Optional[str] = typer.Option(None, "--trace", "-t", help="Stack trace"),
+    target_file: Optional[List[str]] = typer.Option(None, "--file", "-f", help="Target file paths"),
+    target_symbol: Optional[List[str]] = typer.Option(None, "--symbol", "-s", help="Target symbol names"),
+) -> None:
+    """Run an autonomous engineering orchestration workflow."""
+    from forge.diagnosis.schemas import DiagnosisInput
+    from forge.orchestration.schemas import WorkflowContext, WorkflowState
+    from forge.orchestration.orchestrator import EngineeringOrchestrator
+
+    repo_path = Path(repository).resolve()
+    defect_input = DiagnosisInput(
+        user_description=description,
+        error_message=error_message,
+        stack_trace=stack_trace,
+        target_files=target_file or [],
+        target_symbols=target_symbol or [],
+    )
+    context = WorkflowContext(
+        repository_path=str(repo_path),
+        defect_input=defect_input,
+    )
+    orchestrator = EngineeringOrchestrator(context=context)
+    typer.echo(f"Initialized workflow '{orchestrator.workflow_id}' for repo: {repo_path}")
+
+    orchestrator.run_until_approval_or_completion()
+
+    typer.echo(f"Workflow State: {orchestrator.state.value}")
+    if orchestrator.state == WorkflowState.AWAITING_HUMAN_APPROVAL:
+        plan = orchestrator.stage_outputs.repair_plan
+        from forge.repair_execution.approval import compute_plan_digest
+        digest = compute_plan_digest(plan) if plan else "unknown"
+        typer.secho(
+            f"\n[APPROVAL REQUIRED] Repair plan '{plan.plan_id if plan else 'none'}' generated.\n"
+            f"Plan Digest: {digest}\n"
+            f"Run 'forge orchestrate approve {orchestrator.workflow_id} --approver <name> --plan-id {plan.plan_id if plan else 'none'} --plan-digest {digest} --strategy {plan.selected_strategy_id if plan else 'none'} --file <path>' to authorize repair.",
+            fg=typer.colors.YELLOW,
+        )
+    elif orchestrator.state == WorkflowState.COMPLETED:
+        typer.secho("\n[SUCCESS] Workflow completed with verified repair and quality pass.", fg=typer.colors.GREEN)
+    elif orchestrator.state == WorkflowState.BLOCKED:
+        typer.secho("\n[BLOCKED] Workflow blocked by safety gate.", fg=typer.colors.RED)
+    elif orchestrator.state == WorkflowState.FAILED:
+        typer.secho("\n[FAILED] Workflow execution failed.", fg=typer.colors.RED)
+
+
+@orchestrate_app.command(name="approve")
+def orchestrate_approve(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to authorize"),
+    approver: str = typer.Option(..., "--approver", "-a", help="Human approver reference/identity"),
+    plan_id: str = typer.Option(..., "--plan-id", "-p", help="Repair plan ID to authorize"),
+    plan_digest: str = typer.Option(..., "--plan-digest", "-d", help="Canonical 64-char SHA-256 plan digest"),
+    strategy_id: str = typer.Option(..., "--strategy", "-s", help="Approved strategy ID"),
+    file_paths: List[str] = typer.Option(..., "--file", "-f", help="Approved file paths authorized for modification"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Confirm authorization without interactive prompt"),
+    non_interactive: bool = typer.Option(False, "--non-interactive", help="Explicit non-interactive mode flag"),
+) -> None:
+    """Explicitly authorize an awaiting repair plan for execution with local operator authentication."""
+    import getpass
+    import os
+    import sys
+    import uuid
+    from datetime import datetime, timezone, timedelta
+    from forge.repair_execution.schemas import ApprovalStatus, RepairApproval
+    from forge.repair_execution.ledger import ApprovalLedger
+    from forge.config import get_settings
+
+    # 1. Prohibited synthetic / agentic names
+    prohibited = {"unknown", "none", "auto", "llm", "ai", "model", "agent", "forge", "assistant", "subagent", "bot", "synthetic", "system"}
+    approver_clean = approver.strip()
+    if not approver_clean or approver_clean.lower() in prohibited or any(term in approver_clean.lower() for term in ("llm", "subagent", "synthetic", "auto")):
+        typer.secho("Authorization error: Invalid human approver identity. AI/model/agent/auto identities are strictly forbidden.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    # 2. Mandatory Trusted Approver Allowlist Verification (Fail-Closed)
+    raw_env_allowlist = os.environ.get("FORGE_TRUSTED_APPROVERS", "")
+    trusted_set = {x.strip() for x in raw_env_allowlist.split(",") if x.strip()}
+    if not trusted_set:
+        typer.secho(
+            "Authorization error: No trusted human approver allowlist configured in FORGE_TRUSTED_APPROVERS. "
+            "Production approval strictly requires an explicitly configured, non-empty trusted approver allowlist.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if approver_clean not in trusted_set:
+        typer.secho(
+            f"Authorization error: Identity '{approver_clean}' is not an authorized human principal in the configured trusted approver allowlist.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # 3. Local Operator Identity Resolution & Interactive Confirmation Flow
+    operator_user = getpass.getuser()
+    is_interactive = sys.stdin.isatty() and not non_interactive
+
+    if not is_interactive and not yes:
+        typer.secho(
+            "Authorization error: Non-interactive approval attempt rejected. "
+            "Human operator approval requires an interactive terminal session (TTY) or explicit operator confirmation flag (--yes).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if is_interactive and not yes:
+        typer.echo(f"\n[APPROVAL CONFIRMATION REQUIRED]")
+        typer.echo(f"  Workflow ID: {workflow_id}")
+        typer.echo(f"  Plan ID:     {plan_id}")
+        typer.echo(f"  Plan Digest: {plan_digest}")
+        typer.echo(f"  Strategy ID: {strategy_id}")
+        typer.echo(f"  Files:       {', '.join(file_paths)}")
+        typer.echo(f"  Approver:    {approver_clean}")
+        typer.echo(f"  Local User:  {operator_user}")
+        confirm = typer.confirm(
+            f"Do you, as local operator '{operator_user}', authorize autonomous repair execution?",
+            default=False,
+        )
+        if not confirm:
+            typer.secho("Authorization aborted by operator.", fg=typer.colors.YELLOW)
+            raise typer.Exit(code=1)
+
+    now = datetime.now(timezone.utc)
+    approval = RepairApproval(
+        approval_id=f"appr_{uuid.uuid4().hex[:12]}",
+        repair_plan_id=plan_id,
+        plan_digest=plan_digest,
+        approved_strategy_id=strategy_id,
+        approved_file_paths=file_paths,
+        approval_timestamp=now.isoformat(),
+        approval_expiry=(now + timedelta(days=1)).isoformat(),
+        approver_reference=approver_clean,
+        approval_status=ApprovalStatus.APPROVED,
+        auth_channel="interactive_cli",
+        operator_principal=operator_user,
+    )
+
+    # 4. Durable persistence to ApprovalLedger SQLite
+    ledger_env = os.environ.get("FORGE_LEDGER_DB_PATH")
+    ledger_db = Path(ledger_env).resolve() if ledger_env else get_settings().db_path
+    ledger = ApprovalLedger(db_path=ledger_db)
+    ledger.record_approval(
+        approval_id=approval.approval_id,
+        workflow_id=workflow_id,
+        repair_plan_id=plan_id,
+        plan_digest=plan_digest,
+        approved_strategy_id=strategy_id,
+        approved_file_paths=file_paths,
+        approval_timestamp=approval.approval_timestamp,
+        approval_expiry=approval.approval_expiry,
+        approver_reference=approver_clean,
+        auth_channel="interactive_cli",
+    )
+
+    typer.secho(f"Generated human approval contract '{approval.approval_id}' for workflow '{workflow_id}'.", fg=typer.colors.GREEN)
+    typer.echo(f"  Approver:    {approval.approver_reference} (Operator: {operator_user})")
+    typer.echo(f"  Plan ID:     {approval.repair_plan_id}")
+    typer.echo(f"  Plan Digest: {approval.plan_digest}")
+    typer.echo(f"  Strategy:    {approval.approved_strategy_id}")
+    typer.echo(f"  Files:       {', '.join(approval.approved_file_paths)}")
+
+
+@orchestrate_app.command(name="status")
+def orchestrate_status(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to inspect"),
+) -> None:
+    """Inspect status of an orchestration workflow."""
+    typer.echo(f"Inspecting workflow: {workflow_id}")
+
+
+@orchestrate_app.command(name="report")
+def orchestrate_report(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to retrieve report for"),
+) -> None:
+    """Display final engineering report for a workflow."""
+    typer.echo(f"Retrieving engineering report for workflow: {workflow_id}")
 
 
 def main() -> None:
