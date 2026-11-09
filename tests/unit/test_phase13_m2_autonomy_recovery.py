@@ -938,8 +938,10 @@ def test_scenario_14_tampered_event_chain_in_sqlite_blocks_recovery(temp_db: Pat
 # 7. CLI & ToolRegistry Integration Tests
 # ===========================================================================
 
-def test_tool_registry_m2_recovery_tools(tmp_path: Path):
+def test_tool_registry_m2_recovery_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """ToolRegistry exposes inspect_workflow_recovery, recover_orchestration_workflow, and inspect_workflow_tasks."""
+    db_path = tmp_path / "reg_test.db"
+    monkeypatch.setenv("FORGE_DB_PATH", str(db_path))
     repo = tmp_path / "repo"
     repo.mkdir(parents=True, exist_ok=True)
     registry = ToolRegistry(workspace_path=repo)
