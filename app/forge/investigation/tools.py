@@ -33,6 +33,7 @@ from forge.repair_planning.tools import RepairPlanningTools
 from forge.repair_execution.tools import RepairExecutionTools
 from forge.repair_verification.tools import RepairVerificationTools
 from forge.repair_quality.tools import RepairQualityTools
+from forge.orchestration.tools import OrchestrationTools
 from forge.llm.repo_tools import RepositoryIntelligenceTools
 from forge.repository.incremental import IncrementalRepositoryIndex
 from forge.llm.repo_tool_schemas import (
@@ -136,6 +137,10 @@ class ToolRegistry:
             max_output_chars=self.max_output_chars,
         )
         self._repair_quality_tools = RepairQualityTools(
+            repository_path=self.workspace_path,
+            max_output_chars=self.max_output_chars,
+        )
+        self._orchestration_tools = OrchestrationTools(
             repository_path=self.workspace_path,
             max_output_chars=self.max_output_chars,
         )
@@ -510,6 +515,13 @@ class ToolRegistry:
             if hasattr(self, handler_name):
                 self._handlers[tool_def.name] = getattr(self, handler_name)
 
+        # Phase 13 M1: Engineering Orchestration Tools
+        for tool_def in self._orchestration_tools.get_tool_definitions():
+            self._definitions.append(tool_def)
+            handler_name = f"_handle_{tool_def.name}"
+            if hasattr(self, handler_name):
+                self._handlers[tool_def.name] = getattr(self, handler_name)
+
     # -------------------------------------------------------------
     # Tool Handlers
     # -------------------------------------------------------------
@@ -600,6 +612,24 @@ class ToolRegistry:
 
     def _handle_get_repair_quality_summary(self, args: Dict[str, Any]) -> str:
         return self._repair_quality_tools.get_repair_quality_summary(args)
+
+    def _handle_create_orchestration_workflow(self, args: Dict[str, Any]) -> str:
+        return self._orchestration_tools.create_orchestration_workflow(args)
+
+    def _handle_execute_orchestration_stage(self, args: Dict[str, Any]) -> str:
+        return self._orchestration_tools.execute_orchestration_stage(args)
+
+    def _handle_inspect_orchestration_status(self, args: Dict[str, Any]) -> str:
+        return self._orchestration_tools.inspect_orchestration_status(args)
+
+    def _handle_inspect_stage_result(self, args: Dict[str, Any]) -> str:
+        return self._orchestration_tools.inspect_stage_result(args)
+
+    def _handle_submit_orchestration_approval(self, args: Dict[str, Any]) -> str:
+        return self._orchestration_tools.submit_orchestration_approval(args)
+
+    def _handle_get_engineering_report(self, args: Dict[str, Any]) -> str:
+        return self._orchestration_tools.get_engineering_report(args)
 
     def _handle_create_repair_plan(self, args: Dict[str, Any]) -> str:
         return self._repair_planning_tools.create_repair_plan(args)

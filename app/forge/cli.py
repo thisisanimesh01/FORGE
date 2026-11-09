@@ -49,6 +49,8 @@ app.add_typer(repair_app, name="repair")
 app.add_typer(eng_workflow_app, name="workflow")
 app.add_typer(release_app, name="release")
 app.add_typer(publish_app, name="publish")
+orchestrate_app = typer.Typer(help="Phase 13 End-to-end engineering orchestration commands.")
+app.add_typer(orchestrate_app, name="orchestrate")
 
 
 
@@ -4456,6 +4458,74 @@ def workflow_acceptance_alias(
         output_path=output_path,
         docker_live=docker_live,
     )
+
+
+# --- Phase 13 Orchestration Commands ---
+
+@orchestrate_app.command(name="run")
+def orchestrate_run(
+    repository: str = typer.Option(".", "--repo", "-r", help="Path to target repository"),
+    description: Optional[str] = typer.Option(None, "--desc", "-d", help="Defect description"),
+    error_message: Optional[str] = typer.Option(None, "--error", "-e", help="Error message"),
+    stack_trace: Optional[str] = typer.Option(None, "--trace", "-t", help="Stack trace"),
+    target_file: Optional[List[str]] = typer.Option(None, "--file", "-f", help="Target file paths"),
+    target_symbol: Optional[List[str]] = typer.Option(None, "--symbol", "-s", help="Target symbol names"),
+) -> None:
+    """Run an autonomous engineering orchestration workflow."""
+    from forge.diagnosis.schemas import DiagnosisInput
+    from forge.orchestration.schemas import WorkflowContext, WorkflowState
+    from forge.orchestration.orchestrator import EngineeringOrchestrator
+
+    repo_path = Path(repository).resolve()
+    defect_input = DiagnosisInput(
+        user_description=description,
+        error_message=error_message,
+        stack_trace=stack_trace,
+        target_files=target_file or [],
+        target_symbols=target_symbol or [],
+    )
+    context = WorkflowContext(
+        repository_path=str(repo_path),
+        defect_input=defect_input,
+    )
+    orchestrator = EngineeringOrchestrator(context=context)
+    typer.echo(f"Initialized workflow '{orchestrator.workflow_id}' for repo: {repo_path}")
+
+    orchestrator.run_until_approval_or_completion()
+
+    typer.echo(f"Workflow State: {orchestrator.state.value}")
+    if orchestrator.state == WorkflowState.AWAITING_HUMAN_APPROVAL:
+        plan = orchestrator.stage_outputs.repair_plan
+        from forge.repair_execution.approval import compute_plan_digest
+        digest = compute_plan_digest(plan) if plan else "unknown"
+        typer.secho(
+            f"\n[APPROVAL REQUIRED] Repair plan '{plan.plan_id if plan else 'none'}' generated.\n"
+            f"Plan Digest: {digest}\n"
+            f"Run 'forge orchestrate approve {orchestrator.workflow_id} --approver <name> --plan-id {plan.plan_id if plan else 'none'} --plan-digest {digest}' to authorize repair.",
+            fg=typer.colors.YELLOW,
+        )
+    elif orchestrator.state == WorkflowState.COMPLETED:
+        typer.secho("\n[SUCCESS] Workflow completed with verified repair and quality pass.", fg=typer.colors.GREEN)
+    elif orchestrator.state == WorkflowState.BLOCKED:
+        typer.secho("\n[BLOCKED] Workflow blocked by safety gate.", fg=typer.colors.RED)
+    elif orchestrator.state == WorkflowState.FAILED:
+        typer.secho("\n[FAILED] Workflow execution failed.", fg=typer.colors.RED)
+
+
+@orchestrate_app.command(name="status")
+def orchestrate_status(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to inspect"),
+) -> None:
+    """Inspect status of an orchestration workflow."""
+    typer.echo(f"Inspecting workflow: {workflow_id}")
+
+
+@orchestrate_app.command(name="report")
+def orchestrate_report(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to retrieve report for"),
+) -> None:
+    """Display final engineering report for a workflow."""
+    typer.echo(f"Retrieving engineering report for workflow: {workflow_id}")
 
 
 def main() -> None:
