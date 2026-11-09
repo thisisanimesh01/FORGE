@@ -126,6 +126,15 @@ runner = CliRunner()
 # Test Helpers & Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def configure_trusted_approvers_env(monkeypatch: pytest.MonkeyPatch):
+    """Ensure trusted approver allowlist is configured by default for tests."""
+    monkeypatch.setenv(
+        "FORGE_TRUSTED_APPROVERS",
+        "security-lead@example.com,lead_engineer@example.com,senior_staff@example.com,auditor@corp.com,lead@example.com",
+    )
+
+
 @pytest.fixture
 def tmp_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
@@ -193,6 +202,7 @@ def _create_sample_approval(
     scope: Optional[List[str]] = None,
     expired: bool = False,
     approver: str = "security-lead@example.com",
+    auth_channel: str = "interactive_cli",
 ) -> RepairApproval:
     digest = compute_plan_digest(plan)
     files = scope or plan.affected_files
@@ -208,6 +218,7 @@ def _create_sample_approval(
         approval_expiry=expiry.isoformat(),
         approver_reference=approver,
         approval_status=ApprovalStatus.APPROVED,
+        auth_channel=auth_channel,
     )
 
 
@@ -750,16 +761,17 @@ def test_scenario_10_tampered_event_chain_verification_failure(tmp_repo: Path, t
 # ---------------------------------------------------------------------------
 
 def test_tool_registry_orchestration_tools(tmp_repo: Path):
-    """Verify all 6 orchestration tools are registered in ToolRegistry."""
+    """Verify all 7 orchestration tools are registered in ToolRegistry."""
     registry = ToolRegistry(workspace_path=tmp_repo)
     registered_names = [d.name for d in registry.get_definitions()]
-    assert len(registered_names) >= 65
+    assert len(registered_names) >= 66
 
     expected_tools = [
         "create_orchestration_workflow",
         "execute_orchestration_stage",
         "inspect_orchestration_status",
         "inspect_stage_result",
+        "request_orchestration_approval",
         "submit_orchestration_approval",
         "get_engineering_report",
     ]
@@ -858,7 +870,7 @@ def test_bypass_4_tool_callers_cannot_fabricate_trusted_approval(tmp_repo: Path)
         "approved_scope_file_paths": plan_a.affected_files,
     }))
     assert res_ai["is_valid"] is False
-    assert any("forbidden" in e.lower() or "invalid" in e.lower() for e in res_ai["errors"])
+    assert any("autonomous tool" in e.lower() or "security violation" in e.lower() for e in res_ai["errors"])
     assert orch_a.state == WorkflowState.BLOCKED
 
     # 4b: Auto approver rejected
@@ -872,6 +884,7 @@ def test_bypass_4_tool_callers_cannot_fabricate_trusted_approval(tmp_repo: Path)
         "approved_scope_file_paths": plan_b.affected_files,
     }))
     assert res_auto["is_valid"] is False
+    assert any("autonomous tool" in e.lower() or "security violation" in e.lower() for e in res_auto["errors"])
     assert orch_b.state == WorkflowState.BLOCKED
 
     # 4c: Untrusted human approver rejected
@@ -885,10 +898,10 @@ def test_bypass_4_tool_callers_cannot_fabricate_trusted_approval(tmp_repo: Path)
         "approved_scope_file_paths": plan_c.affected_files,
     }))
     assert res_untrusted["is_valid"] is False
-    assert any("untrusted approver" in e.lower() for e in res_untrusted["errors"])
+    assert any("autonomous tool" in e.lower() or "security violation" in e.lower() for e in res_untrusted["errors"])
     assert orch_c.state == WorkflowState.BLOCKED
 
-    # 4d: Authorized approver accepted
+    # 4d: Autonomous tool callers CANNOT manufacture human approval even with a trusted approver identity
     orch_d, plan_d, digest_d, tools_d = _make_ready_orchestrator()
     res_trusted = json.loads(tools_d.submit_orchestration_approval({
         "workflow_id": orch_d.workflow_id,
@@ -898,8 +911,19 @@ def test_bypass_4_tool_callers_cannot_fabricate_trusted_approval(tmp_repo: Path)
         "approved_strategy_id": plan_d.selected_strategy_id,
         "approved_scope_file_paths": plan_d.affected_files,
     }))
-    assert res_trusted["is_valid"] is True
-    assert orch_d.state == WorkflowState.APPROVED
+    assert res_trusted["is_valid"] is False
+    assert any("autonomous tool" in e.lower() for e in res_trusted["errors"])
+    assert orch_d.state == WorkflowState.BLOCKED
+
+    # 4e: Tools must use request_orchestration_approval which informs operator without self-authorizing
+    orch_e, plan_e, digest_e, tools_e = _make_ready_orchestrator()
+    req_res = json.loads(tools_e.request_orchestration_approval({
+        "workflow_id": orch_e.workflow_id,
+        "reason": "Requesting human review for proposed patch",
+    }))
+    assert req_res["requires_human_approval"] is True
+    assert "forge orchestrate approve" in req_res["instruction"]
+    assert orch_e.state == WorkflowState.AWAITING_HUMAN_APPROVAL
 
 
 def test_bypass_5_missing_approval_blocks_repair_execution(tmp_repo: Path):
@@ -1203,23 +1227,8 @@ def test_tampered_audit_trail_prevents_get_result(tmp_repo: Path, tmp_path: Path
 
 def test_cli_orchestrate_approve_command():
     """Test forge orchestrate approve command via CLI runner."""
-    # Test rejection of AI approver
-    res_bad = runner.invoke(
-        app,
-        [
-            "orchestrate", "approve", "wf_123",
-            "--approver", "llm",
-            "--plan-id", "plan_001",
-            "--plan-digest", "a" * 64,
-            "--strategy", "strat_001",
-            "--file", "src/logic.py",
-        ],
-    )
-    assert res_bad.exit_code == 1
-    assert "Authorization error" in res_bad.output or "strictly forbidden" in res_bad.output
-
-    # Test valid human approver
-    res_good = runner.invoke(
+    # Test rejection when non-interactive without --yes
+    res_no_tty = runner.invoke(
         app,
         [
             "orchestrate", "approve", "wf_123",
@@ -1230,6 +1239,244 @@ def test_cli_orchestrate_approve_command():
             "--file", "src/logic.py",
         ],
     )
+    assert res_no_tty.exit_code == 1
+    assert "Non-interactive" in res_no_tty.output or "--yes" in res_no_tty.output
+
+    # Test rejection of AI approver even with --yes
+    res_bad = runner.invoke(
+        app,
+        [
+            "orchestrate", "approve", "wf_123",
+            "--approver", "llm",
+            "--plan-id", "plan_001",
+            "--plan-digest", "a" * 64,
+            "--strategy", "strat_001",
+            "--file", "src/logic.py",
+            "--yes",
+        ],
+    )
+    assert res_bad.exit_code == 1
+    assert "Authorization error" in res_bad.output or "strictly forbidden" in res_bad.output
+
+    # Test valid human approver with --yes
+    res_good = runner.invoke(
+        app,
+        [
+            "orchestrate", "approve", "wf_123",
+            "--approver", "lead_engineer@example.com",
+            "--plan-id", "plan_001",
+            "--plan-digest", "a" * 64,
+            "--strategy", "strat_001",
+            "--file", "src/logic.py",
+            "--yes",
+        ],
+    )
     assert res_good.exit_code == 0
     assert "Generated human approval contract" in res_good.output
     assert "lead_engineer@example.com" in res_good.output
+
+
+# ---------------------------------------------------------------------------
+# 8. Human Approver Identity Authentication Boundary Tests (10 Scenarios)
+# ---------------------------------------------------------------------------
+
+def test_identity_missing_trusted_approver_config_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Missing trusted approver allowlist strictly fails closed."""
+    monkeypatch.delenv("FORGE_TRUSTED_APPROVERS", raising=False)
+    ledger = ApprovalLedger(db_path=tmp_path / "ledger.db")
+    mgr = OrchestrationApprovalManager(ledger=ledger)
+    plan = _create_sample_plan()
+    approval = _create_sample_approval(plan, approver="security-lead@example.com")
+
+    outcome = mgr.verify_approval(approval, plan)
+    assert outcome.is_valid is False
+    assert any("No trusted human approver allowlist configured" in err for err in outcome.errors)
+
+    with pytest.raises(ApprovalValidationError, match="No trusted human approver allowlist configured"):
+        mgr.validate_and_record_approval(approval, plan)
+
+
+def test_identity_empty_allowlist_fails_closed(tmp_path: Path):
+    """Empty trusted approver set strictly fails closed."""
+    ledger = ApprovalLedger(db_path=tmp_path / "ledger.db")
+    mgr = OrchestrationApprovalManager(ledger=ledger, trusted_approvers=set())
+    plan = _create_sample_plan()
+    approval = _create_sample_approval(plan, approver="security-lead@example.com")
+
+    outcome = mgr.verify_approval(approval, plan)
+    assert outcome.is_valid is False
+    assert any("No trusted human approver allowlist configured" in err for err in outcome.errors)
+
+
+def test_identity_unauthorized_approver_rejected(tmp_path: Path):
+    """Approver identity not on allowlist is strictly rejected."""
+    ledger = ApprovalLedger(db_path=tmp_path / "ledger.db")
+    mgr = OrchestrationApprovalManager(
+        ledger=ledger,
+        trusted_approvers={"senior_staff@example.com"},
+    )
+    plan = _create_sample_plan()
+    approval = _create_sample_approval(plan, approver="attacker@external.com")
+
+    outcome = mgr.verify_approval(approval, plan)
+    assert outcome.is_valid is False
+    assert any("unauthorized approver" in err.lower() or "untrusted approver" in err.lower() for err in outcome.errors)
+
+
+def test_identity_authorized_string_from_untrusted_caller_rejected(tmp_path: Path):
+    """Caller presenting authorized string via untrusted channel is rejected."""
+    ledger = ApprovalLedger(db_path=tmp_path / "ledger.db")
+    mgr = OrchestrationApprovalManager(
+        ledger=ledger,
+        trusted_approvers={"senior_staff@example.com"},
+    )
+    plan = _create_sample_plan()
+    # Channel set to untrusted_caller at instantiation (frozen model)
+    approval = _create_sample_approval(plan, approver="senior_staff@example.com", auth_channel="untrusted_caller")
+
+    outcome = mgr.verify_approval(approval, plan)
+    assert outcome.is_valid is False
+    assert any("channel" in err.lower() and ("untrusted" in err.lower() or "unauthorized" in err.lower()) for err in outcome.errors)
+
+
+def test_identity_llm_tool_cannot_impersonate_trusted_human(tmp_repo: Path):
+    """Autonomous LLM tool caller cannot fabricate approval by supplying trusted identity string."""
+    ctx = WorkflowContext(
+        repository_path=str(tmp_repo),
+        trusted_approvers={"security-lead@example.com"},
+    )
+    orch = EngineeringOrchestrator(
+        context=ctx,
+        diagnosis_adapter=FakeDiagnosisAdapter(),
+        root_cause_adapter=FakeRootCauseAdapter(),
+        planning_adapter=FakePlanningAdapter(),
+    )
+    orch.run_until_approval_or_completion()
+    plan = orch.stage_outputs.repair_plan
+    assert plan is not None
+    digest = compute_plan_digest(plan)
+
+    tools = OrchestrationTools(repository_path=tmp_repo)
+    tools.register_orchestrator(orch)
+
+    # Autonomous tool calls submit_orchestration_approval with authorized identity string
+    raw_res = tools.submit_orchestration_approval({
+        "workflow_id": orch.workflow_id,
+        "approver_identity": "security-lead@example.com",
+        "repair_plan_id": plan.plan_id,
+        "repair_plan_digest": digest,
+        "approved_strategy_id": plan.selected_strategy_id,
+        "approved_scope_file_paths": plan.affected_files,
+    })
+    res = json.loads(raw_res)
+    assert res["is_valid"] is False
+    assert any("autonomous tool" in err.lower() for err in res["errors"])
+    assert orch.state == WorkflowState.BLOCKED
+
+
+def test_cli_non_interactive_approval_attempt_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """CLI approval in non-interactive environment without --yes flag is rejected."""
+    db_file = tmp_path / "ledger.db"
+    monkeypatch.setenv("FORGE_LEDGER_DB_PATH", str(db_file))
+    result = runner.invoke(
+        app,
+        [
+            "orchestrate", "approve", "wf_test_123",
+            "--approver", "lead_engineer@example.com",
+            "--plan-id", "plan_test",
+            "--plan-digest", "b" * 64,
+            "--strategy", "strat_001",
+            "--file", "src/logic.py",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "Non-interactive" in result.output or "--yes" in result.output
+
+
+def test_cli_interactive_approval_with_valid_authorization(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """CLI approval with valid confirmation creates approval recorded in durable ledger."""
+    db_file = tmp_path / "ledger.db"
+    monkeypatch.setenv("FORGE_LEDGER_DB_PATH", str(db_file))
+    result = runner.invoke(
+        app,
+        [
+            "orchestrate", "approve", "wf_test_456",
+            "--approver", "lead_engineer@example.com",
+            "--plan-id", "plan_test_456",
+            "--plan-digest", "c" * 64,
+            "--strategy", "strat_001",
+            "--file", "src/logic.py",
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Generated human approval contract" in result.output
+
+    # Verify recorded in persistent ledger
+    ledger = ApprovalLedger(db_path=db_file)
+    approval = ledger.get_approval_for_plan("plan_test_456")
+    assert approval is not None
+    assert approval["approver_reference"] == "lead_engineer@example.com"
+    assert approval["auth_channel"] == "interactive_cli"
+    assert ledger.get_workflow_for_approval(approval["approval_id"]) == "wf_test_456"
+
+
+def test_approval_persists_after_process_restart(tmp_path: Path):
+    """Approvals recorded in one process instance remain retrievable in a fresh instance."""
+    db_file = tmp_path / "restart.db"
+    plan = _create_sample_plan()
+    approval = _create_sample_approval(plan)
+
+    # Process Instance 1
+    mgr1 = OrchestrationApprovalManager(ledger=ApprovalLedger(db_path=db_file))
+    mgr1.validate_and_record_approval(approval, plan, workflow_id="wf_restart_01")
+    assert mgr1.is_approved(plan.plan_id)
+
+    # Process Instance 2 (simulating restart)
+    mgr2 = OrchestrationApprovalManager(ledger=ApprovalLedger(db_path=db_file))
+    assert mgr2.is_approved(plan.plan_id)
+    persisted = mgr2.get_approval(plan.plan_id)
+    assert persisted is not None
+    assert persisted.approval_id == approval.approval_id
+    assert persisted.approver_reference == approval.approver_reference
+
+
+def test_approval_replay_blocked_after_process_restart(tmp_path: Path):
+    """Consumed approval remains consumed and cannot be replayed after process restart."""
+    db_file = tmp_path / "replay_restart.db"
+    plan = _create_sample_plan()
+    approval = _create_sample_approval(plan)
+
+    # Process Instance 1: Validate and consume
+    ledger1 = ApprovalLedger(db_path=db_file)
+    mgr1 = OrchestrationApprovalManager(ledger=ledger1)
+    mgr1.validate_and_record_approval(approval, plan, workflow_id="wf_replay_01")
+    ledger1.record_consumed(approval.approval_id, "exec_first_run")
+
+    # Process Instance 2 (simulating restart): Attempt replay of consumed approval
+    ledger2 = ApprovalLedger(db_path=db_file)
+    mgr2 = OrchestrationApprovalManager(ledger=ledger2)
+    with pytest.raises(ApprovalValidationError, match="already"):
+        mgr2.validate_and_record_approval(approval, plan, workflow_id="wf_replay_02")
+
+
+def test_cross_workflow_approval_reuse_blocked_after_restart(tmp_path: Path):
+    """Approval bound to workflow A cannot be reused for workflow B, even after restart."""
+    db_file = tmp_path / "cross_wf_restart.db"
+    plan = _create_sample_plan()
+    approval = _create_sample_approval(plan)
+
+    # Process Instance 1: Bind approval to workflow Alpha
+    ledger1 = ApprovalLedger(db_path=db_file)
+    mgr1 = OrchestrationApprovalManager(ledger=ledger1)
+    mgr1.validate_and_record_approval(approval, plan, workflow_id="wf_alpha_restart")
+
+    # Process Instance 2 (restart): Attempt to submit same approval for workflow Beta
+    ledger2 = ApprovalLedger(db_path=db_file)
+    mgr2 = OrchestrationApprovalManager(ledger=ledger2)
+    outcome = mgr2.verify_approval(approval, plan, workflow_id="wf_beta_restart")
+    assert outcome.is_valid is False
+    assert any("bound to workflow" in err.lower() for err in outcome.errors)
+
+    with pytest.raises(ApprovalValidationError, match="bound to workflow"):
+        mgr2.validate_and_record_approval(approval, plan, workflow_id="wf_beta_restart")

@@ -8,6 +8,7 @@ Enforces strict human authorization before autonomous repair execution:
 - Prevents cross-workflow approval substitution and rejects synthetic/AI identities.
 """
 
+import os
 from typing import Dict, List, Optional, Set, Tuple
 
 from forge.repair_execution.approval import RepairApprovalValidator, compute_plan_digest
@@ -43,7 +44,12 @@ class OrchestrationApprovalManager:
         trusted_approvers: Optional[Set[str]] = None,
     ) -> None:
         self.ledger = ledger or ApprovalLedger()
-        self.trusted_approvers = trusted_approvers
+        if trusted_approvers is not None:
+            self.trusted_approvers: Set[str] = set(trusted_approvers)
+        else:
+            raw_env = os.environ.get("FORGE_TRUSTED_APPROVERS", "")
+            self.trusted_approvers = {x.strip() for x in raw_env.split(",") if x.strip()}
+
         self._m4_validator = RepairApprovalValidator()
         self._approved_plans: Dict[str, RepairApproval] = {}
         self._approved_workflows: Dict[str, str] = {}
@@ -70,6 +76,17 @@ class OrchestrationApprovalManager:
             ApprovalVerificationOutcome with is_valid=True/False and detailed errors.
         """
         errors: List[str] = []
+
+        # 0. Mandatory Allowlist Enforcement: Fail closed if absent, empty, or misconfigured
+        if not self.trusted_approvers:
+            return ApprovalVerificationOutcome(
+                False,
+                [
+                    "Approval configuration error: No trusted human approver allowlist configured. "
+                    "Production approval strictly requires an explicitly configured, non-empty trusted approver allowlist "
+                    "(set via trusted_approvers or FORGE_TRUSTED_APPROVERS). All approvals fail closed."
+                ],
+            )
 
         if not plan:
             return ApprovalVerificationOutcome(False, ["No repair plan provided for approval verification."])
@@ -126,10 +143,11 @@ class OrchestrationApprovalManager:
             errors.append(f"Approval '{approval.approval_id}' was revoked: {revoked_map[approval.approval_id]}.")
 
         consumed_map = self.ledger.get_consumed_map()
-        if approval.approval_id in consumed_map:
+        if approval.approval_id in consumed_map or self.ledger.is_consumed(approval.approval_id):
+            exec_id = consumed_map.get(approval.approval_id, "recorded_execution")
             errors.append(
                 f"Replay detected: approval '{approval.approval_id}' has already been consumed "
-                f"by execution '{consumed_map[approval.approval_id]}'."
+                f"by execution '{exec_id}'."
             )
 
         # 7. Human approver identity verification & rejection of AI/synthetic identities
@@ -160,21 +178,27 @@ class OrchestrationApprovalManager:
                 f"Invalid approver identity '{approval.approver_reference}': Explicit human approver identity "
                 "is required (AI, model, agent, auto, or synthetic identities are strictly forbidden)."
             )
-        elif self.trusted_approvers is not None:
-            if approver_raw not in self.trusted_approvers:
-                errors.append(
-                    f"Untrusted approver: identity '{approver_raw}' is not in the configured "
-                    f"trusted human approver registry."
-                )
+        elif approver_raw not in self.trusted_approvers:
+            errors.append(
+                f"Unauthorized approver: Identity '{approver_raw}' is not an authorized human principal "
+                f"in the configured trusted approver allowlist."
+            )
 
-        # 8. Cross-workflow approval substitution check
-        if workflow_id:
-            bound_wf = self._approved_workflows.get(approval.approval_id)
-            if bound_wf and bound_wf != workflow_id:
-                errors.append(
-                    f"Cross-workflow approval substitution: approval '{approval.approval_id}' was registered "
-                    f"for workflow '{bound_wf}', cannot be reused for workflow '{workflow_id}'."
-                )
+        # 7b. Authentication Channel & Principal Verification (Reject Untrusted / Autonomous Callers)
+        auth_chan = getattr(approval, "auth_channel", "interactive_cli")
+        if auth_chan in {"autonomous_tool", "untrusted_caller", "synthetic"}:
+            errors.append(
+                f"Untrusted approval channel '{auth_chan}': Autonomous tool callers or untrusted processes "
+                "cannot manufacture human approval. Approval must originate from an authenticated human operator."
+            )
+
+        # 8. Cross-workflow approval substitution check (durable across restarts)
+        bound_wf = self._approved_workflows.get(approval.approval_id) or self.ledger.get_workflow_for_approval(approval.approval_id)
+        if bound_wf and workflow_id and bound_wf != workflow_id:
+            errors.append(
+                f"Cross-workflow approval substitution: approval '{approval.approval_id}' is bound to workflow '{bound_wf}', "
+                f"cannot be reused for workflow '{workflow_id}'."
+            )
 
         # 9. Defense-in-depth with M4 validator
         m4_check = self._m4_validator.validate_approval(
@@ -202,16 +226,55 @@ class OrchestrationApprovalManager:
         if not outcome.is_valid:
             raise ApprovalValidationError("; ".join(outcome.errors))
         self._approved_plans[plan.plan_id] = approval
-        if workflow_id:
-            self._approved_workflows[approval.approval_id] = workflow_id
+        wf_id = workflow_id or "unspecified_workflow"
+        self._approved_workflows[approval.approval_id] = wf_id
+
+        # Persist to durable ledger (survives process restart)
+        auth_chan = getattr(approval, "auth_channel", "interactive_cli")
+        self.ledger.record_approval(
+            approval_id=approval.approval_id,
+            workflow_id=wf_id,
+            repair_plan_id=plan.plan_id,
+            plan_digest=approval.plan_digest,
+            approved_strategy_id=approval.approved_strategy_id,
+            approved_file_paths=approval.approved_file_paths,
+            approval_timestamp=approval.approval_timestamp,
+            approval_expiry=approval.approval_expiry,
+            approver_reference=approval.approver_reference,
+            auth_channel=auth_chan,
+        )
 
     def is_approved(self, plan_id: str) -> bool:
         """Check if a plan has an active validated approval."""
-        return plan_id in self._approved_plans
+        if plan_id in self._approved_plans:
+            return True
+        persisted = self.ledger.get_approval_for_plan(plan_id)
+        if persisted:
+            appr_id = persisted["approval_id"]
+            if not self.ledger.is_revoked(appr_id) and not self.ledger.is_consumed(appr_id):
+                return True
+        return False
 
     def get_approval(self, plan_id: str) -> Optional[RepairApproval]:
         """Retrieve approved contract for a plan."""
-        return self._approved_plans.get(plan_id)
+        appr = self._approved_plans.get(plan_id)
+        if appr:
+            return appr
+        persisted = self.ledger.get_approval_for_plan(plan_id)
+        if persisted:
+            return RepairApproval(
+                approval_id=persisted["approval_id"],
+                repair_plan_id=persisted["repair_plan_id"],
+                plan_digest=persisted["plan_digest"],
+                approved_strategy_id=persisted["approved_strategy_id"],
+                approved_file_paths=persisted["approved_file_paths"],
+                approval_timestamp=persisted["approval_timestamp"],
+                approval_expiry=persisted["approval_expiry"],
+                approver_reference=persisted["approver_reference"],
+                approval_status=ApprovalStatus(persisted.get("status", "approved")),
+                auth_channel=persisted.get("auth_channel", "interactive_cli"),
+            )
+        return None
 
     def revoke_approval(self, plan_id: str, reason: str = "revoked by operator") -> None:
         """Revoke approval for a plan."""
@@ -219,3 +282,7 @@ class OrchestrationApprovalManager:
         if appr:
             self._approved_workflows.pop(appr.approval_id, None)
             self.ledger.record_revoked(appr.approval_id, reason)
+        else:
+            persisted = self.ledger.get_approval_for_plan(plan_id)
+            if persisted:
+                self.ledger.record_revoked(persisted["approval_id"], reason)

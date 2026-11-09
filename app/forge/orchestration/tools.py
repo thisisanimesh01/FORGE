@@ -31,6 +31,8 @@ from forge.orchestration.schemas import (
     InspectOrchestrationStatusOutput,
     InspectStageResultInput,
     InspectStageResultOutput,
+    RequestOrchestrationApprovalInput,
+    RequestOrchestrationApprovalOutput,
     StageStatus,
     SubmitOrchestrationApprovalInput,
     SubmitOrchestrationApprovalOutput,
@@ -236,10 +238,10 @@ class OrchestrationTools:
         )
         return out.model_dump_json()
 
-    def submit_orchestration_approval(self, args: Dict[str, Any]) -> str:
-        """Tool: submit_orchestration_approval."""
+    def request_orchestration_approval(self, args: Dict[str, Any]) -> str:
+        """Tool: request_orchestration_approval."""
         try:
-            inp = SubmitOrchestrationApprovalInput.model_validate(args)
+            inp = RequestOrchestrationApprovalInput.model_validate(args)
         except ValidationError as e:
             return json.dumps({"error": f"Validation error: {e}"})
 
@@ -247,28 +249,69 @@ class OrchestrationTools:
         if not orchestrator:
             return json.dumps({"error": f"Workflow '{inp.workflow_id}' not found."})
 
-        import uuid
-        from datetime import datetime, timezone, timedelta
-        now = datetime.now(timezone.utc)
-        approval = RepairApproval(
-            approval_id=f"appr_{uuid.uuid4().hex[:12]}",
-            repair_plan_id=inp.repair_plan_id,
-            plan_digest=inp.repair_plan_digest,
-            approved_strategy_id=inp.approved_strategy_id,
-            approved_file_paths=inp.approved_scope_file_paths,
-            approval_timestamp=now.isoformat(),
-            approval_expiry=(now + timedelta(days=1)).isoformat(),
-            approver_reference=inp.approver_identity,
-            approval_status=ApprovalStatus.APPROVED,
-        )
-        outcome = orchestrator.submit_approval(approval)
-        out = SubmitOrchestrationApprovalOutput(
+        plan = orchestrator.stage_outputs.repair_plan
+        from forge.repair_execution.approval import compute_plan_digest
+        digest = compute_plan_digest(plan) if plan else None
+
+        out = RequestOrchestrationApprovalOutput(
             workflow_id=orchestrator.workflow_id,
-            approval_id=approval.approval_id,
-            is_valid=outcome.is_valid,
             state=orchestrator.state,
-            message="Approval accepted and verified." if outcome.is_valid else "Approval rejected by safety boundary.",
-            errors=outcome.errors,
+            requires_human_approval=(orchestrator.state == WorkflowState.AWAITING_HUMAN_APPROVAL),
+            repair_plan_id=plan.plan_id if plan else None,
+            repair_plan_digest=digest,
+            selected_strategy_id=plan.selected_strategy_id if plan else None,
+            affected_files=plan.affected_files if plan else [],
+            instruction=(
+                f"Human authorization pending. Please instruct the human operator to run: "
+                f"'forge orchestrate approve {orchestrator.workflow_id} "
+                f"--approver <operator_identity> "
+                f"--plan-id {plan.plan_id} "
+                f"--plan-digest {digest} "
+                f"--strategy {plan.selected_strategy_id} "
+                f"--file <path>' in an interactive terminal to authorize repair."
+            ) if plan else "No active repair plan awaiting approval.",
+        )
+        return out.model_dump_json()
+
+    def submit_orchestration_approval(self, args: Dict[str, Any]) -> str:
+        """Tool: submit_orchestration_approval.
+
+        Enforces architectural separation: autonomous tool callers cannot manufacture
+        human approval or impersonate an authorized operator.
+        """
+        try:
+            inp = SubmitOrchestrationApprovalInput.model_validate(args)
+            wf_id = inp.workflow_id
+        except Exception:
+            wf_id = str(args.get("workflow_id", "unknown"))
+
+        orchestrator = self.get_orchestrator(wf_id)
+        if orchestrator:
+            from forge.orchestration.events import OrchestrationEventType
+            orchestrator.event_recorder.record_event(
+                workflow_id=wf_id,
+                event_type=OrchestrationEventType.STAGE_FAILED,
+                state=orchestrator.state,
+                action_description="Autonomous tool attempted to manufacture human approval (rejected).",
+                details={"caller": "tool_registry", "attempted_approver": args.get("approver_identity")},
+            )
+            orchestrator._transition(
+                WorkflowState.BLOCKED,
+                "Workflow blocked: Autonomous tool caller attempted to manufacture human approval.",
+                stage=WorkflowStage.APPROVAL,
+                details={"error": "Tool callers cannot manufacture human approval"},
+            )
+
+        out = SubmitOrchestrationApprovalOutput(
+            workflow_id=wf_id,
+            approval_id="none",
+            is_valid=False,
+            state=orchestrator.state if orchestrator else WorkflowState.BLOCKED,
+            message="Approval rejected: Autonomous tool caller cannot manufacture human approval or impersonate an authorized operator.",
+            errors=[
+                "Autonomous tool caller cannot manufacture human approval or impersonate an authorized operator. "
+                "Human authorization must be granted by an authenticated human operator via interactive CLI ('forge orchestrate approve')."
+            ],
         )
         return out.model_dump_json()
 
@@ -297,7 +340,7 @@ class OrchestrationTools:
     # -------------------------------------------------------------
 
     def get_tool_definitions(self) -> List[ToolDefinition]:
-        """Return ToolDefinition schemas for all 6 orchestration tools."""
+        """Return ToolDefinition schemas for all orchestration tools."""
         return [
             ToolDefinition(
                 name="create_orchestration_workflow",
@@ -320,8 +363,13 @@ class OrchestrationTools:
                 parameters=InspectStageResultInput.model_json_schema(),
             ),
             ToolDefinition(
+                name="request_orchestration_approval",
+                description="Request human operator authorization for an awaiting repair plan. Returns the pending approval requirements and instructions for the operator to authorize via interactive CLI. Autonomous tools cannot manufacture approval.",
+                parameters=RequestOrchestrationApprovalInput.model_json_schema(),
+            ),
+            ToolDefinition(
                 name="submit_orchestration_approval",
-                description="Submit and verify human authorization for autonomous repair execution against the canonical repair plan digest.",
+                description="Submission endpoint for human authorization. Note: Autonomous tool callers (LLMs/subagents) cannot self-authorize and will be rejected.",
                 parameters=SubmitOrchestrationApprovalInput.model_json_schema(),
             ),
             ToolDefinition(

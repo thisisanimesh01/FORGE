@@ -315,6 +315,30 @@ class InspectStageResultOutput(BaseModel):
     error_message: Optional[str] = None
 
 
+class RequestOrchestrationApprovalInput(BaseModel):
+    """Input parameters for requesting human operator authorization."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+    reason: Optional[str] = None
+
+
+class RequestOrchestrationApprovalOutput(BaseModel):
+    """Output providing details needed for human operator authorization."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+    state: WorkflowState
+    requires_human_approval: bool
+    repair_plan_id: Optional[str] = None
+    repair_plan_digest: Optional[str] = None
+    selected_strategy_id: Optional[str] = None
+    affected_files: List[str] = Field(default_factory=list)
+    instruction: str
+
+
 class SubmitOrchestrationApprovalInput(BaseModel):
     """Input parameters for submitting human authorization for repair execution."""
 

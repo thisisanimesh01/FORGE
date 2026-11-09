@@ -146,6 +146,8 @@ class RepairApproval(BaseModel):
     approval_expiry: str = Field(description="UTC ISO 8601 timestamp after which approval is invalid.")
     approver_reference: str = Field(description="Identity or reference of human approver (e.g. 'engineer@example.com').")
     approval_status: ApprovalStatus = Field(default=ApprovalStatus.APPROVED, description="Status of approval.")
+    auth_channel: str = Field(default="interactive_cli", description="Authentication channel through which human approval was granted.")
+    operator_principal: Optional[str] = Field(default=None, description="Independently verified local operating system principal.")
 
     @model_validator(mode="after")
     def validate_approval_fields(self) -> "RepairApproval":

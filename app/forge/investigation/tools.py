@@ -625,6 +625,9 @@ class ToolRegistry:
     def _handle_inspect_stage_result(self, args: Dict[str, Any]) -> str:
         return self._orchestration_tools.inspect_stage_result(args)
 
+    def _handle_request_orchestration_approval(self, args: Dict[str, Any]) -> str:
+        return self._orchestration_tools.request_orchestration_approval(args)
+
     def _handle_submit_orchestration_approval(self, args: Dict[str, Any]) -> str:
         return self._orchestration_tools.submit_orchestration_approval(args)
 

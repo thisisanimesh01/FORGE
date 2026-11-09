@@ -4520,17 +4520,75 @@ def orchestrate_approve(
     plan_digest: str = typer.Option(..., "--plan-digest", "-d", help="Canonical 64-char SHA-256 plan digest"),
     strategy_id: str = typer.Option(..., "--strategy", "-s", help="Approved strategy ID"),
     file_paths: List[str] = typer.Option(..., "--file", "-f", help="Approved file paths authorized for modification"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Confirm authorization without interactive prompt"),
+    non_interactive: bool = typer.Option(False, "--non-interactive", help="Explicit non-interactive mode flag"),
 ) -> None:
-    """Explicitly authorize an awaiting repair plan for execution."""
-    from datetime import datetime, timezone, timedelta
+    """Explicitly authorize an awaiting repair plan for execution with local operator authentication."""
+    import getpass
+    import os
+    import sys
     import uuid
+    from datetime import datetime, timezone, timedelta
     from forge.repair_execution.schemas import ApprovalStatus, RepairApproval
+    from forge.repair_execution.ledger import ApprovalLedger
+    from forge.config import get_settings
 
+    # 1. Prohibited synthetic / agentic names
     prohibited = {"unknown", "none", "auto", "llm", "ai", "model", "agent", "forge", "assistant", "subagent", "bot", "synthetic", "system"}
     approver_clean = approver.strip()
     if not approver_clean or approver_clean.lower() in prohibited or any(term in approver_clean.lower() for term in ("llm", "subagent", "synthetic", "auto")):
         typer.secho("Authorization error: Invalid human approver identity. AI/model/agent/auto identities are strictly forbidden.", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
+
+    # 2. Mandatory Trusted Approver Allowlist Verification (Fail-Closed)
+    raw_env_allowlist = os.environ.get("FORGE_TRUSTED_APPROVERS", "")
+    trusted_set = {x.strip() for x in raw_env_allowlist.split(",") if x.strip()}
+    if not trusted_set:
+        typer.secho(
+            "Authorization error: No trusted human approver allowlist configured in FORGE_TRUSTED_APPROVERS. "
+            "Production approval strictly requires an explicitly configured, non-empty trusted approver allowlist.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if approver_clean not in trusted_set:
+        typer.secho(
+            f"Authorization error: Identity '{approver_clean}' is not an authorized human principal in the configured trusted approver allowlist.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # 3. Local Operator Identity Resolution & Interactive Confirmation Flow
+    operator_user = getpass.getuser()
+    is_interactive = sys.stdin.isatty() and not non_interactive
+
+    if not is_interactive and not yes:
+        typer.secho(
+            "Authorization error: Non-interactive approval attempt rejected. "
+            "Human operator approval requires an interactive terminal session (TTY) or explicit operator confirmation flag (--yes).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if is_interactive and not yes:
+        typer.echo(f"\n[APPROVAL CONFIRMATION REQUIRED]")
+        typer.echo(f"  Workflow ID: {workflow_id}")
+        typer.echo(f"  Plan ID:     {plan_id}")
+        typer.echo(f"  Plan Digest: {plan_digest}")
+        typer.echo(f"  Strategy ID: {strategy_id}")
+        typer.echo(f"  Files:       {', '.join(file_paths)}")
+        typer.echo(f"  Approver:    {approver_clean}")
+        typer.echo(f"  Local User:  {operator_user}")
+        confirm = typer.confirm(
+            f"Do you, as local operator '{operator_user}', authorize autonomous repair execution?",
+            default=False,
+        )
+        if not confirm:
+            typer.secho("Authorization aborted by operator.", fg=typer.colors.YELLOW)
+            raise typer.Exit(code=1)
 
     now = datetime.now(timezone.utc)
     approval = RepairApproval(
@@ -4543,9 +4601,29 @@ def orchestrate_approve(
         approval_expiry=(now + timedelta(days=1)).isoformat(),
         approver_reference=approver_clean,
         approval_status=ApprovalStatus.APPROVED,
+        auth_channel="interactive_cli",
+        operator_principal=operator_user,
     )
+
+    # 4. Durable persistence to ApprovalLedger SQLite
+    ledger_env = os.environ.get("FORGE_LEDGER_DB_PATH")
+    ledger_db = Path(ledger_env).resolve() if ledger_env else get_settings().db_path
+    ledger = ApprovalLedger(db_path=ledger_db)
+    ledger.record_approval(
+        approval_id=approval.approval_id,
+        workflow_id=workflow_id,
+        repair_plan_id=plan_id,
+        plan_digest=plan_digest,
+        approved_strategy_id=strategy_id,
+        approved_file_paths=file_paths,
+        approval_timestamp=approval.approval_timestamp,
+        approval_expiry=approval.approval_expiry,
+        approver_reference=approver_clean,
+        auth_channel="interactive_cli",
+    )
+
     typer.secho(f"Generated human approval contract '{approval.approval_id}' for workflow '{workflow_id}'.", fg=typer.colors.GREEN)
-    typer.echo(f"  Approver:    {approval.approver_reference}")
+    typer.echo(f"  Approver:    {approval.approver_reference} (Operator: {operator_user})")
     typer.echo(f"  Plan ID:     {approval.repair_plan_id}")
     typer.echo(f"  Plan Digest: {approval.plan_digest}")
     typer.echo(f"  Strategy:    {approval.approved_strategy_id}")
