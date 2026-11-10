@@ -78,7 +78,7 @@ from forge.orchestration.idempotency import (
     UncertainExecutionError,
     compute_idempotency_key,
 )
-from forge.orchestration.persistence import OrchestrationStateStore
+from forge.orchestration.persistence import CorruptedStateError, OrchestrationStateStore
 from forge.orchestration.retry import FailureClassifier, FailureCategory, RetryPolicy, RetryDecision
 from forge.orchestration.state import (
     IllegalStateTransitionError,
@@ -655,10 +655,15 @@ class EngineeringOrchestrator:
             if self.idempotency_ledger:
                 existing = self.idempotency_ledger.get(idemp_key)
                 if existing and existing.status == OperationStatus.COMPLETED and existing.result_payload:
-                    cached_result = RepairExecutionResult.model_validate(existing.result_payload["execution_result"])
-                    if existing.result_payload.get("repair_workspace"):
-                        cached_ws = RepairWorkspace.model_validate(existing.result_payload["repair_workspace"])
-                        self.stage_outputs.repair_workspace = cached_ws
+                    try:
+                        cached_result = RepairExecutionResult.model_validate(existing.result_payload["execution_result"])
+                        if existing.result_payload.get("repair_workspace"):
+                            cached_ws = RepairWorkspace.model_validate(existing.result_payload["repair_workspace"])
+                            self.stage_outputs.repair_workspace = cached_ws
+                    except Exception as val_err:
+                        raise CorruptedStateError(
+                            f"Corrupted idempotency cached payload for key '{idemp_key}': {val_err}"
+                        ) from val_err
                     self.stage_outputs.execution_result = cached_result
                     self._transition(
                         WorkflowState.REPAIR_EXECUTING,

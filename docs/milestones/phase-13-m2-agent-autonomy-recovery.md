@@ -16,7 +16,7 @@ Phase 13 Milestone 2 delivers the **Agent Autonomy, Coordination & Recovery Engi
 Key capabilities introduced and verified:
 1. **Durable State Persistence (`forge.orchestration.persistence`)**: Full workflow state, cryptographic audit trail, per-stage execution records, stage outputs, and recovery checkpoints are durably stored in SQLite under WAL mode with foreign key constraints and schema migration tracking (`orchestration_schema_migrations`).
 2. **Crash & Interruption Recovery (`forge.orchestration.recovery`)**: Deterministic reconstitution of in-flight workflows from SQLite checkpoints. Validates cryptographic SHA-256 event chains (`prev_event_hash -> event_hash`), enforces repository root path binding, and guarantees fail-closed blocking if the audit trail is tampered with or incomplete.
-3. **Fail-Closed Mutation Reconciliation**: Workflows interrupted during controlled repair execution (`REPAIR_EXECUTING`) are automatically blocked with `reconciliation_required = True`. Blind re-execution is forbidden; an authorized operator must inspect the isolated workspace and resolve the mutation via `forge orchestrate reconcile <wf_id> --resolution <confirm|discard|revert>`.
+3. **Fail-Closed Mutation Reconciliation & Authenticated Operators**: Workflows interrupted during controlled repair execution (`REPAIR_EXECUTING`) are automatically blocked with `reconciliation_required = True`. Blind re-execution is strictly forbidden. An authorized human operator (with synthetic/AI identities rejected and `trusted_approvers` enforced) must inspect the isolated workspace and resolve the mutation via `forge orchestrate reconcile <wf_id> --resolution <confirm|discard|revert>`. `confirm` requires concrete completed execution evidence and transitions to `REPAIR_COMPLETED` without re-executing. `discard` / `revert` resets state to `AWAITING_HUMAN_APPROVAL` and permanently preserves approval consumption in `ApprovalLedger` so consumed authorizations cannot be reused.
 4. **Preserved Human Authorization Gate**: Interrupted workflows in `AWAITING_HUMAN_APPROVAL` remain safely awaiting human operator review across restarts. FORGE strictly prohibits synthetic or automatic self-approval.
 5. **Bounded Deterministic Retry Engine (`forge.orchestration.retry`)**: Implements a 9-category deterministic failure classifier (`FailureClassifier`) and bounded retry policy (`RetryPolicy`). Non-retryable failures (authorization errors, policy breaches, integrity violations, and mutating operations) fail closed immediately. Retryable transient failures (infrastructure blips, timeouts) back off exponentially with hard caps (max 5 attempts, max 30s delay).
 6. **Task DAG Coordination (`forge.orchestration.coordination`)**: Multi-task directed acyclic graph coordination (`TaskCoordinator`) featuring Kahn's algorithm cycle detection (`DependencyCycleError`), priority-based scheduling, automatic failure propagation (`BLOCKED`), and cascading cancellation.
@@ -66,7 +66,7 @@ Measured via `forge.benchmarks.benchmark_phase13_m2_autonomy`:
 
 ## 4. Verification & Scenario Matrix
 
-The test suite in `tests/unit/test_phase13_m2_autonomy_recovery.py` contains 37 tests covering:
+The test suite in `tests/unit/test_phase13_m2_autonomy_recovery.py` contains 53 tests covering:
 - **Unit Invariants**: SQLite table creations, foreign keys, migration versions, deterministic failure classification, retry limits, canonical idempotency hashing, and Kahn's algorithm cycle detection.
 - **Scenario 1**: Clean end-to-end execution with full SQLite persistence and checkpointing.
 - **Scenario 2**: Crash after diagnosis completed $\rightarrow$ resumes at root cause analysis.
@@ -74,12 +74,23 @@ The test suite in `tests/unit/test_phase13_m2_autonomy_recovery.py` contains 37 
 - **Scenario 4**: Workflow in `AWAITING_HUMAN_APPROVAL` preserves approval requirement across crash/recovery.
 - **Scenario 5**: Crash after approval preserves `APPROVED` state.
 - **Scenario 6**: Crash during repair execution (`REPAIR_EXECUTING`) blocks and requires operator reconciliation.
-- **Scenario 7**: Operator reconciliation (`confirm`) unblocks workflow to `APPROVED`.
-- **Scenario 8**: Operator reconciliation (`discard`) unblocks workflow to `AWAITING_HUMAN_APPROVAL`.
+- **Scenario 7**: Operator reconciliation (`confirm`) verifies execution evidence and unblocks workflow to `REPAIR_COMPLETED`.
+- **Scenario 8**: Operator reconciliation (`discard`) unblocks workflow to `AWAITING_HUMAN_APPROVAL`, preserving approval consumption.
 - **Scenario 9**: Duplicate repair execution returns cached result via `IdempotencyLedger` without re-executing.
 - **Scenario 10**: Transient failure during verification retried and succeeds within retry bounds.
 - **Scenario 11**: Authorization failure fails closed immediately with zero retries.
 - **Scenario 12**: Multi-task DAG topological execution according to dependencies and priorities.
 - **Scenario 13**: Task DAG failure propagation to downstream dependent tasks.
 - **Scenario 14**: Tampered event chain in SQLite blocks recovery with `AuditTrailTamperedError`.
+- **Adversarial Security Audit (16 Tests)**:
+  - Unverified `confirm` resolution rejected fail-closed with `RecoveryValidationError`.
+  - Prohibited synthetic/AI identities (`auto`, `llm`, `ai`, `bot`, `synthetic`, `none`, `unknown`) rejected.
+  - Unauthorized operators outside `trusted_approvers` rejected fail-closed.
+  - Reconciliation rejected on unblocked workflows.
+  - Automated discard bypass flags (`allow_discard_unconfirmed_mutation`) rejected.
+  - Crash-injection across 6 lifecycle points (before patch application, during patch application, after patch application before persistence, after persistence before transition, during rollback, during reconciliation).
+  - Approval consumption permanence: once consumed, approvals can never be reused; `discard` preserves consumed state requiring fresh human authorization.
+  - Idempotency concurrency protection: concurrent `register_start` calls handled safely with `BEGIN IMMEDIATE` transactions.
+  - Idempotency corruption resilience: malformed cached payloads raise `CorruptedStateError` fail-closed.
+  - Process restart resilience: reconciliation requirements and blocked states durably preserved.
 - **ToolRegistry & CLI**: Verified tool schemas and CLI command invocations (`inspect`, `recover`, `tasks`, `reconcile`).

@@ -22,6 +22,7 @@ from forge.orchestration.events import (
     OrchestrationEventRecorder,
     OrchestrationEventType,
 )
+from forge.orchestration.idempotency import IdempotencyLedger, OperationStatus
 from forge.orchestration.orchestrator import EngineeringOrchestrator
 from forge.orchestration.persistence import (
     CorruptedStateError,
@@ -87,7 +88,7 @@ class WorkflowRecoveryEngine:
         idempotency_ledger: Optional[Any] = None,
     ) -> None:
         self.store = store or state_store or OrchestrationStateStore()
-        self.idempotency_ledger = idempotency_ledger
+        self.idempotency_ledger = idempotency_ledger or IdempotencyLedger(db_path=self.store.db_path)
 
     def inspect_recovery(
         self,
@@ -124,7 +125,7 @@ class WorkflowRecoveryEngine:
         last_event = events[-1]
 
         # 3. Interrupted Repair Execution: Requires Mandatory Mutation Reconciliation
-        if persisted_state == WorkflowState.REPAIR_EXECUTING:
+        if persisted_state == WorkflowState.REPAIR_EXECUTING or wf_data.get("reconciliation_required") == 1:
             return RecoveryDecision(
                 workflow_id=workflow_id,
                 can_resume=False,
@@ -288,30 +289,25 @@ class WorkflowRecoveryEngine:
         # Handle Reconciliation Block if interrupted during repair execution
         if decision.reconciliation_required:
             if allow_discard_unconfirmed_mutation:
-                self.reconcile_mutation(
-                    workflow_id=workflow_id,
-                    resolution="discard",
-                    reconciled_by="automated_recovery_policy",
-                    notes="Discarding unconfirmed mutation as requested.",
+                raise RecoveryValidationError(
+                    "Automatic discard of unconfirmed mutations is forbidden. "
+                    "Interrupted repairs require explicit, authenticated human operator reconciliation via 'forge orchestrate reconcile'."
                 )
-                decision = self.inspect_recovery(workflow_id, expected_repo_path)
-                orchestrator.state = decision.recovered_state
-            else:
-                orchestrator.state = WorkflowState.BLOCKED
-                event_recorder.record_event(
-                    workflow_id=workflow_id,
-                    event_type=OrchestrationEventType.WORKFLOW_BLOCKED,
-                    state=WorkflowState.BLOCKED,
-                    action_description="Workflow recovery blocked: repair execution interrupted. Reconciliation required.",
-                    stage=WorkflowStage.EXECUTION,
-                    details={"reason": decision.reason},
-                )
-                self.store.save_workflow(
-                    context=ctx,
-                    state=WorkflowState.BLOCKED,
-                    current_stage=WorkflowStage.EXECUTION,
-                    reconciliation_required=True,
-                )
+            orchestrator.state = WorkflowState.BLOCKED
+            event_recorder.record_event(
+                workflow_id=workflow_id,
+                event_type=OrchestrationEventType.WORKFLOW_BLOCKED,
+                state=WorkflowState.BLOCKED,
+                action_description="Workflow recovery blocked: repair execution interrupted. Reconciliation required.",
+                stage=WorkflowStage.EXECUTION,
+                details={"reason": decision.reason},
+            )
+            self.store.save_workflow(
+                context=ctx,
+                state=WorkflowState.BLOCKED,
+                current_stage=WorkflowStage.EXECUTION,
+                reconciliation_required=True,
+            )
         else:
             event_recorder.record_event(
                 workflow_id=workflow_id,
@@ -339,28 +335,105 @@ class WorkflowRecoveryEngine:
         if not wf_data:
             raise RecoveryValidationError(f"Workflow '{workflow_id}' not found.")
 
+        # 1. Reconciliation Necessity Check
+        status_before = wf_data["state"]
+        is_reconcil_needed = (
+            wf_data.get("reconciliation_required") == 1
+            or status_before in (WorkflowState.REPAIR_EXECUTING.value, WorkflowState.BLOCKED.value)
+        )
+        if not is_reconcil_needed:
+            raise RecoveryValidationError(
+                f"Workflow '{workflow_id}' does not require mutation reconciliation (state is '{status_before}')."
+            )
+
+        # 2. Operator Identity & Authorization Check
+        prohibited = {"auto", "llm", "ai", "bot", "synthetic", "none", "unknown"}
+        norm_operator = (reconciled_by or "").strip().lower()
+        if not norm_operator or norm_operator in prohibited:
+            raise RecoveryValidationError(
+                f"Reconciliation rejected: operator identity '{reconciled_by}' is prohibited or invalid. "
+                "Reconciliation requires an authenticated, trusted human operator."
+            )
+
+        trusted_approvers = wf_data.get("trusted_approvers")
+        if trusted_approvers:
+            trusted_set = set(trusted_approvers)
+            if reconciled_by not in trusted_set:
+                raise RecoveryValidationError(
+                    f"Reconciliation rejected: operator '{reconciled_by}' is not in the trusted approvers list: {sorted(trusted_set)}"
+                )
+
+        # 3. Resolution Validation
+        norm_res = resolution.strip().lower()
         valid_resolutions = {"discard", "confirm", "revert"}
-        if resolution.lower() not in valid_resolutions:
+        if norm_res not in valid_resolutions:
             raise RecoveryValidationError(
                 f"Invalid reconciliation resolution '{resolution}'. Must be one of {valid_resolutions}."
             )
 
-        status_before = wf_data["state"]
-        # If discarded or reverted, workflow can return to AWAITING_HUMAN_APPROVAL or BLOCKED
-        status_after = WorkflowState.AWAITING_HUMAN_APPROVAL.value if resolution.lower() in ("discard", "revert") else WorkflowState.APPROVED.value
+        # 4. Semantics of 'confirm' vs 'discard' / 'revert'
+        if norm_res == "confirm":
+            # Confirm must NEVER blindly execute a previous repair.
+            # Inspect execution records, stage outputs, and idempotency records for evidence.
+            stage_records = self.store.get_stage_records(workflow_id)
+            exec_record = stage_records.get(WorkflowStage.EXECUTION.value)
+            raw_outputs = self.store.get_stage_outputs_raw(workflow_id)
+            exec_output = raw_outputs.get(WorkflowStage.EXECUTION.value, {})
+            idemp_records = self.idempotency_ledger.get_records_for_workflow(workflow_id) if hasattr(self.idempotency_ledger, "get_records_for_workflow") else []
+            exec_idemp = [r for r in idemp_records if r.stage == WorkflowStage.EXECUTION]
+
+            has_completed_record = exec_record is not None and exec_record.status == StageStatus.COMPLETED
+            has_applied_output = isinstance(exec_output, dict) and exec_output.get("execution_status") == "applied"
+            has_completed_idemp = any(r.status == OperationStatus.COMPLETED for r in exec_idemp)
+
+            if not (has_completed_record or has_applied_output or has_completed_idemp):
+                raise RecoveryValidationError(
+                    "Cannot confirm mutation: no evidence of completed repair execution. "
+                    "A partially applied mutation must not be classified as completed without evidence. "
+                    "Use 'discard' or 'revert' to reset workspace and request a new repair plan."
+                )
+
+            # Evidence of completion is verified
+            status_after = WorkflowState.REPAIR_COMPLETED.value
+            for r in exec_idemp:
+                if r.status != OperationStatus.COMPLETED and has_applied_output:
+                    self.idempotency_ledger.mark_completed(
+                        idempotency_key=r.idempotency_key,
+                        result_payload=exec_output,
+                    )
+        else:
+            # discard or revert:
+            # Interrupted mutation is discarded. Approval consumption is preserved (consumed approval is never reused).
+            # Workflow returns to AWAITING_HUMAN_APPROVAL. A new repair plan will require fresh human approval.
+            status_after = WorkflowState.AWAITING_HUMAN_APPROVAL.value
+            if hasattr(self.idempotency_ledger, "mark_failed_for_workflow"):
+                self.idempotency_ledger.mark_failed_for_workflow(
+                    workflow_id=workflow_id,
+                    stage=WorkflowStage.EXECUTION,
+                    error_message=f"Mutation {norm_res}ed by operator reconciliation ({reconciled_by}).",
+                )
+            # Remove consumed approval from stage records so it cannot be re-applied
+            conn = self.store._get_connection()
+            try:
+                conn.execute(
+                    "DELETE FROM orchestration_stage_records WHERE workflow_id = ? AND stage = ?;",
+                    (workflow_id, WorkflowStage.APPROVAL.value),
+                )
+            finally:
+                conn.close()
 
         reconcile_id = f"rec_{workflow_id[-6:]}_{datetime.now(timezone.utc).strftime('%H%M%S')}"
         self.store.record_reconciliation(
             reconciliation_id=reconcile_id,
             workflow_id=workflow_id,
-            resolution=resolution.lower(),
+            resolution=norm_res,
             reconciled_by=reconciled_by,
             status_before=status_before,
             status_after=status_after,
             notes=notes,
         )
 
-        # Update workflow record
+        # Update workflow audit record
         events = self.store.get_events(workflow_id)
         if events:
             ev_rec = OrchestrationEventRecorder()
@@ -370,8 +443,8 @@ class WorkflowRecoveryEngine:
                 workflow_id=workflow_id,
                 event_type=OrchestrationEventType.STAGE_COMPLETED,
                 state=WorkflowState(status_after),
-                action_description=f"Operator '{reconciled_by}' reconciled interrupted mutation: {resolution}.",
-                details={"resolution": resolution, "notes": notes},
+                action_description=f"Operator '{reconciled_by}' reconciled interrupted mutation: {norm_res}.",
+                details={"resolution": norm_res, "notes": notes},
             )
             self.store.save_event(ev)
 

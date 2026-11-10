@@ -57,10 +57,17 @@ app/forge/orchestration/
 - **Human Gate Invariance**:
   - `AWAITING_HUMAN_APPROVAL` workflows remain awaiting human approval. FORGE strictly refuses to auto-approve on recovery.
   - `APPROVED` workflows remain approved and ready for execution.
-- **Controlled Repair Mutation Safeguard**:
+- **Controlled Repair Mutation Safeguard & Hardened Reconciliation**:
   - A workflow interrupted during `REPAIR_EXECUTING` has an uncertain workspace state.
   - The engine sets `reconciliation_required = True` and transitions the workflow to `BLOCKED`.
-  - Automated progression is prohibited until an operator inspects the workspace and issues `forge orchestrate reconcile <wf_id> --resolution <confirm|discard|revert>`.
+  - Automated progression is prohibited until an authorized human operator inspects the workspace and issues `forge orchestrate reconcile <wf_id> --resolution <confirm|discard|revert>`.
+  - **Resolution Semantics**:
+    - `confirm`: Strictly requires concrete evidence of completed execution prior to interruption (e.g. stage record completion, `execution_status == "applied"`, or completed idempotency record). It **never** re-executes mutations. Transitions directly to `REPAIR_COMPLETED`. Fails closed (`RecoveryValidationError`) if completion evidence is missing.
+    - `discard` / `revert`: Marks in-flight/uncertain idempotency records as `FAILED`, cleans up unexecuted stage records, resets state to `AWAITING_HUMAN_APPROVAL`, and permanently preserves approval consumption in `ApprovalLedger` so the consumed approval can never be re-used. A new repair plan requires fresh human authorization.
+  - **Operator Authentication & Allowlist Invariants**:
+    - `reconciled_by` must identify an authentic human operator; synthetic/AI identities (`auto`, `llm`, `ai`, `bot`, `synthetic`, `none`, `unknown`) are rejected fail-closed.
+    - If `trusted_approvers` is configured, `reconciled_by` must be an explicit member of the allowlist.
+    - Automated discard bypass flags (`allow_discard_unconfirmed_mutation`) are strictly rejected.
 
 ### 3.3 Bounded Deterministic Retry Engine (`retry.py`)
 
@@ -91,9 +98,9 @@ app/forge/orchestration/
 ### 3.5 Idempotency Ledger (`idempotency.py`)
 
 - **Canonical Key Generation**: `compute_idempotency_key` constructs SHA-256 hex digests over workflow ID, stage name, input digests, and approval references.
-- **At-Most-Once Enforcement**:
-  - `register_start`: Registers operation in state `STARTED`. Fails if already `STARTED` or `UNCERTAIN`.
-  - `mark_completed`: Caches validated execution outcome and result payload. Subsequent calls return cached results without re-executing.
+- **At-Most-Once Enforcement & Concurrency Hardening**:
+  - `register_start`: Registers operation in state `STARTED` inside a `BEGIN IMMEDIATE;` SQLite transaction with unique constraint handling to prevent concurrent execution races. Fails if already `STARTED` or `UNCERTAIN`.
+  - `mark_completed`: Caches validated execution outcome and result payload. Subsequent calls return cached results without re-executing. Corrupted cached payloads fail closed with `CorruptedStateError`.
   - `mark_uncertain`: Interrupted operations are marked `UNCERTAIN`, requiring operator reconciliation.
 
 ---
@@ -104,9 +111,28 @@ app/forge/orchestration/
 - `forge orchestrate inspect <wf_id>`: Inspect workflow recovery decision, checkpoint, event count, and reconciliation status.
 - `forge orchestrate recover <wf_id>`: Resume an interrupted workflow from its last verified checkpoint.
 - `forge orchestrate tasks <wf_id>`: Inspect coordinated task DAG, priorities, readiness, and dependencies.
-- `forge orchestrate reconcile <wf_id> --resolution <confirm|discard|revert> [--notes <text>]`: Human operator unblocking command.
+- `forge orchestrate reconcile <wf_id> --resolution <confirm|discard|revert> [--notes <text>]`: Human operator unblocking command enforcing authentic operator identity.
 
 ### 4.2 ToolRegistry Tools
 - `inspect_workflow_recovery`: Read-only inspection of recovery state.
 - `recover_orchestration_workflow`: Reconstruct and recover an interrupted orchestrator instance.
 - `inspect_workflow_tasks`: Read-only query of task DAG status and ready task lists.
+
+---
+
+## 5. Verification & Security Audit Suite
+
+The verification suite in `tests/unit/test_phase13_m2_autonomy_recovery.py` contains 53 dedicated tests (including 16 adversarial security audit tests):
+1. **Crash-Injection at 6 Lifecycle Points**:
+   - Point 1: Crash before patch application $\rightarrow$ cleanly unapplied, reconciliation required.
+   - Point 2: Crash during patch application $\rightarrow$ unconfirmed mutation fails closed, unverified confirm rejected.
+   - Point 3: Crash after patch application before state persistence $\rightarrow$ unblocking requires verified evidence or discard.
+   - Point 4: Crash after persistence before transition $\rightarrow$ recovery validates completed stage record.
+   - Point 5: Crash during rollback $\rightarrow$ fails closed with reconciliation required.
+   - Point 6: Crash during operator reconciliation $\rightarrow$ preserves reconciliation requirement across process restarts.
+2. **Approval Consumption Persistence Across Restarts & Discard**:
+   - Consumed approvals cannot be re-applied after crash recovery.
+   - Operator `discard` preserves consumed state in `ApprovalLedger`, requiring fresh human authorization for new plans.
+3. **Idempotency Concurrency & Corruption Defense**:
+   - Concurrent `register_start` invocations fail closed via `BEGIN IMMEDIATE` transactions.
+   - Corrupted or malformed cached payloads raise `CorruptedStateError` fail-closed.

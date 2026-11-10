@@ -12,6 +12,7 @@ Verifies:
 - All 14 M2 Integration Scenarios.
 """
 
+import concurrent.futures
 from datetime import datetime, timezone, timedelta
 import json
 from pathlib import Path
@@ -507,7 +508,7 @@ def test_recovery_reconciliation_unblocks_workflow(temp_db: Path, test_context: 
     engine.reconcile_mutation(
         workflow_id=test_context.workflow_id,
         resolution="discard",
-        reconciled_by="security_admin",
+        reconciled_by="alice",
         notes="Resetting workspace after interrupted process",
     )
 
@@ -710,19 +711,30 @@ def test_scenario_6_crash_during_repair_execution_requires_reconciliation(temp_d
 
 
 def test_scenario_7_operator_reconcile_confirm(temp_db: Path, test_context: WorkflowContext):
-    """Scenario 7: Operator reconciliation with confirm moves state to APPROVED so workflow can proceed."""
+    """Scenario 7: Operator reconciliation with confirm verifies evidence and moves state to REPAIR_COMPLETED."""
     store = OrchestrationStateStore(db_path=temp_db)
     store.save_workflow(context=test_context, state=WorkflowState.BLOCKED, reconciliation_required=True)
+    # Provide completed execution evidence so confirm can succeed
+    store.save_stage_record(
+        workflow_id=test_context.workflow_id,
+        stage=WorkflowStage.EXECUTION,
+        record=StageExecutionRecord(
+            stage=WorkflowStage.EXECUTION,
+            status=StageStatus.COMPLETED,
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+        ),
+    )
 
     recovery_engine = WorkflowRecoveryEngine(state_store=store)
     recovery_engine.reconcile_mutation(
         workflow_id=test_context.workflow_id,
         resolution="confirm",
-        reconciled_by="security_admin",
+        reconciled_by="alice",
     )
 
     wf = store.get_workflow(test_context.workflow_id)
-    assert wf["state"] == WorkflowState.APPROVED.value
+    assert wf["state"] == WorkflowState.REPAIR_COMPLETED.value
     assert wf["reconciliation_required"] == 0
 
 
@@ -735,7 +747,7 @@ def test_scenario_8_operator_reconcile_discard(temp_db: Path, test_context: Work
     recovery_engine.reconcile_mutation(
         workflow_id=test_context.workflow_id,
         resolution="discard",
-        reconciled_by="security_admin",
+        reconciled_by="alice",
     )
 
     wf = store.get_workflow(test_context.workflow_id)
@@ -1003,6 +1015,489 @@ def test_cli_orchestrate_reconcile_command(tmp_path: Path, monkeypatch: pytest.M
     )
     store.save_workflow(context=ctx, state=WorkflowState.BLOCKED, reconciliation_required=True)
 
-    result = runner.invoke(app, ["orchestrate", "reconcile", "wf_rec_cli", "--resolution", "confirm"])
+    # 1. Unverified confirm is rejected
+    result_bad = runner.invoke(app, ["orchestrate", "reconcile", "wf_rec_cli", "--resolution", "confirm"])
+    assert result_bad.exit_code == 1
+    assert "no evidence of completed repair" in result_bad.output.lower()
+
+    # 2. Discard unblocks workflow
+    result = runner.invoke(app, ["orchestrate", "reconcile", "wf_rec_cli", "--resolution", "discard"])
     assert result.exit_code == 0
     assert "successfully reconciled" in result.output
+
+
+# ===========================================================================
+# 7. M2 Adversarial Security & Invariant Audit Tests
+# ===========================================================================
+
+def test_adversarial_reconciliation_unverified_confirm_rejected(temp_db: Path, test_context: WorkflowContext):
+    """Confirm must NEVER blindly execute or complete without verified evidence."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    store.save_workflow(context=test_context, state=WorkflowState.BLOCKED, reconciliation_required=True)
+    engine = WorkflowRecoveryEngine(state_store=store)
+
+    with pytest.raises(RecoveryValidationError, match="no evidence of completed repair"):
+        engine.reconcile_mutation(
+            workflow_id=test_context.workflow_id,
+            resolution="confirm",
+            reconciled_by="alice",
+        )
+
+    # Workflow must remain blocked with reconciliation_required=1
+    wf = store.get_workflow(test_context.workflow_id)
+    assert wf["state"] == WorkflowState.BLOCKED.value
+    assert wf["reconciliation_required"] == 1
+
+
+def test_adversarial_reconciliation_prohibited_identities_rejected(temp_db: Path, test_context: WorkflowContext):
+    """Synthetic, AI, empty, or bot identities are rejected for reconciliation."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    store.save_workflow(context=test_context, state=WorkflowState.BLOCKED, reconciliation_required=True)
+    engine = WorkflowRecoveryEngine(state_store=store)
+
+    for bad_id in ("auto", "llm", "ai", "bot", "synthetic", "none", "unknown", "", "   "):
+        with pytest.raises(RecoveryValidationError, match="prohibited or invalid"):
+            engine.reconcile_mutation(
+                workflow_id=test_context.workflow_id,
+                resolution="discard",
+                reconciled_by=bad_id,
+            )
+
+
+def test_adversarial_reconciliation_unauthorized_operator_rejected(temp_db: Path, test_context: WorkflowContext):
+    """Operator not present in workflow trusted_approvers allowlist is rejected."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    store.save_workflow(context=test_context, state=WorkflowState.BLOCKED, reconciliation_required=True)
+    engine = WorkflowRecoveryEngine(state_store=store)
+
+    with pytest.raises(RecoveryValidationError, match="not in the trusted approvers list"):
+        engine.reconcile_mutation(
+            workflow_id=test_context.workflow_id,
+            resolution="discard",
+            reconciled_by="eve_untrusted",
+        )
+
+
+def test_adversarial_reconciliation_on_unblocked_workflow_rejected(temp_db: Path, test_context: WorkflowContext):
+    """Reconciliation cannot be invoked on a workflow that is not blocked for reconciliation."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    store.save_workflow(context=test_context, state=WorkflowState.PLAN_READY, reconciliation_required=False)
+    engine = WorkflowRecoveryEngine(state_store=store)
+
+    with pytest.raises(RecoveryValidationError, match="does not require mutation reconciliation"):
+        engine.reconcile_mutation(
+            workflow_id=test_context.workflow_id,
+            resolution="discard",
+            reconciled_by="alice",
+        )
+
+
+def _setup_events(store: OrchestrationStateStore, workflow_id: str):
+    rec = OrchestrationEventRecorder()
+    ev = rec.record_event(
+        workflow_id=workflow_id,
+        event_type=OrchestrationEventType.WORKFLOW_CREATED,
+        state=WorkflowState.CREATED,
+        action_description="Workflow initialized",
+    )
+    store.save_event(ev)
+
+
+def test_adversarial_automatic_discard_bypass_rejected(temp_db: Path, test_context: WorkflowContext):
+    """recover_workflow must reject allow_discard_unconfirmed_mutation to enforce human reconciliation."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    store.save_workflow(context=test_context, state=WorkflowState.REPAIR_EXECUTING, reconciliation_required=True)
+    _setup_events(store, test_context.workflow_id)
+    engine = WorkflowRecoveryEngine(state_store=store)
+
+    with pytest.raises(RecoveryValidationError, match="Automatic discard of unconfirmed mutations is forbidden"):
+        engine.recover_workflow(
+            workflow_id=test_context.workflow_id,
+            allow_discard_unconfirmed_mutation=True,
+        )
+
+
+def test_crash_lifecycle_point_1_before_patch_application(temp_db: Path, test_context: WorkflowContext):
+    """Crash Point 1: Crash in APPROVED state before repair execution starts."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    approval_mgr = OrchestrationApprovalManager(trusted_approvers={"alice"})
+    orch = EngineeringOrchestrator(
+        context=test_context,
+        state_store=store,
+        approval_manager=approval_mgr,
+        diagnosis_adapter=FakeDiagnosisAdapter(),
+        root_cause_adapter=FakeRootCauseAdapter(),
+        planning_adapter=FakePlanningAdapter(),
+    )
+    orch.run_until_approval_or_completion()
+    plan = orch.stage_outputs.repair_plan
+    appr = RepairApproval(
+        approval_id="appr_pt_1",
+        repair_plan_id=plan.plan_id,
+        plan_digest=compute_plan_digest(plan),
+        approver_reference="alice",
+        approved_strategy_id=plan.selected_strategy_id,
+        approved_file_paths=plan.affected_files,
+        approval_timestamp=datetime.now(timezone.utc).isoformat(),
+        approval_expiry=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        approval_status=ApprovalStatus.APPROVED,
+    )
+    orch.submit_approval(appr)
+    assert orch.state == WorkflowState.APPROVED
+
+    # Simulate crash before run_repair()
+    engine = WorkflowRecoveryEngine(state_store=store)
+    decision = engine.inspect_recovery(test_context.workflow_id)
+    assert decision.can_resume
+    assert decision.recovered_state == WorkflowState.APPROVED
+    assert decision.next_stage_to_execute == WorkflowStage.EXECUTION
+    assert not decision.reconciliation_required
+    assert not approval_mgr.ledger.is_consumed(appr.approval_id)
+
+
+def test_crash_lifecycle_point_2_during_patch_application(temp_db: Path, test_context: WorkflowContext):
+    """Crash Point 2: Process killed while in REPAIR_EXECUTING midway through patch application."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    orch = EngineeringOrchestrator(
+        context=test_context,
+        state_store=store,
+        diagnosis_adapter=FakeDiagnosisAdapter(),
+        root_cause_adapter=FakeRootCauseAdapter(),
+        planning_adapter=FakePlanningAdapter(),
+    )
+    orch.run_until_approval_or_completion()
+    orch._transition(WorkflowState.APPROVED, "Approved", stage=WorkflowStage.APPROVAL)
+    orch._transition(WorkflowState.REPAIR_EXECUTING, "Mutating workspace...", stage=WorkflowStage.EXECUTION)
+
+    # Process dies abruptly
+    engine = WorkflowRecoveryEngine(state_store=store)
+    decision = engine.inspect_recovery(test_context.workflow_id)
+    assert not decision.can_resume
+    assert decision.recovered_state == WorkflowState.BLOCKED
+    assert decision.reconciliation_required
+    assert "uncertain" in decision.reason.lower()
+
+
+def test_crash_lifecycle_point_3_after_patch_before_persistence(temp_db: Path, test_context: WorkflowContext):
+    """Crash Point 3: Workspace mutated on disk, but process crashed before result persistence to SQLite."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    store.save_workflow(
+        context=test_context,
+        state=WorkflowState.REPAIR_EXECUTING,
+        current_stage=WorkflowStage.EXECUTION,
+        reconciliation_required=True,
+    )
+    _setup_events(store, test_context.workflow_id)
+
+    engine = WorkflowRecoveryEngine(state_store=store)
+    decision = engine.inspect_recovery(test_context.workflow_id)
+    assert not decision.can_resume
+    assert decision.reconciliation_required
+
+    # Attempting to confirm without evidence must fail closed
+    with pytest.raises(RecoveryValidationError, match="no evidence of completed repair"):
+        engine.reconcile_mutation(test_context.workflow_id, "confirm", reconciled_by="alice")
+
+
+def test_crash_lifecycle_point_4_after_persistence_before_transition(temp_db: Path, test_context: WorkflowContext):
+    """Crash Point 4: Execution result persisted, but crash occurs before workflow transitions to REPAIR_COMPLETED."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    store.save_workflow(
+        context=test_context,
+        state=WorkflowState.BLOCKED,
+        current_stage=WorkflowStage.EXECUTION,
+        reconciliation_required=True,
+    )
+    _setup_events(store, test_context.workflow_id)
+    # Persist completed stage record
+    store.save_stage_record(
+        workflow_id=test_context.workflow_id,
+        stage=WorkflowStage.EXECUTION,
+        record=StageExecutionRecord(
+            stage=WorkflowStage.EXECUTION,
+            status=StageStatus.COMPLETED,
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+        ),
+    )
+
+    engine = WorkflowRecoveryEngine(state_store=store)
+    # Operator confirms based on verified evidence
+    engine.reconcile_mutation(test_context.workflow_id, "confirm", reconciled_by="alice")
+
+    wf = store.get_workflow(test_context.workflow_id)
+    assert wf["state"] == WorkflowState.REPAIR_COMPLETED.value
+    assert wf["reconciliation_required"] == 0
+
+    # Next stage is now VERIFICATION
+    decision = engine.inspect_recovery(test_context.workflow_id)
+    assert decision.can_resume
+    assert decision.next_stage_to_execute == WorkflowStage.VERIFICATION
+
+
+def test_crash_lifecycle_point_5_during_rollback(temp_db: Path, test_context: WorkflowContext):
+    """Crash Point 5: Interrupted during discard/revert keeps workflow safely blocked."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    store.save_workflow(
+        context=test_context,
+        state=WorkflowState.BLOCKED,
+        current_stage=WorkflowStage.EXECUTION,
+        reconciliation_required=True,
+    )
+    _setup_events(store, test_context.workflow_id)
+
+    engine = WorkflowRecoveryEngine(state_store=store)
+    decision = engine.inspect_recovery(test_context.workflow_id)
+    assert not decision.can_resume
+    assert decision.recovered_state == WorkflowState.BLOCKED
+    assert decision.reconciliation_required
+
+
+def test_crash_lifecycle_point_6_during_reconciliation(temp_db: Path, test_context: WorkflowContext):
+    """Crash Point 6: Crash or exception during reconciliation leaves workflow blocked."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    store.save_workflow(
+        context=test_context,
+        state=WorkflowState.BLOCKED,
+        current_stage=WorkflowStage.EXECUTION,
+        reconciliation_required=True,
+    )
+    _setup_events(store, test_context.workflow_id)
+
+    engine = WorkflowRecoveryEngine(state_store=store)
+    # Operator attempts invalid reconciliation
+    with pytest.raises(RecoveryValidationError):
+        engine.reconcile_mutation(test_context.workflow_id, "invalid_resolution", reconciled_by="alice")
+
+    # State must remain untouched
+    wf = store.get_workflow(test_context.workflow_id)
+    assert wf["state"] == WorkflowState.BLOCKED.value
+    assert wf["reconciliation_required"] == 1
+
+
+def test_approval_consumption_once_consumed_never_restored(temp_db: Path, test_context: WorkflowContext):
+    """Consumed approval is never restored as unused across restarts or reloads."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    ledger = IdempotencyLedger(db_path=temp_db)
+    appr_ledger = ApprovalLedger(db_path=temp_db)
+    approval_mgr = OrchestrationApprovalManager(ledger=appr_ledger, trusted_approvers={"alice"})
+
+    orch = EngineeringOrchestrator(
+        context=test_context,
+        state_store=store,
+        idempotency_ledger=ledger,
+        approval_manager=approval_mgr,
+        diagnosis_adapter=FakeDiagnosisAdapter(),
+        root_cause_adapter=FakeRootCauseAdapter(),
+        planning_adapter=FakePlanningAdapter(),
+        execution_adapter=FakeExecutionAdapter(),
+    )
+    orch.run_until_approval_or_completion()
+    plan = orch.stage_outputs.repair_plan
+    appr = RepairApproval(
+        approval_id="appr_durable_test",
+        repair_plan_id=plan.plan_id,
+        plan_digest=compute_plan_digest(plan),
+        approver_reference="alice",
+        approved_strategy_id=plan.selected_strategy_id,
+        approved_file_paths=plan.affected_files,
+        approval_timestamp=datetime.now(timezone.utc).isoformat(),
+        approval_expiry=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        approval_status=ApprovalStatus.APPROVED,
+    )
+    orch.submit_approval(appr)
+    orch.run_repair()
+
+    assert approval_mgr.ledger.is_consumed(appr.approval_id)
+
+    # Fresh instance reloading from same DB
+    fresh_appr_ledger = ApprovalLedger(db_path=temp_db)
+    new_approval_mgr = OrchestrationApprovalManager(ledger=fresh_appr_ledger, trusted_approvers={"alice"})
+    assert new_approval_mgr.ledger.is_consumed(appr.approval_id)
+
+    # Attempting to re-verify or re-execute with this consumed approval fails closed
+    outcome = new_approval_mgr.verify_approval(appr, plan, workflow_id=test_context.workflow_id)
+    print("OUTCOME ERRORS:", outcome.errors)
+    assert not outcome.is_valid
+    assert any("consumed" in err.lower() for err in outcome.errors)
+
+
+def test_approval_consumption_discard_preserves_consumption_requires_fresh_approval(
+    temp_db: Path, test_context: WorkflowContext
+):
+    """Discarding a mutation resets workflow to AWAITING_HUMAN_APPROVAL but never un-consumes the approval."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    ledger = IdempotencyLedger(db_path=temp_db)
+    appr_ledger = ApprovalLedger(db_path=temp_db)
+    approval_mgr = OrchestrationApprovalManager(ledger=appr_ledger, trusted_approvers={"alice"})
+
+    orch = EngineeringOrchestrator(
+        context=test_context,
+        state_store=store,
+        idempotency_ledger=ledger,
+        approval_manager=approval_mgr,
+        diagnosis_adapter=FakeDiagnosisAdapter(),
+        root_cause_adapter=FakeRootCauseAdapter(),
+        planning_adapter=FakePlanningAdapter(),
+        execution_adapter=FakeExecutionAdapter(),
+    )
+    orch.run_until_approval_or_completion()
+    plan = orch.stage_outputs.repair_plan
+    appr = RepairApproval(
+        approval_id="appr_discard_test",
+        repair_plan_id=plan.plan_id,
+        plan_digest=compute_plan_digest(plan),
+        approver_reference="alice",
+        approved_strategy_id=plan.selected_strategy_id,
+        approved_file_paths=plan.affected_files,
+        approval_timestamp=datetime.now(timezone.utc).isoformat(),
+        approval_expiry=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        approval_status=ApprovalStatus.APPROVED,
+    )
+    orch.submit_approval(appr)
+
+    # Mark consumed and simulate interruption
+    approval_mgr.ledger.record_consumed(
+        approval_id=appr.approval_id,
+        execution_id="exec_interrupted_1",
+    )
+    orch._transition(WorkflowState.REPAIR_EXECUTING, "Executing", stage=WorkflowStage.EXECUTION)
+    store.save_workflow(context=test_context, state=WorkflowState.BLOCKED, reconciliation_required=True)
+
+    # Operator discards mutation
+    engine = WorkflowRecoveryEngine(state_store=store)
+    engine.reconcile_mutation(test_context.workflow_id, "discard", reconciled_by="alice")
+
+    wf = store.get_workflow(test_context.workflow_id)
+    assert wf["state"] == WorkflowState.AWAITING_HUMAN_APPROVAL.value
+
+    # Old approval is STILL consumed
+    assert approval_mgr.ledger.is_consumed(appr.approval_id)
+
+    # Recover orchestrator to synchronize hydrated audit event chain
+    decision, orch2 = engine.recover_workflow(test_context.workflow_id, approval_manager=approval_mgr)
+    assert orch2.state == WorkflowState.AWAITING_HUMAN_APPROVAL
+
+    # Re-submitting the same approval must fail closed
+    bad_outcome = orch2.submit_approval(appr)
+    assert not bad_outcome.is_valid
+    assert any("consumed" in err.lower() for err in bad_outcome.errors)
+    assert orch2.state == WorkflowState.BLOCKED
+
+    # Reset state to AWAITING_HUMAN_APPROVAL for fresh approval submission
+    orch2.state = WorkflowState.AWAITING_HUMAN_APPROVAL
+
+    # Submitting fresh approval for the plan succeeds
+    fresh_appr = RepairApproval(
+        approval_id="appr_fresh_after_discard",
+        repair_plan_id=plan.plan_id,
+        plan_digest=compute_plan_digest(plan),
+        approver_reference="alice",
+        approved_strategy_id=plan.selected_strategy_id,
+        approved_file_paths=plan.affected_files,
+        approval_timestamp=datetime.now(timezone.utc).isoformat(),
+        approval_expiry=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        approval_status=ApprovalStatus.APPROVED,
+    )
+    outcome = orch2.submit_approval(fresh_appr)
+    assert outcome.is_valid
+    assert orch2.state == WorkflowState.APPROVED
+
+
+def test_idempotency_concurrent_register_start(temp_db: Path):
+    """Concurrent threads attempting register_start with the same key safely return 1 winner and N active records."""
+    ledger = IdempotencyLedger(db_path=temp_db)
+    key = compute_idempotency_key("wf_conc", WorkflowStage.EXECUTION, "digest_conc")
+
+    def try_start():
+        return ledger.register_start(key, "wf_conc", WorkflowStage.EXECUTION)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(try_start) for _ in range(5)]
+        results = [f.result() for f in futures]
+
+    winners = [r for r in results if r is None]
+    already_started = [r for r in results if r is not None and r.status == OperationStatus.STARTED]
+
+    assert len(winners) == 1
+    assert len(already_started) == 4
+
+
+def test_idempotency_corrupted_cached_payload_fail_closed(temp_db: Path, test_context: WorkflowContext):
+    """Corrupted cached payload in idempotency table raises CorruptedStateError fail-closed."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    ledger = IdempotencyLedger(db_path=temp_db)
+    approval_mgr = OrchestrationApprovalManager(trusted_approvers={"alice"})
+
+    orch = EngineeringOrchestrator(
+        context=test_context,
+        state_store=store,
+        idempotency_ledger=ledger,
+        approval_manager=approval_mgr,
+        diagnosis_adapter=FakeDiagnosisAdapter(),
+        root_cause_adapter=FakeRootCauseAdapter(),
+        planning_adapter=FakePlanningAdapter(),
+    )
+    orch.run_until_approval_or_completion()
+    plan = orch.stage_outputs.repair_plan
+    digest = compute_plan_digest(plan)
+    idemp_key = compute_idempotency_key(test_context.workflow_id, WorkflowStage.EXECUTION, digest)
+
+    # Insert corrupted payload
+    ledger.register_start(idemp_key, test_context.workflow_id, WorkflowStage.EXECUTION)
+    conn = ledger._get_connection()
+    try:
+        conn.execute(
+            """
+            UPDATE orchestration_idempotency_records SET
+                status = 'completed',
+                result_payload_json = '{"execution_result": "CORRUPTED_STRING_NOT_OBJECT"}'
+            WHERE idempotency_key = ?;
+            """,
+            (idemp_key,),
+        )
+    finally:
+        conn.close()
+
+    appr = RepairApproval(
+        approval_id="appr_corrupt_test",
+        repair_plan_id=plan.plan_id,
+        plan_digest=digest,
+        approver_reference="alice",
+        approved_strategy_id=plan.selected_strategy_id,
+        approved_file_paths=plan.affected_files,
+        approval_timestamp=datetime.now(timezone.utc).isoformat(),
+        approval_expiry=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        approval_status=ApprovalStatus.APPROVED,
+    )
+    orch.submit_approval(appr)
+
+    with pytest.raises(CorruptedStateError, match="Corrupted idempotency cached payload"):
+        orch.run_repair()
+
+
+def test_idempotency_process_restart_preserves_reconciliation_required(temp_db: Path, test_context: WorkflowContext):
+    """inspect_recovery correctly reports reconciliation_required=True across multiple process restarts."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    store.save_workflow(
+        context=test_context,
+        state=WorkflowState.BLOCKED,
+        current_stage=WorkflowStage.EXECUTION,
+        reconciliation_required=True,
+    )
+    _setup_events(store, test_context.workflow_id)
+
+    # Process 1 inspects
+    engine1 = WorkflowRecoveryEngine(state_store=store)
+    d1 = engine1.inspect_recovery(test_context.workflow_id)
+    assert not d1.can_resume
+    assert d1.reconciliation_required
+    assert d1.recovered_state == WorkflowState.BLOCKED
+
+    # Process 2 fresh instantiation
+    fresh_store = OrchestrationStateStore(db_path=temp_db)
+    engine2 = WorkflowRecoveryEngine(state_store=fresh_store)
+    d2 = engine2.inspect_recovery(test_context.workflow_id)
+    assert not d2.can_resume
+    assert d2.reconciliation_required
+    assert d2.recovered_state == WorkflowState.BLOCKED

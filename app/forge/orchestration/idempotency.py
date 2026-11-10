@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 import sqlite3
 import threading
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -125,7 +125,7 @@ class IdempotencyLedger:
         workflow_id: str,
         stage: WorkflowStage,
     ) -> Optional[IdempotencyRecord]:
-        """Attempt to register the start of an operation.
+        """Attempt to register the start of an operation with concurrency safety.
 
         Returns:
             None if registration succeeded (operation is new).
@@ -134,30 +134,50 @@ class IdempotencyLedger:
         with self._lock:
             conn = self._get_connection()
             try:
+                conn.execute("BEGIN IMMEDIATE;")
                 cur = conn.execute(
                     "SELECT * FROM orchestration_idempotency_records WHERE idempotency_key = ?",
                     (idempotency_key,),
                 )
                 row = cur.fetchone()
                 if row:
+                    conn.execute("COMMIT;")
                     return self._row_to_record(row)
 
                 now_str = datetime.now(timezone.utc).isoformat()
-                conn.execute(
-                    """
-                    INSERT INTO orchestration_idempotency_records (
-                        idempotency_key, workflow_id, stage, status, created_at
-                    ) VALUES (?, ?, ?, ?, ?);
-                    """,
-                    (
-                        idempotency_key,
-                        workflow_id,
-                        stage.value,
-                        OperationStatus.STARTED.value,
-                        now_str,
-                    ),
-                )
-                return None
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO orchestration_idempotency_records (
+                            idempotency_key, workflow_id, stage, status, created_at
+                        ) VALUES (?, ?, ?, ?, ?);
+                        """,
+                        (
+                            idempotency_key,
+                            workflow_id,
+                            stage.value,
+                            OperationStatus.STARTED.value,
+                            now_str,
+                        ),
+                    )
+                    conn.execute("COMMIT;")
+                    return None
+                except sqlite3.IntegrityError:
+                    conn.execute("ROLLBACK;")
+                    cur = conn.execute(
+                        "SELECT * FROM orchestration_idempotency_records WHERE idempotency_key = ?",
+                        (idempotency_key,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        return self._row_to_record(row)
+                    raise
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
+                raise
             finally:
                 conn.close()
 
@@ -256,6 +276,46 @@ class IdempotencyLedger:
                 conn.close()
 
     get = get_record
+
+    def get_records_for_workflow(self, workflow_id: str) -> List[IdempotencyRecord]:
+        """Fetch all records for a given workflow ID."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                cur = conn.execute(
+                    "SELECT * FROM orchestration_idempotency_records WHERE workflow_id = ? ORDER BY created_at ASC",
+                    (workflow_id,),
+                )
+                return [self._row_to_record(row) for row in cur.fetchall()]
+            finally:
+                conn.close()
+
+    def mark_failed_for_workflow(self, workflow_id: str, stage: WorkflowStage, error_message: str) -> None:
+        """Mark active (started or uncertain) records for workflow at given stage as failed."""
+        with self._lock:
+            conn = self._get_connection()
+            try:
+                now_str = datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    """
+                    UPDATE orchestration_idempotency_records SET
+                        status = ?,
+                        completed_at = ?,
+                        error_message = ?
+                    WHERE workflow_id = ? AND stage = ? AND status IN (?, ?);
+                    """,
+                    (
+                        OperationStatus.FAILED.value,
+                        now_str,
+                        error_message,
+                        workflow_id,
+                        stage.value,
+                        OperationStatus.STARTED.value,
+                        OperationStatus.UNCERTAIN.value,
+                    ),
+                )
+            finally:
+                conn.close()
 
     def _row_to_record(self, row: sqlite3.Row) -> IdempotencyRecord:
         payload = json.loads(row["result_payload_json"]) if row["result_payload_json"] else None
