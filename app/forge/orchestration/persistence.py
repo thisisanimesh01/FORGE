@@ -172,9 +172,19 @@ class OrchestrationStateStore:
                         status_before TEXT NOT NULL,
                         status_after TEXT NOT NULL,
                         reconciled_at TEXT NOT NULL,
+                        operator_principal TEXT NOT NULL DEFAULT '',
+                        auth_channel TEXT NOT NULL DEFAULT 'interactive_cli',
                         FOREIGN KEY (workflow_id) REFERENCES orchestration_workflows(workflow_id) ON DELETE CASCADE
                     );
                 """)
+
+                # Ensure migration columns for reconciliation identity
+                cur = conn.execute("PRAGMA table_info(orchestration_reconciliations);")
+                col_names = {r["name"] for r in cur.fetchall()}
+                if "operator_principal" not in col_names:
+                    conn.execute("ALTER TABLE orchestration_reconciliations ADD COLUMN operator_principal TEXT NOT NULL DEFAULT '';")
+                if "auth_channel" not in col_names:
+                    conn.execute("ALTER TABLE orchestration_reconciliations ADD COLUMN auth_channel TEXT NOT NULL DEFAULT 'interactive_cli';")
 
                 # Create indexes
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_orch_wf_state ON orchestration_workflows(state);")
@@ -629,8 +639,10 @@ class OrchestrationStateStore:
         status_before: str,
         status_after: str,
         notes: Optional[str] = None,
+        operator_principal: str = "",
+        auth_channel: str = "interactive_cli",
     ) -> None:
-        """Record an operator reconciliation action."""
+        """Record an operator reconciliation action with authenticated operator binding."""
         with self._lock:
             conn = self._get_connection()
             try:
@@ -639,8 +651,9 @@ class OrchestrationStateStore:
                     """
                     INSERT INTO orchestration_reconciliations (
                         reconciliation_id, workflow_id, resolution, reconciled_by,
-                        operator_notes, status_before, status_after, reconciled_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                        operator_notes, status_before, status_after, reconciled_at,
+                        operator_principal, auth_channel
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                     """,
                     (
                         reconciliation_id,
@@ -651,6 +664,8 @@ class OrchestrationStateStore:
                         status_before,
                         status_after,
                         now_str,
+                        operator_principal,
+                        auth_channel,
                     ),
                 )
             finally:

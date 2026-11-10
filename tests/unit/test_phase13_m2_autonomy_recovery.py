@@ -102,6 +102,8 @@ from forge.orchestration.retry import (
     RetryPolicy,
 )
 from forge.orchestration.schemas import (
+    ReconcileOrchestrationMutationInput,
+    ReconcileOrchestrationMutationOutput,
     StageExecutionRecord,
     StageStatus,
     WorkflowContext,
@@ -510,6 +512,7 @@ def test_recovery_reconciliation_unblocks_workflow(temp_db: Path, test_context: 
         resolution="discard",
         reconciled_by="alice",
         notes="Resetting workspace after interrupted process",
+        operator_principal="alice",
     )
 
     wf_data = store.get_workflow(test_context.workflow_id)
@@ -731,6 +734,7 @@ def test_scenario_7_operator_reconcile_confirm(temp_db: Path, test_context: Work
         workflow_id=test_context.workflow_id,
         resolution="confirm",
         reconciled_by="alice",
+        operator_principal="alice",
     )
 
     wf = store.get_workflow(test_context.workflow_id)
@@ -748,6 +752,7 @@ def test_scenario_8_operator_reconcile_discard(temp_db: Path, test_context: Work
         workflow_id=test_context.workflow_id,
         resolution="discard",
         reconciled_by="alice",
+        operator_principal="alice",
     )
 
     wf = store.get_workflow(test_context.workflow_id)
@@ -1004,24 +1009,28 @@ def test_cli_orchestrate_inspect_and_tasks(tmp_path: Path, monkeypatch: pytest.M
 
 def test_cli_orchestrate_reconcile_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """CLI reconcile command records operator reconciliation decision."""
+    import getpass
+    user = getpass.getuser()
     db_path = tmp_path / "cli_reconcile_test.db"
     monkeypatch.setenv("FORGE_DB_PATH", str(db_path))
+    monkeypatch.setenv("FORGE_TRUSTED_APPROVERS", user)
 
     store = OrchestrationStateStore(db_path=db_path)
     ctx = WorkflowContext(
         workflow_id="wf_rec_cli",
         repository_path=str(tmp_path),
         run_id="run_rec_cli",
+        trusted_approvers={user},
     )
     store.save_workflow(context=ctx, state=WorkflowState.BLOCKED, reconciliation_required=True)
 
     # 1. Unverified confirm is rejected
-    result_bad = runner.invoke(app, ["orchestrate", "reconcile", "wf_rec_cli", "--resolution", "confirm"])
+    result_bad = runner.invoke(app, ["orchestrate", "reconcile", "wf_rec_cli", "--resolution", "confirm", "--yes"])
     assert result_bad.exit_code == 1
     assert "no evidence of completed repair" in result_bad.output.lower()
 
     # 2. Discard unblocks workflow
-    result = runner.invoke(app, ["orchestrate", "reconcile", "wf_rec_cli", "--resolution", "discard"])
+    result = runner.invoke(app, ["orchestrate", "reconcile", "wf_rec_cli", "--resolution", "discard", "--yes"])
     assert result.exit_code == 0
     assert "successfully reconciled" in result.output
 
@@ -1041,6 +1050,7 @@ def test_adversarial_reconciliation_unverified_confirm_rejected(temp_db: Path, t
             workflow_id=test_context.workflow_id,
             resolution="confirm",
             reconciled_by="alice",
+            operator_principal="alice",
         )
 
     # Workflow must remain blocked with reconciliation_required=1
@@ -1061,6 +1071,7 @@ def test_adversarial_reconciliation_prohibited_identities_rejected(temp_db: Path
                 workflow_id=test_context.workflow_id,
                 resolution="discard",
                 reconciled_by=bad_id,
+                operator_principal="alice",
             )
 
 
@@ -1070,11 +1081,12 @@ def test_adversarial_reconciliation_unauthorized_operator_rejected(temp_db: Path
     store.save_workflow(context=test_context, state=WorkflowState.BLOCKED, reconciliation_required=True)
     engine = WorkflowRecoveryEngine(state_store=store)
 
-    with pytest.raises(RecoveryValidationError, match="not in the trusted approvers list"):
+    with pytest.raises(RecoveryValidationError, match="not in the trusted approvers allowlist"):
         engine.reconcile_mutation(
             workflow_id=test_context.workflow_id,
             resolution="discard",
             reconciled_by="eve_untrusted",
+            operator_principal="eve_untrusted",
         )
 
 
@@ -1089,6 +1101,7 @@ def test_adversarial_reconciliation_on_unblocked_workflow_rejected(temp_db: Path
             workflow_id=test_context.workflow_id,
             resolution="discard",
             reconciled_by="alice",
+            operator_principal="alice",
         )
 
 
@@ -1196,7 +1209,7 @@ def test_crash_lifecycle_point_3_after_patch_before_persistence(temp_db: Path, t
 
     # Attempting to confirm without evidence must fail closed
     with pytest.raises(RecoveryValidationError, match="no evidence of completed repair"):
-        engine.reconcile_mutation(test_context.workflow_id, "confirm", reconciled_by="alice")
+        engine.reconcile_mutation(test_context.workflow_id, "confirm", reconciled_by="alice", operator_principal="alice")
 
 
 def test_crash_lifecycle_point_4_after_persistence_before_transition(temp_db: Path, test_context: WorkflowContext):
@@ -1223,7 +1236,7 @@ def test_crash_lifecycle_point_4_after_persistence_before_transition(temp_db: Pa
 
     engine = WorkflowRecoveryEngine(state_store=store)
     # Operator confirms based on verified evidence
-    engine.reconcile_mutation(test_context.workflow_id, "confirm", reconciled_by="alice")
+    engine.reconcile_mutation(test_context.workflow_id, "confirm", reconciled_by="alice", operator_principal="alice")
 
     wf = store.get_workflow(test_context.workflow_id)
     assert wf["state"] == WorkflowState.REPAIR_COMPLETED.value
@@ -1267,7 +1280,7 @@ def test_crash_lifecycle_point_6_during_reconciliation(temp_db: Path, test_conte
     engine = WorkflowRecoveryEngine(state_store=store)
     # Operator attempts invalid reconciliation
     with pytest.raises(RecoveryValidationError):
-        engine.reconcile_mutation(test_context.workflow_id, "invalid_resolution", reconciled_by="alice")
+        engine.reconcile_mutation(test_context.workflow_id, "invalid_resolution", reconciled_by="alice", operator_principal="alice")
 
     # State must remain untouched
     wf = store.get_workflow(test_context.workflow_id)
@@ -1366,7 +1379,7 @@ def test_approval_consumption_discard_preserves_consumption_requires_fresh_appro
 
     # Operator discards mutation
     engine = WorkflowRecoveryEngine(state_store=store)
-    engine.reconcile_mutation(test_context.workflow_id, "discard", reconciled_by="alice")
+    engine.reconcile_mutation(test_context.workflow_id, "discard", reconciled_by="alice", operator_principal="alice")
 
     wf = store.get_workflow(test_context.workflow_id)
     assert wf["state"] == WorkflowState.AWAITING_HUMAN_APPROVAL.value
@@ -1501,3 +1514,356 @@ def test_idempotency_process_restart_preserves_reconciliation_required(temp_db: 
     assert not d2.can_resume
     assert d2.reconciliation_required
     assert d2.recovered_state == WorkflowState.BLOCKED
+
+
+# ===========================================================================
+# 8. M2 Final Authorization Consistency Audit Tests
+# ===========================================================================
+
+def test_adversarial_reconciliation_missing_allowlist_during_confirm(temp_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Missing trusted approvers allowlist must fail closed during confirm."""
+    monkeypatch.delenv("FORGE_TRUSTED_APPROVERS", raising=False)
+    store = OrchestrationStateStore(db_path=temp_db)
+    # Context has trusted_approvers=None
+    ctx = WorkflowContext(
+        workflow_id="wf_auth_1",
+        repository_path=str(tmp_path),
+        trusted_approvers=None,
+    )
+    store.save_workflow(context=ctx, state=WorkflowState.BLOCKED, reconciliation_required=True)
+    _setup_events(store, "wf_auth_1")
+    store.save_stage_record(
+        workflow_id="wf_auth_1",
+        stage=WorkflowStage.EXECUTION,
+        record=StageExecutionRecord(
+            stage=WorkflowStage.EXECUTION,
+            status=StageStatus.COMPLETED,
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+        ),
+    )
+    engine = WorkflowRecoveryEngine(state_store=store, trusted_approvers=None)
+    with pytest.raises(RecoveryValidationError, match="No trusted human approver allowlist configured"):
+        engine.reconcile_mutation("wf_auth_1", "confirm", reconciled_by="alice", operator_principal="alice")
+
+
+def test_adversarial_reconciliation_empty_allowlist_during_confirm(temp_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Empty trusted approvers allowlist must fail closed during confirm."""
+    monkeypatch.delenv("FORGE_TRUSTED_APPROVERS", raising=False)
+    store = OrchestrationStateStore(db_path=temp_db)
+    ctx = WorkflowContext(
+        workflow_id="wf_auth_2",
+        repository_path=str(tmp_path),
+        trusted_approvers=set(),
+    )
+    store.save_workflow(context=ctx, state=WorkflowState.BLOCKED, reconciliation_required=True)
+    _setup_events(store, "wf_auth_2")
+    store.save_stage_record(
+        workflow_id="wf_auth_2",
+        stage=WorkflowStage.EXECUTION,
+        record=StageExecutionRecord(
+            stage=WorkflowStage.EXECUTION,
+            status=StageStatus.COMPLETED,
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+        ),
+    )
+    engine = WorkflowRecoveryEngine(state_store=store, trusted_approvers=set())
+    with pytest.raises(RecoveryValidationError, match="No trusted human approver allowlist configured"):
+        engine.reconcile_mutation("wf_auth_2", "confirm", reconciled_by="alice", operator_principal="alice")
+
+
+def test_adversarial_reconciliation_missing_allowlist_during_discard(temp_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Missing trusted approvers allowlist must fail closed during discard."""
+    monkeypatch.delenv("FORGE_TRUSTED_APPROVERS", raising=False)
+    store = OrchestrationStateStore(db_path=temp_db)
+    ctx = WorkflowContext(
+        workflow_id="wf_auth_3",
+        repository_path=str(tmp_path),
+        trusted_approvers=None,
+    )
+    store.save_workflow(context=ctx, state=WorkflowState.BLOCKED, reconciliation_required=True)
+    _setup_events(store, "wf_auth_3")
+    engine = WorkflowRecoveryEngine(state_store=store, trusted_approvers=None)
+    with pytest.raises(RecoveryValidationError, match="No trusted human approver allowlist configured"):
+        engine.reconcile_mutation("wf_auth_3", "discard", reconciled_by="alice", operator_principal="alice")
+
+
+def test_adversarial_reconciliation_empty_allowlist_during_revert(temp_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Empty trusted approvers allowlist must fail closed during revert."""
+    monkeypatch.delenv("FORGE_TRUSTED_APPROVERS", raising=False)
+    store = OrchestrationStateStore(db_path=temp_db)
+    ctx = WorkflowContext(
+        workflow_id="wf_auth_4",
+        repository_path=str(tmp_path),
+        trusted_approvers=set(),
+    )
+    store.save_workflow(context=ctx, state=WorkflowState.BLOCKED, reconciliation_required=True)
+    _setup_events(store, "wf_auth_4")
+    engine = WorkflowRecoveryEngine(state_store=store, trusted_approvers=set())
+    with pytest.raises(RecoveryValidationError, match="No trusted human approver allowlist configured"):
+        engine.reconcile_mutation("wf_auth_4", "revert", reconciled_by="alice", operator_principal="alice")
+
+
+def test_adversarial_reconciliation_unauthorized_operator_identity(temp_db: Path, test_context: WorkflowContext):
+    """Unauthorized operator identity is rejected fail-closed across all operations."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    store.save_workflow(context=test_context, state=WorkflowState.BLOCKED, reconciliation_required=True)
+    _setup_events(store, test_context.workflow_id)
+    engine = WorkflowRecoveryEngine(state_store=store, trusted_approvers={"alice", "bob"})
+
+    for res in ("discard", "revert"):
+        with pytest.raises(RecoveryValidationError, match="not in the trusted approvers allowlist"):
+            engine.reconcile_mutation(
+                test_context.workflow_id,
+                res,
+                reconciled_by="eve",
+                operator_principal="eve",
+            )
+
+
+def test_adversarial_reconciliation_caller_supplied_identity_without_operator_context(temp_db: Path, test_context: WorkflowContext):
+    """Caller-supplied identity string alone without authenticated operator context is rejected."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    store.save_workflow(context=test_context, state=WorkflowState.BLOCKED, reconciliation_required=True)
+    _setup_events(store, test_context.workflow_id)
+    engine = WorkflowRecoveryEngine(state_store=store, trusted_approvers={"alice"})
+
+    # 1. operator_principal is None
+    with pytest.raises(RecoveryValidationError, match="Authenticated operator principal context is required"):
+        engine.reconcile_mutation(
+            test_context.workflow_id,
+            "discard",
+            reconciled_by="alice",
+            operator_principal=None,
+        )
+
+    # 2. operator_principal is empty or whitespace
+    with pytest.raises(RecoveryValidationError, match="Authenticated operator principal context is required"):
+        engine.reconcile_mutation(
+            test_context.workflow_id,
+            "discard",
+            reconciled_by="alice",
+            operator_principal="   ",
+        )
+
+    # 3. operator_principal is unauthorized even if reconciled_by is in allowlist
+    with pytest.raises(RecoveryValidationError, match="not in the trusted approvers allowlist"):
+        engine.reconcile_mutation(
+            test_context.workflow_id,
+            "discard",
+            reconciled_by="alice",
+            operator_principal="eve",
+        )
+
+
+def test_adversarial_cli_reconciliation_non_interactive_rejected(temp_db: Path, test_context: WorkflowContext, monkeypatch: pytest.MonkeyPatch):
+    """CLI reconciliation in non-interactive mode without --yes flag fails closed."""
+    import getpass
+    user = getpass.getuser()
+    monkeypatch.setenv("FORGE_DB_PATH", str(temp_db))
+    monkeypatch.setenv("FORGE_TRUSTED_APPROVERS", user)
+
+    store = OrchestrationStateStore(db_path=temp_db)
+    store.save_workflow(context=test_context, state=WorkflowState.BLOCKED, reconciliation_required=True)
+    _setup_events(store, test_context.workflow_id)
+
+    # Invoke without --yes in non-interactive mode
+    result = runner.invoke(app, [
+        "orchestrate", "reconcile",
+        test_context.workflow_id,
+        "--resolution", "discard",
+        "--non-interactive",
+    ])
+    assert result.exit_code == 1
+    assert "Non-interactive reconciliation attempt rejected" in result.output
+    assert "--yes" in result.output
+
+
+def test_adversarial_tool_registry_reconciliation_rejected(temp_db: Path, test_context: WorkflowContext, monkeypatch: pytest.MonkeyPatch):
+    """ToolRegistry autonomous reconciliation is rejected fail closed and transitions workflow to BLOCKED."""
+    monkeypatch.setenv("FORGE_DB_PATH", str(temp_db))
+    store = OrchestrationStateStore(db_path=temp_db)
+    store.save_workflow(context=test_context, state=WorkflowState.REPAIR_EXECUTING, reconciliation_required=True)
+    _setup_events(store, test_context.workflow_id)
+
+    registry = ToolRegistry(workspace_path=Path(test_context.repository_path))
+    def_names = [d.name for d in registry.get_definitions()]
+    assert "reconcile_orchestration_mutation" in def_names
+
+    # Invoke tool via ToolRegistry
+    raw_res = registry.execute_tool(
+        "reconcile_orchestration_mutation",
+        {
+            "workflow_id": test_context.workflow_id,
+            "resolution": "discard",
+        },
+    )
+    res = json.loads(raw_res)
+    assert res["reconciled"] is False
+    assert "Reconciliation rejected: Autonomous tool caller cannot reconcile" in res["error"]
+    assert "forge orchestrate reconcile" in res["error"]
+
+    # Also test engine direct call with untrusted auth_channel
+    engine = WorkflowRecoveryEngine(state_store=store, trusted_approvers={"alice"})
+    with pytest.raises(RecoveryValidationError, match="Untrusted auth channel"):
+        engine.reconcile_mutation(
+            test_context.workflow_id,
+            "discard",
+            reconciled_by="alice",
+            operator_principal="alice",
+            auth_channel="autonomous_tool",
+        )
+
+
+def test_valid_interactive_authorized_operator_reconciliation(temp_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Valid interactive authorized reconciliation persists identity, principal, and auth channel."""
+    import getpass
+    user = getpass.getuser()
+    monkeypatch.setenv("FORGE_DB_PATH", str(temp_db))
+    monkeypatch.setenv("FORGE_TRUSTED_APPROVERS", user)
+
+    store = OrchestrationStateStore(db_path=temp_db)
+    ctx = WorkflowContext(
+        workflow_id="wf_rec_valid",
+        repository_path=str(tmp_path),
+        trusted_approvers={user},
+    )
+    store.save_workflow(context=ctx, state=WorkflowState.BLOCKED, reconciliation_required=True)
+    _setup_events(store, "wf_rec_valid")
+
+    result = runner.invoke(app, [
+        "orchestrate", "reconcile",
+        "wf_rec_valid",
+        "--resolution", "discard",
+        "--yes",
+    ])
+    assert result.exit_code == 0
+    assert "successfully reconciled" in result.output
+
+    # Verify reconciliation record in DB
+    rec = store.get_latest_reconciliation("wf_rec_valid")
+    assert rec is not None
+    assert rec["reconciled_by"] == user
+    assert rec["operator_principal"] == user
+    assert rec["auth_channel"] == "interactive_cli"
+    assert rec["resolution"] == "discard"
+
+    # Verify audit event details
+    events = store.get_events("wf_rec_valid")
+    recon_events = [e for e in events if "reconciliation_id" in e.details]
+    assert len(recon_events) >= 1
+    ev_details = recon_events[-1].details
+    assert ev_details["operator_principal"] == user
+    assert ev_details["auth_channel"] == "interactive_cli"
+
+
+def test_reconciliation_authorization_persistence_after_restart(temp_db: Path, test_context: WorkflowContext):
+    """Reconciliation records and verification integrity persist cleanly across engine restarts."""
+    store1 = OrchestrationStateStore(db_path=temp_db)
+    store1.save_workflow(context=test_context, state=WorkflowState.BLOCKED, reconciliation_required=True)
+    _setup_events(store1, test_context.workflow_id)
+
+    engine1 = WorkflowRecoveryEngine(state_store=store1, trusted_approvers={"alice"})
+    engine1.reconcile_mutation(
+        test_context.workflow_id,
+        "discard",
+        reconciled_by="alice",
+        operator_principal="alice",
+    )
+
+    # Process restart: fresh store and engine instances
+    store2 = OrchestrationStateStore(db_path=temp_db)
+    engine2 = WorkflowRecoveryEngine(state_store=store2, trusted_approvers={"alice"})
+
+    # inspect_recovery validates reconciliation integrity against trusted allowlist
+    decision = engine2.inspect_recovery(test_context.workflow_id)
+    assert decision.recovered_state == WorkflowState.AWAITING_HUMAN_APPROVAL
+    assert not decision.reconciliation_required
+    assert decision.can_resume
+
+    # Direct integrity verification passes
+    is_valid, err = engine2.verify_reconciliation_integrity(test_context.workflow_id)
+    assert is_valid is True
+    assert err is None
+    rec = store2.get_latest_reconciliation(test_context.workflow_id)
+    assert rec is not None
+    assert rec["reconciled_by"] == "alice"
+    assert rec["operator_principal"] == "alice"
+
+
+def test_concurrent_unauthorized_and_authorized_reconciliation(temp_db: Path, test_context: WorkflowContext):
+    """Concurrent reconciliation attempts by authorized and unauthorized callers are safe and fail-closed."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    store.save_workflow(context=test_context, state=WorkflowState.BLOCKED, reconciliation_required=True)
+    _setup_events(store, test_context.workflow_id)
+
+    engine = WorkflowRecoveryEngine(state_store=store, trusted_approvers={"alice"})
+
+    def attempt_recon(user: str, principal: str):
+        try:
+            engine.reconcile_mutation(
+                test_context.workflow_id,
+                "discard",
+                reconciled_by=user,
+                operator_principal=principal,
+            )
+            return "SUCCESS"
+        except RecoveryValidationError as e:
+            return f"FAIL: {e}"
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        f_bad1 = executor.submit(attempt_recon, "eve", "eve")
+        f_bad2 = executor.submit(attempt_recon, "alice", "eve")
+        f_bad3 = executor.submit(attempt_recon, "eve", "alice")
+        f_good = executor.submit(attempt_recon, "alice", "alice")
+
+        res_bad1 = f_bad1.result()
+        res_bad2 = f_bad2.result()
+        res_bad3 = f_bad3.result()
+        res_good = f_good.result()
+
+    assert "FAIL" in res_bad1
+    assert "FAIL" in res_bad2
+    assert "FAIL" in res_bad3
+    assert res_good == "SUCCESS"
+
+    # Only one reconciliation record exists and it belongs to alice
+    rec = store.get_latest_reconciliation(test_context.workflow_id)
+    assert rec is not None
+    assert rec["reconciled_by"] == "alice"
+    assert rec["operator_principal"] == "alice"
+
+    is_valid, err = engine.verify_reconciliation_integrity(test_context.workflow_id)
+    assert is_valid is True
+    assert err is None
+
+
+def test_tampering_with_reconciliation_identity_records(temp_db: Path, test_context: WorkflowContext):
+    """Direct database tampering with reconciliation identity records triggers AuditTrailTamperedError."""
+    store = OrchestrationStateStore(db_path=temp_db)
+    store.save_workflow(context=test_context, state=WorkflowState.BLOCKED, reconciliation_required=True)
+    _setup_events(store, test_context.workflow_id)
+
+    engine = WorkflowRecoveryEngine(state_store=store, trusted_approvers={"alice"})
+    engine.reconcile_mutation(
+        test_context.workflow_id,
+        "discard",
+        reconciled_by="alice",
+        operator_principal="alice",
+    )
+
+    # Direct database tampering: update reconciled_by to untrusted identity
+    conn = store._get_connection()
+    try:
+        conn.execute(
+            "UPDATE orchestration_reconciliations SET reconciled_by = 'mallory' WHERE workflow_id = ?",
+            (test_context.workflow_id,),
+        )
+    finally:
+        conn.close()
+
+    # Recovery inspection must fail closed with AuditTrailTamperedError
+    fresh_engine = WorkflowRecoveryEngine(state_store=store, trusted_approvers={"alice"})
+    with pytest.raises(AuditTrailTamperedError, match="Reconciliation record tampered: operator 'mallory' is not in trusted approver allowlist"):
+        fresh_engine.inspect_recovery(test_context.workflow_id)

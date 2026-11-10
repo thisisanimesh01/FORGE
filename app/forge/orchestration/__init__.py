@@ -17,6 +17,8 @@ from forge.orchestration.schemas import (
     InspectOrchestrationStatusOutput,
     InspectStageResultInput,
     InspectStageResultOutput,
+    ReconcileOrchestrationMutationInput,
+    ReconcileOrchestrationMutationOutput,
     StageExecutionRecord,
     StageOutputs,
     StageStatus,
@@ -125,6 +127,8 @@ __all__ = [
     "InspectStageResultOutput",
     "SubmitOrchestrationApprovalInput",
     "SubmitOrchestrationApprovalOutput",
+    "ReconcileOrchestrationMutationInput",
+    "ReconcileOrchestrationMutationOutput",
     "GetEngineeringReportInput",
     "GetEngineeringReportOutput",
     # State Machine

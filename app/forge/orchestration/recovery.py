@@ -8,8 +8,9 @@ mutation reconciliation status before resuming or blocking execution.
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -86,9 +87,146 @@ class WorkflowRecoveryEngine:
         store: Optional[OrchestrationStateStore] = None,
         state_store: Optional[OrchestrationStateStore] = None,
         idempotency_ledger: Optional[Any] = None,
+        trusted_approvers: Optional[Set[str]] = None,
     ) -> None:
         self.store = store or state_store or OrchestrationStateStore()
         self.idempotency_ledger = idempotency_ledger or IdempotencyLedger(db_path=self.store.db_path)
+        if trusted_approvers is not None:
+            self.trusted_approvers: Set[str] = set(trusted_approvers)
+        else:
+            raw_env = os.environ.get("FORGE_TRUSTED_APPROVERS", "")
+            self.trusted_approvers = {x.strip() for x in raw_env.split(",") if x.strip()}
+
+    def _resolve_trusted_approvers(self, wf_data: Optional[Dict[str, Any]] = None) -> Set[str]:
+        """Resolve and validate the mandatory trusted approvers allowlist.
+
+        Fail-closed rules:
+        - If absent, empty, or None: raises RecoveryValidationError.
+        - If allowlist contains only whitespace or invalid format: raises RecoveryValidationError.
+        - If allowlist contains prohibited synthetic/AI identities: raises RecoveryValidationError.
+        """
+        raw_approvers = None
+        if wf_data and wf_data.get("trusted_approvers"):
+            raw_approvers = wf_data.get("trusted_approvers")
+        elif self.trusted_approvers:
+            raw_approvers = self.trusted_approvers
+        else:
+            raw_env = os.environ.get("FORGE_TRUSTED_APPROVERS", "")
+            if raw_env.strip():
+                raw_approvers = {x.strip() for x in raw_env.split(",") if x.strip()}
+
+        if not raw_approvers:
+            raise RecoveryValidationError(
+                "Reconciliation configuration error: No trusted human approver allowlist configured. "
+                "Production reconciliation strictly requires an explicitly configured, non-empty trusted approver allowlist "
+                "(configured on workflow context or via FORGE_TRUSTED_APPROVERS). All reconciliations fail closed."
+            )
+
+        if not isinstance(raw_approvers, (set, list, tuple)):
+            raise RecoveryValidationError(
+                "Reconciliation configuration error: Invalid trusted approver allowlist format. "
+                "Must be a non-empty set or list of authorized operator identities."
+            )
+
+        trusted_set = {str(x).strip() for x in raw_approvers if str(x).strip()}
+        if not trusted_set:
+            raise RecoveryValidationError(
+                "Reconciliation configuration error: Trusted human approver allowlist is empty or invalid. "
+                "All reconciliations fail closed."
+            )
+
+        prohibited = {
+            "unknown",
+            "none",
+            "auto",
+            "llm",
+            "ai",
+            "model",
+            "agent",
+            "forge",
+            "assistant",
+            "subagent",
+            "bot",
+            "synthetic",
+            "system",
+        }
+        for name in trusted_set:
+            if name.lower() in prohibited or any(term in name.lower() for term in ("llm", "subagent", "synthetic", "auto")):
+                raise RecoveryValidationError(
+                    f"Reconciliation configuration error: Trusted approver allowlist contains invalid synthetic identity '{name}'."
+                )
+
+        return trusted_set
+
+    def verify_reconciliation_integrity(self, workflow_id: str) -> Tuple[bool, Optional[str]]:
+        """Verify that durable reconciliation records have not been tampered with and match the audit trail."""
+        wf_data = self.store.get_workflow(workflow_id)
+        if not wf_data:
+            return False, f"Workflow '{workflow_id}' not found."
+
+        rec = self.store.get_latest_reconciliation(workflow_id)
+        if not rec:
+            return True, None
+
+        # 1. Verify operator identity against mandatory trusted allowlist
+        try:
+            trusted_set = self._resolve_trusted_approvers(wf_data)
+        except RecoveryValidationError as exc:
+            return False, f"Allowlist validation failure: {exc}"
+
+        reconciled_by = rec.get("reconciled_by", "").strip()
+        operator_principal = rec.get("operator_principal", "").strip()
+        auth_channel = rec.get("auth_channel", "interactive_cli").strip()
+
+        prohibited = {
+            "unknown",
+            "none",
+            "auto",
+            "llm",
+            "ai",
+            "model",
+            "agent",
+            "forge",
+            "assistant",
+            "subagent",
+            "bot",
+            "synthetic",
+            "system",
+        }
+
+        if not reconciled_by or reconciled_by.lower() in prohibited:
+            return False, f"Reconciliation record tampered: invalid operator identity '{reconciled_by}'."
+
+        if reconciled_by not in trusted_set:
+            return False, f"Reconciliation record tampered: operator '{reconciled_by}' is not in trusted approver allowlist {sorted(trusted_set)}."
+
+        if operator_principal and operator_principal.lower() in prohibited:
+            return False, f"Reconciliation record tampered: invalid operator principal '{operator_principal}'."
+
+        if operator_principal and operator_principal not in trusted_set:
+            return False, f"Reconciliation record tampered: operator principal '{operator_principal}' is not in trusted approver allowlist {sorted(trusted_set)}."
+
+        if auth_channel in {"autonomous_tool", "untrusted_caller", "synthetic"}:
+            return False, f"Reconciliation record tampered: unauthorized auth channel '{auth_channel}'."
+
+        # 2. Check alignment with cryptographic event log
+        events = self.store.get_events(workflow_id)
+        reconcile_events = [
+            e for e in events
+            if e.event_type == OrchestrationEventType.STAGE_COMPLETED and "reconciled interrupted mutation" in e.action_description
+        ]
+        if not reconcile_events:
+            return False, "Reconciliation record tampered: no matching reconciliation event found in audit trail."
+
+        latest_ev = reconcile_events[-1]
+        ev_details = latest_ev.details or {}
+        if ev_details.get("reconciliation_id") and ev_details.get("reconciliation_id") != rec.get("reconciliation_id"):
+            return False, "Reconciliation record tampered: reconciliation_id mismatch with audit event."
+
+        if ev_details.get("reconciled_by") and ev_details.get("reconciled_by") != reconciled_by:
+            return False, "Reconciliation record tampered: reconciled_by mismatch with audit event."
+
+        return True, None
 
     def inspect_recovery(
         self,
@@ -120,6 +258,13 @@ class WorkflowRecoveryEngine:
             raise AuditTrailTamperedError(
                 f"Cryptographic audit trail integrity check failed for '{workflow_id}': {error_reason}"
             )
+
+        # Verify reconciliation integrity if a reconciliation record exists
+        rec = self.store.get_latest_reconciliation(workflow_id)
+        if rec:
+            is_valid_rec, rec_err = self.verify_reconciliation_integrity(workflow_id)
+            if not is_valid_rec:
+                raise AuditTrailTamperedError(f"Reconciliation record integrity failure for '{workflow_id}': {rec_err}")
 
         persisted_state = WorkflowState(wf_data["state"])
         last_event = events[-1]
@@ -329,8 +474,10 @@ class WorkflowRecoveryEngine:
         resolution: str,
         reconciled_by: str,
         notes: Optional[str] = None,
+        operator_principal: Optional[str] = None,
+        auth_channel: str = "interactive_cli",
     ) -> None:
-        """Apply an operator reconciliation to unblock an interrupted repair."""
+        """Apply an operator reconciliation to unblock an interrupted repair with mandatory authorization."""
         wf_data = self.store.get_workflow(workflow_id)
         if not wf_data:
             raise RecoveryValidationError(f"Workflow '{workflow_id}' not found.")
@@ -346,32 +493,83 @@ class WorkflowRecoveryEngine:
                 f"Workflow '{workflow_id}' does not require mutation reconciliation (state is '{status_before}')."
             )
 
-        # 2. Operator Identity & Authorization Check
-        prohibited = {"auto", "llm", "ai", "bot", "synthetic", "none", "unknown"}
-        norm_operator = (reconciled_by or "").strip().lower()
-        if not norm_operator or norm_operator in prohibited:
-            raise RecoveryValidationError(
-                f"Reconciliation rejected: operator identity '{reconciled_by}' is prohibited or invalid. "
-                "Reconciliation requires an authenticated, trusted human operator."
-            )
-
-        trusted_approvers = wf_data.get("trusted_approvers")
-        if trusted_approvers:
-            trusted_set = set(trusted_approvers)
-            if reconciled_by not in trusted_set:
-                raise RecoveryValidationError(
-                    f"Reconciliation rejected: operator '{reconciled_by}' is not in the trusted approvers list: {sorted(trusted_set)}"
-                )
-
-        # 3. Resolution Validation
-        norm_res = resolution.strip().lower()
+        # 2. Resolution Validation
+        norm_res = (resolution or "").strip().lower()
         valid_resolutions = {"discard", "confirm", "revert"}
         if norm_res not in valid_resolutions:
             raise RecoveryValidationError(
                 f"Invalid reconciliation resolution '{resolution}'. Must be one of {valid_resolutions}."
             )
 
-        # 4. Semantics of 'confirm' vs 'discard' / 'revert'
+        # 3. Mandatory Trusted Approver Allowlist Verification (Fail-Closed)
+        trusted_set = self._resolve_trusted_approvers(wf_data)
+
+        # 4. Authentication Channel & Autonomous Tool Caller Rejection
+        prohibited_channels = {"autonomous_tool", "untrusted_caller", "synthetic", "agent", "subagent"}
+        if auth_channel in prohibited_channels:
+            raise RecoveryValidationError(
+                f"Reconciliation rejected: Untrusted auth channel '{auth_channel}'. "
+                "Autonomous tool callers cannot reconcile interrupted mutations. "
+                "Reconciliation strictly requires an authenticated human operator via interactive CLI ('forge orchestrate reconcile')."
+            )
+
+        # 5. Operator Identity & Authenticated Principal Verification
+        prohibited_identities = {
+            "unknown",
+            "none",
+            "auto",
+            "llm",
+            "ai",
+            "model",
+            "agent",
+            "forge",
+            "assistant",
+            "subagent",
+            "bot",
+            "synthetic",
+            "system",
+        }
+
+        norm_operator = (reconciled_by or "").strip()
+        if (
+            not norm_operator
+            or norm_operator.lower() in prohibited_identities
+            or any(term in norm_operator.lower() for term in ("llm", "subagent", "synthetic", "auto"))
+        ):
+            raise RecoveryValidationError(
+                f"Reconciliation rejected: operator identity '{reconciled_by}' is prohibited or invalid. "
+                "Reconciliation requires an authenticated, trusted human operator."
+            )
+
+        # Caller-supplied identity alone cannot establish authorization:
+        # An authenticated operator principal is strictly required
+        if not operator_principal or not str(operator_principal).strip():
+            raise RecoveryValidationError(
+                "Reconciliation rejected: Caller-supplied identity string alone cannot establish authorization. "
+                "Authenticated operator principal context is required."
+            )
+
+        norm_principal = str(operator_principal).strip()
+        if (
+            norm_principal.lower() in prohibited_identities
+            or any(term in norm_principal.lower() for term in ("llm", "subagent", "synthetic", "auto"))
+        ):
+            raise RecoveryValidationError(
+                f"Reconciliation rejected: authenticated operator principal '{operator_principal}' is prohibited or invalid."
+            )
+
+        # Check both the declared operator and the authenticated principal against the trusted allowlist
+        if norm_operator not in trusted_set:
+            raise RecoveryValidationError(
+                f"Reconciliation rejected: operator '{norm_operator}' is not in the trusted approvers allowlist: {sorted(trusted_set)}"
+            )
+
+        if norm_principal not in trusted_set:
+            raise RecoveryValidationError(
+                f"Reconciliation rejected: authenticated operator principal '{norm_principal}' is not in the trusted approvers allowlist: {sorted(trusted_set)}"
+            )
+
+        # 6. Semantics of 'confirm' vs 'discard' / 'revert'
         if norm_res == "confirm":
             # Confirm must NEVER blindly execute a previous repair.
             # Inspect execution records, stage outputs, and idempotency records for evidence.
@@ -410,7 +608,7 @@ class WorkflowRecoveryEngine:
                 self.idempotency_ledger.mark_failed_for_workflow(
                     workflow_id=workflow_id,
                     stage=WorkflowStage.EXECUTION,
-                    error_message=f"Mutation {norm_res}ed by operator reconciliation ({reconciled_by}).",
+                    error_message=f"Mutation {norm_res}ed by operator reconciliation ({norm_operator}).",
                 )
             # Remove consumed approval from stage records so it cannot be re-applied
             conn = self.store._get_connection()
@@ -427,10 +625,12 @@ class WorkflowRecoveryEngine:
             reconciliation_id=reconcile_id,
             workflow_id=workflow_id,
             resolution=norm_res,
-            reconciled_by=reconciled_by,
+            reconciled_by=norm_operator,
             status_before=status_before,
             status_after=status_after,
             notes=notes,
+            operator_principal=norm_principal,
+            auth_channel=auth_channel,
         )
 
         # Update workflow audit record
@@ -443,8 +643,15 @@ class WorkflowRecoveryEngine:
                 workflow_id=workflow_id,
                 event_type=OrchestrationEventType.STAGE_COMPLETED,
                 state=WorkflowState(status_after),
-                action_description=f"Operator '{reconciled_by}' reconciled interrupted mutation: {norm_res}.",
-                details={"resolution": norm_res, "notes": notes},
+                action_description=f"Operator '{norm_operator}' reconciled interrupted mutation: {norm_res}.",
+                details={
+                    "reconciliation_id": reconcile_id,
+                    "resolution": norm_res,
+                    "reconciled_by": norm_operator,
+                    "operator_principal": norm_principal,
+                    "auth_channel": auth_channel,
+                    "notes": notes,
+                },
             )
             self.store.save_event(ev)
 

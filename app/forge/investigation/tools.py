@@ -643,6 +643,9 @@ class ToolRegistry:
     def _handle_inspect_workflow_tasks(self, args: Dict[str, Any]) -> str:
         return self._orchestration_tools.inspect_workflow_tasks(args)
 
+    def _handle_reconcile_orchestration_mutation(self, args: Dict[str, Any]) -> str:
+        return self._orchestration_tools.reconcile_orchestration_mutation(args)
+
     def _handle_create_repair_plan(self, args: Dict[str, Any]) -> str:
         return self._repair_planning_tools.create_repair_plan(args)
 

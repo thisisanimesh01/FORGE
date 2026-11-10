@@ -65,8 +65,12 @@ app/forge/orchestration/
     - `confirm`: Strictly requires concrete evidence of completed execution prior to interruption (e.g. stage record completion, `execution_status == "applied"`, or completed idempotency record). It **never** re-executes mutations. Transitions directly to `REPAIR_COMPLETED`. Fails closed (`RecoveryValidationError`) if completion evidence is missing.
     - `discard` / `revert`: Marks in-flight/uncertain idempotency records as `FAILED`, cleans up unexecuted stage records, resets state to `AWAITING_HUMAN_APPROVAL`, and permanently preserves approval consumption in `ApprovalLedger` so the consumed approval can never be re-used. A new repair plan requires fresh human authorization.
   - **Operator Authentication & Allowlist Invariants**:
-    - `reconciled_by` must identify an authentic human operator; synthetic/AI identities (`auto`, `llm`, `ai`, `bot`, `synthetic`, `none`, `unknown`) are rejected fail-closed.
-    - If `trusted_approvers` is configured, `reconciled_by` must be an explicit member of the allowlist.
+    - **Mandatory Allowlist Enforcement**: Production reconciliation strictly requires an explicitly configured, non-empty trusted approver allowlist (configured on workflow context or via `FORGE_TRUSTED_APPROVERS`). Missing, empty, or whitespace-only allowlists fail closed (`RecoveryValidationError`).
+    - **Operator Identity & Principal Binding**: Both the human approver identity (`reconciled_by`) and the operating process principal (`operator_principal`) must be explicit members of the trusted allowlist. A caller-supplied identity string alone cannot establish authorization.
+    - **Synthetic/Autonomous Identity Rejection**: Synthetic, AI, bot, and empty identities (`auto`, `llm`, `ai`, `bot`, `synthetic`, `none`, `unknown`, etc.) are rejected fail-closed.
+    - **Architectural Tool Calling Boundary**: Autonomous `ToolRegistry` callers (`auth_channel="autonomous_tool"`) cannot reconcile interrupted mutations. Interrupted workspace mutations strictly require an authenticated human operator via interactive CLI.
+    - **Interactive Operator Boundary**: CLI reconciliation (`forge orchestrate reconcile`) requires an interactive terminal session (TTY) or an explicit operator confirmation flag (`--yes`). Non-interactive sessions without `--yes` fail closed.
+    - **Durable Audit Trail & Tampering Defense**: Reconciliation records durably capture `reconciled_by`, `operator_principal`, and `auth_channel`. `inspect_recovery()` and `verify_reconciliation_integrity()` audit these records against the trusted allowlist; database tampering immediately triggers `AuditTrailTamperedError`.
     - Automated discard bypass flags (`allow_discard_unconfirmed_mutation`) are strictly rejected.
 
 ### 3.3 Bounded Deterministic Retry Engine (`retry.py`)
@@ -111,18 +115,19 @@ app/forge/orchestration/
 - `forge orchestrate inspect <wf_id>`: Inspect workflow recovery decision, checkpoint, event count, and reconciliation status.
 - `forge orchestrate recover <wf_id>`: Resume an interrupted workflow from its last verified checkpoint.
 - `forge orchestrate tasks <wf_id>`: Inspect coordinated task DAG, priorities, readiness, and dependencies.
-- `forge orchestrate reconcile <wf_id> --resolution <confirm|discard|revert> [--notes <text>]`: Human operator unblocking command enforcing authentic operator identity.
+- `forge orchestrate reconcile <wf_id> --resolution <confirm|discard|revert> [--operator <user>] [--yes] [--non-interactive]`: Human operator unblocking command enforcing authentic operator identity, allowlist verification, and interactive boundary.
 
 ### 4.2 ToolRegistry Tools
 - `inspect_workflow_recovery`: Read-only inspection of recovery state.
 - `recover_orchestration_workflow`: Reconstruct and recover an interrupted orchestrator instance.
 - `inspect_workflow_tasks`: Read-only query of task DAG status and ready task lists.
+- `reconcile_orchestration_mutation`: Exposed tool that strictly rejects autonomous tool callers fail closed with instructions to use interactive CLI.
 
 ---
 
 ## 5. Verification & Security Audit Suite
 
-The verification suite in `tests/unit/test_phase13_m2_autonomy_recovery.py` contains 53 dedicated tests (including 16 adversarial security audit tests):
+The verification suite in `tests/unit/test_phase13_m2_autonomy_recovery.py` contains 65 dedicated tests (including 28 adversarial security and authorization consistency audit tests):
 1. **Crash-Injection at 6 Lifecycle Points**:
    - Point 1: Crash before patch application $\rightarrow$ cleanly unapplied, reconciliation required.
    - Point 2: Crash during patch application $\rightarrow$ unconfirmed mutation fails closed, unverified confirm rejected.
@@ -136,3 +141,16 @@ The verification suite in `tests/unit/test_phase13_m2_autonomy_recovery.py` cont
 3. **Idempotency Concurrency & Corruption Defense**:
    - Concurrent `register_start` invocations fail closed via `BEGIN IMMEDIATE` transactions.
    - Corrupted or malformed cached payloads raise `CorruptedStateError` fail-closed.
+4. **Authorization Consistency Audit Suite (12 Invariants)**:
+   - Missing trusted approver allowlist during confirm fails closed.
+   - Empty trusted approver allowlist during confirm fails closed.
+   - Missing trusted approver allowlist during discard fails closed.
+   - Empty trusted approver allowlist during revert fails closed.
+   - Unauthorized operator identity fails closed across all operations.
+   - Caller-supplied identity string without authentic operator principal context fails closed.
+   - Non-interactive CLI reconciliation without `--yes` fails closed.
+   - ToolRegistry autonomous reconciliation attempts fail closed and block workflow.
+   - Valid interactive authorized operator reconciliation persists complete identity context.
+   - Reconciliation authorization records persist and verify cleanly across restarts.
+   - Concurrent unauthorized and authorized reconciliation execution is safe and fail-closed.
+   - Direct database tampering with reconciliation identity records triggers `AuditTrailTamperedError`.

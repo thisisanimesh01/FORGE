@@ -4738,27 +4738,69 @@ def orchestrate_tasks(
 def orchestrate_reconcile(
     workflow_id: str = typer.Argument(..., help="Workflow ID to reconcile"),
     resolution: str = typer.Option(..., "--resolution", "-r", help="Reconciliation decision: 'confirm', 'discard', or 'revert'"),
+    operator: Optional[str] = typer.Option(None, "--operator", "-o", help="Human operator identity (defaults to current user)"),
     notes: Optional[str] = typer.Option(None, "--notes", "-n", help="Operator rationale or explanation"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Confirm reconciliation without interactive prompt"),
+    non_interactive: bool = typer.Option(False, "--non-interactive", help="Explicit non-interactive mode flag"),
 ) -> None:
-    """Reconcile an unconfirmed or interrupted mutation with human operator authorization."""
+    """Reconcile an unconfirmed or interrupted mutation with interactive human operator authorization."""
     import getpass
+    import os
+    import sys
     from forge.orchestration.recovery import WorkflowRecoveryEngine, WorkflowRecoveryError
 
-    operator = getpass.getuser()
+    operator_user = getpass.getuser()
+    operator_clean = (operator or operator_user).strip()
+
+    # 1. Prohibited synthetic / agentic names
+    prohibited = {"unknown", "none", "auto", "llm", "ai", "model", "agent", "forge", "assistant", "subagent", "bot", "synthetic", "system"}
+    if not operator_clean or operator_clean.lower() in prohibited or any(term in operator_clean.lower() for term in ("llm", "subagent", "synthetic", "auto")):
+        typer.secho("Reconciliation error: Invalid human operator identity. AI/model/agent/auto identities are strictly forbidden.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    # 2. Interactive Confirmation Flow (TTY or --yes required)
+    is_interactive = sys.stdin.isatty() and not non_interactive
+    if not is_interactive and not yes:
+        typer.secho(
+            "Reconciliation error: Non-interactive reconciliation attempt rejected. "
+            "Human operator reconciliation requires an interactive terminal session (TTY) or explicit operator confirmation flag (--yes).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if is_interactive and not yes:
+        typer.echo(f"\n[RECONCILIATION CONFIRMATION REQUIRED]")
+        typer.echo(f"  Workflow ID: {workflow_id}")
+        typer.echo(f"  Resolution:  {resolution}")
+        typer.echo(f"  Operator:    {operator_clean}")
+        typer.echo(f"  Local User:  {operator_user}")
+        if notes:
+            typer.echo(f"  Notes:       {notes}")
+        confirm = typer.confirm(
+            f"Do you, as local operator '{operator_user}', authorize reconciliation '{resolution}' for workflow '{workflow_id}'?",
+            default=False,
+        )
+        if not confirm:
+            typer.secho("Reconciliation aborted by operator.", fg=typer.colors.YELLOW)
+            raise typer.Exit(code=1)
+
     engine = WorkflowRecoveryEngine()
     try:
         engine.reconcile_mutation(
             workflow_id=workflow_id,
             resolution=resolution,
-            reconciled_by=operator,
+            reconciled_by=operator_clean,
             notes=notes,
+            operator_principal=operator_user,
+            auth_channel="interactive_cli",
         )
     except WorkflowRecoveryError as exc:
         typer.secho(f"Reconciliation error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
     typer.secho(
-        f"Workflow '{workflow_id}' successfully reconciled with resolution '{resolution}' by operator '{operator}'.",
+        f"Workflow '{workflow_id}' successfully reconciled with resolution '{resolution}' by operator '{operator_clean}'.",
         fg=typer.colors.GREEN,
     )
 

@@ -447,3 +447,25 @@ class InspectWorkflowTasksOutput(BaseModel):
     tasks: List[Dict[str, Any]] = Field(default_factory=list)
     ready_task_ids: List[str] = Field(default_factory=list)
     has_failures: bool = False
+
+
+class ReconcileOrchestrationMutationInput(BaseModel):
+    """Input for attempting reconciliation via ToolRegistry (autonomous callers rejected)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+    resolution: str
+    reconciled_by: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ReconcileOrchestrationMutationOutput(BaseModel):
+    """Output returned when a tool caller attempts reconciliation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+    reconciled: bool
+    state: WorkflowState
+    error: str

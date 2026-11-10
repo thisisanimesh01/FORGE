@@ -41,6 +41,8 @@ from forge.orchestration.schemas import (
     InspectWorkflowTasksOutput,
     RecoverOrchestrationWorkflowInput,
     RecoverOrchestrationWorkflowOutput,
+    ReconcileOrchestrationMutationInput,
+    ReconcileOrchestrationMutationOutput,
     RequestOrchestrationApprovalInput,
     RequestOrchestrationApprovalOutput,
     StageStatus,
@@ -424,6 +426,47 @@ class OrchestrationTools:
         )
         return out.model_dump_json()
 
+    def reconcile_orchestration_mutation(self, args: Dict[str, Any]) -> str:
+        """Tool: reconcile_orchestration_mutation.
+
+        Enforces architectural separation: autonomous tool callers cannot reconcile
+        interrupted mutations or impersonate an authorized human operator.
+        """
+        try:
+            inp = ReconcileOrchestrationMutationInput.model_validate(args)
+            wf_id = inp.workflow_id
+        except Exception:
+            wf_id = str(args.get("workflow_id", "unknown"))
+
+        orchestrator = self.get_orchestrator(wf_id)
+        if orchestrator:
+            from forge.orchestration.events import OrchestrationEventType
+            orchestrator.event_recorder.record_event(
+                workflow_id=wf_id,
+                event_type=OrchestrationEventType.STAGE_FAILED,
+                state=orchestrator.state,
+                action_description="Autonomous tool attempted to reconcile interrupted mutation (rejected).",
+                details={"caller": "tool_registry", "attempted_operator": args.get("reconciled_by"), "attempted_resolution": args.get("resolution")},
+            )
+            orchestrator._transition(
+                WorkflowState.BLOCKED,
+                "Workflow blocked: Autonomous tool caller attempted to reconcile interrupted mutation.",
+                stage=WorkflowStage.EXECUTION,
+                details={"error": "Tool callers cannot reconcile interrupted mutations"},
+            )
+
+        out = ReconcileOrchestrationMutationOutput(
+            workflow_id=wf_id,
+            reconciled=False,
+            state=orchestrator.state if orchestrator else WorkflowState.BLOCKED,
+            error=(
+                "Reconciliation rejected: Autonomous tool caller cannot reconcile interrupted mutations "
+                "or impersonate an authorized human operator. Mutation reconciliation strictly requires an "
+                "authenticated human operator via interactive CLI ('forge orchestrate reconcile')."
+            ),
+        )
+        return out.model_dump_json()
+
     # -------------------------------------------------------------
     # Tool Definitions for ToolRegistry
     # -------------------------------------------------------------
@@ -480,5 +523,10 @@ class OrchestrationTools:
                 name="inspect_workflow_tasks",
                 description="Inspect DAG coordination tasks, execution order, prerequisite states, and failure propagation for a workflow.",
                 parameters=InspectWorkflowTasksInput.model_json_schema(),
+            ),
+            ToolDefinition(
+                name="reconcile_orchestration_mutation",
+                description="Endpoint for reconciling interrupted mutations. Note: Autonomous tool callers (LLMs/subagents) cannot self-reconcile mutations and will be rejected.",
+                parameters=ReconcileOrchestrationMutationInput.model_json_schema(),
             ),
         ]
