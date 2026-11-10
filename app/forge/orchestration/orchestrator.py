@@ -71,6 +71,15 @@ from forge.orchestration.schemas import (
     WorkflowStage,
     WorkflowState,
 )
+from forge.orchestration.idempotency import (
+    IdempotencyConflictError,
+    IdempotencyLedger,
+    OperationStatus,
+    UncertainExecutionError,
+    compute_idempotency_key,
+)
+from forge.orchestration.persistence import CorruptedStateError, OrchestrationStateStore
+from forge.orchestration.retry import FailureClassifier, FailureCategory, RetryPolicy, RetryDecision
 from forge.orchestration.state import (
     IllegalStateTransitionError,
     InvalidTransitionError,
@@ -95,6 +104,9 @@ class EngineeringOrchestrator:
         execution_adapter: Optional[ExecutionAdapter] = None,
         verification_adapter: Optional[VerificationAdapter] = None,
         quality_adapter: Optional[QualityAdapter] = None,
+        state_store: Optional[OrchestrationStateStore] = None,
+        retry_policy: Optional[RetryPolicy] = None,
+        idempotency_ledger: Optional[IdempotencyLedger] = None,
     ) -> None:
         self.context = context
         self.workflow_id = context.workflow_id
@@ -111,6 +123,11 @@ class EngineeringOrchestrator:
         self.approval_manager = approval_manager or OrchestrationApprovalManager(
             trusted_approvers=context.trusted_approvers
         )
+        self.state_store = state_store
+        self.retry_policy = retry_policy or RetryPolicy()
+        self.idempotency_ledger = idempotency_ledger or (
+            IdempotencyLedger(db_path=state_store.db_path) if state_store else None
+        )
 
         # Stage Adapters
         self.diagnosis_adapter = diagnosis_adapter or DefaultDiagnosisAdapter()
@@ -120,21 +137,30 @@ class EngineeringOrchestrator:
         self.verification_adapter = verification_adapter or DefaultVerificationAdapter()
         self.quality_adapter = quality_adapter or DefaultQualityAdapter()
 
-        # Emit genesis event
-        self.event_recorder.record_event(
-            workflow_id=self.workflow_id,
-            event_type=OrchestrationEventType.WORKFLOW_CREATED,
-            state=self.state,
-            action_description=f"Initialized engineering workflow for repository '{context.repository_path}'.",
-            details={
-                "repository_path": context.repository_path,
-                "commit_sha": context.commit_sha,
-                "run_id": context.run_id,
-            },
-        )
+        # Emit and persist genesis event if not already recorded
+        events = self.event_recorder.get_events(self.workflow_id)
+        if not events:
+            genesis_event = self.event_recorder.record_event(
+                workflow_id=self.workflow_id,
+                event_type=OrchestrationEventType.WORKFLOW_CREATED,
+                state=self.state,
+                action_description=f"Initialized engineering workflow for repository '{context.repository_path}'.",
+                details={
+                    "repository_path": context.repository_path,
+                    "commit_sha": context.commit_sha,
+                    "run_id": context.run_id,
+                },
+            )
+            if self.state_store:
+                self.state_store.save_workflow(
+                    context=self.context,
+                    state=self.state,
+                    requires_human_review=True,
+                )
+                self.state_store.save_event(genesis_event)
 
     # -----------------------------------------------------------------------
-    # State Machine Coordination
+    # State Machine Coordination & Checkpointing
     # -----------------------------------------------------------------------
 
     def _transition(
@@ -144,7 +170,7 @@ class EngineeringOrchestrator:
         stage: Optional[WorkflowStage] = None,
         details: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Validate and apply a lifecycle state transition."""
+        """Validate and apply a lifecycle state transition with persistence and checkpointing."""
         validate_transition(self.state, target_state)
         prev_state = self.state
         self.state = target_state
@@ -172,7 +198,7 @@ class EngineeringOrchestrator:
         ):
             event_type = OrchestrationEventType.STAGE_STARTED
 
-        self.event_recorder.record_event(
+        ev = self.event_recorder.record_event(
             workflow_id=self.workflow_id,
             event_type=event_type,
             state=self.state,
@@ -180,6 +206,125 @@ class EngineeringOrchestrator:
             stage=stage,
             details=details or {},
         )
+
+        if self.state_store:
+            active_plan_id = self.stage_outputs.repair_plan.plan_id if self.stage_outputs.repair_plan else None
+            active_appr_id = self.stage_outputs.approval.approval_id if self.stage_outputs.approval else None
+            self.state_store.save_workflow(
+                context=self.context,
+                state=self.state,
+                current_stage=stage,
+                active_repair_plan_id=active_plan_id,
+                active_approval_id=active_appr_id,
+                completed_at=self.completed_at,
+                requires_human_review=True,
+            )
+            self.state_store.save_event(ev)
+
+            # Record checkpoint on milestone transitions
+            if target_state in (
+                WorkflowState.DIAGNOSIS_COMPLETED,
+                WorkflowState.ROOT_CAUSE_COMPLETED,
+                WorkflowState.PLAN_READY,
+                WorkflowState.AWAITING_HUMAN_APPROVAL,
+                WorkflowState.APPROVED,
+                WorkflowState.REPAIR_COMPLETED,
+                WorkflowState.VERIFICATION_COMPLETED,
+                WorkflowState.COMPLETED,
+            ):
+                self.state_store.save_checkpoint(
+                    workflow_id=self.workflow_id,
+                    stage=stage or WorkflowStage.DIAGNOSIS,
+                    state=target_state,
+                    last_event_sequence=ev.sequence,
+                    last_event_hash=ev.event_hash,
+                    outputs_digest=self._compute_outputs_digest(),
+                )
+
+    def _compute_outputs_digest(self) -> str:
+        """Compute SHA-256 digest of current stage outputs."""
+        keys: List[str] = []
+        if self.stage_outputs.diagnosis_result:
+            keys.append(f"diag:{self.stage_outputs.diagnosis_result.diagnosis_id}")
+        if self.stage_outputs.root_cause_report:
+            keys.append(f"rca:{self.stage_outputs.root_cause_report.report_id}")
+        if self.stage_outputs.repair_plan:
+            keys.append(f"plan:{self.stage_outputs.repair_plan.plan_id}")
+        if self.stage_outputs.approval:
+            keys.append(f"appr:{self.stage_outputs.approval.approval_id}")
+        if self.stage_outputs.execution_result:
+            keys.append(f"exec:{self.stage_outputs.execution_result.execution_status.value}")
+        if self.stage_outputs.verification_result:
+            keys.append(f"verif:{self.stage_outputs.verification_result.verification_id}")
+        if self.stage_outputs.quality_result:
+            keys.append(f"qual:{self.stage_outputs.quality_result.result_id}:{self.stage_outputs.quality_result.gate_decision.value}")
+        raw = "|".join(keys) or "empty"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _get_stage_output_payload(self, stage: WorkflowStage) -> Optional[Dict[str, Any]]:
+        """Return serialized dictionary payload for a given stage."""
+        if stage == WorkflowStage.DIAGNOSIS and self.stage_outputs.diagnosis_result:
+            return self.stage_outputs.diagnosis_result.model_dump(mode="json")
+        if stage == WorkflowStage.ROOT_CAUSE and self.stage_outputs.root_cause_report:
+            return self.stage_outputs.root_cause_report.model_dump(mode="json")
+        if stage == WorkflowStage.PLANNING and self.stage_outputs.repair_plan:
+            return self.stage_outputs.repair_plan.model_dump(mode="json")
+        if stage == WorkflowStage.APPROVAL and self.stage_outputs.approval:
+            return self.stage_outputs.approval.model_dump(mode="json")
+        if stage == WorkflowStage.EXECUTION and self.stage_outputs.execution_result:
+            return {
+                "execution_result": self.stage_outputs.execution_result.model_dump(mode="json"),
+                "repair_workspace": self.stage_outputs.repair_workspace.model_dump(mode="json") if self.stage_outputs.repair_workspace else None,
+            }
+        if stage == WorkflowStage.VERIFICATION and self.stage_outputs.verification_result:
+            return self.stage_outputs.verification_result.model_dump(mode="json")
+        if stage == WorkflowStage.QUALITY and self.stage_outputs.quality_result:
+            return self.stage_outputs.quality_result.model_dump(mode="json")
+        return None
+
+    def _save_stage_record_if_store(self, stage: WorkflowStage) -> None:
+        """Persist stage execution record and outputs to state store if present."""
+        if self.state_store and stage.value in self.stage_records:
+            self.state_store.save_stage_record(
+                workflow_id=self.workflow_id,
+                stage=stage,
+                record=self.stage_records[stage.value],
+                output_payload=self._get_stage_output_payload(stage),
+            )
+
+    def _execute_with_retry(
+        self,
+        stage: WorkflowStage,
+        operation: Any,
+        is_mutating: bool = False,
+    ) -> Any:
+        """Execute an adapter operation with bounded retry and deterministic failure classification."""
+        import time
+        attempt = 1
+        while True:
+            try:
+                return operation()
+            except Exception as exc:
+                cat = FailureClassifier.classify_exception(exc, is_mutating=is_mutating)
+                decision = self.retry_policy.evaluate(
+                    category=cat,
+                    attempt=attempt,
+                    is_mutating=is_mutating,
+                    operation_name=stage.value,
+                )
+                if decision.should_retry:
+                    self.event_recorder.record_event(
+                        workflow_id=self.workflow_id,
+                        event_type=OrchestrationEventType.RETRY_ATTEMPTED,
+                        state=self.state,
+                        action_description=f"Retrying stage '{stage.value}' after transient failure ({cat.value}): {exc}",
+                        stage=stage,
+                        details={"attempt": attempt, "delay": decision.delay_seconds, "error": str(exc)},
+                    )
+                    time.sleep(decision.delay_seconds)
+                    attempt += 1
+                    continue
+                raise
 
     # -----------------------------------------------------------------------
     # Stage 1: Diagnosis
@@ -196,7 +341,11 @@ class EngineeringOrchestrator:
             started_at = datetime.now(timezone.utc)
 
             try:
-                diag_result = self.diagnosis_adapter.run_diagnosis(self.context, input_data)
+                diag_result = self._execute_with_retry(
+                    WorkflowStage.DIAGNOSIS,
+                    lambda: self.diagnosis_adapter.run_diagnosis(self.context, input_data),
+                    is_mutating=False,
+                )
                 self.stage_outputs.diagnosis_result = diag_result
 
                 # Check if defect diagnosis succeeded
@@ -208,6 +357,7 @@ class EngineeringOrchestrator:
                         completed_at=datetime.now(timezone.utc),
                         metadata={"diagnosis_id": diag_result.diagnosis_id, "status": diag_result.status.value},
                     )
+                    self._save_stage_record_if_store(WorkflowStage.DIAGNOSIS)
                     self._transition(
                         WorkflowState.DIAGNOSIS_COMPLETED,
                         f"Defect diagnosis completed with status '{diag_result.status.value}'.",
@@ -224,6 +374,7 @@ class EngineeringOrchestrator:
                         error_message=err_msg,
                         metadata={"diagnosis_id": diag_result.diagnosis_id},
                     )
+                    self._save_stage_record_if_store(WorkflowStage.DIAGNOSIS)
                     self._transition(
                         WorkflowState.BLOCKED,
                         f"Workflow blocked: {err_msg}",
@@ -240,6 +391,7 @@ class EngineeringOrchestrator:
                     completed_at=datetime.now(timezone.utc),
                     error_message=str(exc),
                 )
+                self._save_stage_record_if_store(WorkflowStage.DIAGNOSIS)
                 self._transition(
                     WorkflowState.FAILED,
                     f"Diagnosis stage failed with exception: {exc}",
@@ -262,9 +414,14 @@ class EngineeringOrchestrator:
             started_at = datetime.now(timezone.utc)
 
             try:
-                rc_report = self.root_cause_adapter.run_root_cause(
-                    self.context,
-                    diagnosis=self.stage_outputs.diagnosis_result,
+                diag_res = self.stage_outputs.diagnosis_result
+                rc_report = self._execute_with_retry(
+                    WorkflowStage.ROOT_CAUSE,
+                    lambda: self.root_cause_adapter.run_root_cause(
+                        self.context,
+                        diagnosis=diag_res,
+                    ),
+                    is_mutating=False,
                 )
                 self.stage_outputs.root_cause_report = rc_report
 
@@ -280,6 +437,7 @@ class EngineeringOrchestrator:
                         completed_at=datetime.now(timezone.utc),
                         metadata={"report_id": rc_report.report_id, "status": rc_report.status.value},
                     )
+                    self._save_stage_record_if_store(WorkflowStage.ROOT_CAUSE)
                     self._transition(
                         WorkflowState.ROOT_CAUSE_COMPLETED,
                         f"Root-cause analysis completed with status '{rc_report.status.value}'.",
@@ -296,6 +454,7 @@ class EngineeringOrchestrator:
                         error_message=err_msg,
                         metadata={"report_id": rc_report.report_id},
                     )
+                    self._save_stage_record_if_store(WorkflowStage.ROOT_CAUSE)
                     self._transition(
                         WorkflowState.BLOCKED,
                         f"Workflow blocked: {err_msg}",
@@ -334,10 +493,16 @@ class EngineeringOrchestrator:
             started_at = datetime.now(timezone.utc)
 
             try:
-                plan = self.planning_adapter.run_planning(
-                    self.context,
-                    root_cause=self.stage_outputs.root_cause_report,
-                    diagnosis=self.stage_outputs.diagnosis_result,
+                diag_res = self.stage_outputs.diagnosis_result
+                rca_res = self.stage_outputs.root_cause_report
+                plan = self._execute_with_retry(
+                    WorkflowStage.PLANNING,
+                    lambda: self.planning_adapter.run_planning(
+                        self.context,
+                        root_cause=rca_res,
+                        diagnosis=diag_res,
+                    ),
+                    is_mutating=False,
                 )
                 self.stage_outputs.repair_plan = plan
 
@@ -352,6 +517,7 @@ class EngineeringOrchestrator:
                         completed_at=datetime.now(timezone.utc),
                         metadata={"plan_id": plan.plan_id, "strategy_id": plan.selected_strategy_id},
                     )
+                    self._save_stage_record_if_store(WorkflowStage.PLANNING)
                     # Transition to PLAN_READY then immediately to AWAITING_HUMAN_APPROVAL
                     self._transition(
                         WorkflowState.PLAN_READY,
@@ -375,6 +541,7 @@ class EngineeringOrchestrator:
                         error_message=err_msg,
                         metadata={"plan_id": plan.plan_id},
                     )
+                    self._save_stage_record_if_store(WorkflowStage.PLANNING)
                     self._transition(
                         WorkflowState.BLOCKED,
                         f"Workflow blocked: {err_msg}",
@@ -391,6 +558,7 @@ class EngineeringOrchestrator:
                     completed_at=datetime.now(timezone.utc),
                     error_message=str(exc),
                 )
+                self._save_stage_record_if_store(WorkflowStage.PLANNING)
                 self._transition(
                     WorkflowState.FAILED,
                     f"Repair planning stage failed with exception: {exc}",
@@ -429,6 +597,7 @@ class EngineeringOrchestrator:
                     completed_at=datetime.now(timezone.utc),
                     metadata={"approval_id": approval.approval_id, "approver": approval.approver_reference},
                 )
+                self._save_stage_record_if_store(WorkflowStage.APPROVAL)
                 self._transition(
                     WorkflowState.APPROVED,
                     f"Human approval verified for plan '{plan.plan_id}' by '{approval.approver_reference}'.",
@@ -449,6 +618,7 @@ class EngineeringOrchestrator:
                     error_message=err_msg,
                     metadata={"approval_id": approval.approval_id, "errors": outcome.errors},
                 )
+                self._save_stage_record_if_store(WorkflowStage.APPROVAL)
                 self._transition(
                     WorkflowState.BLOCKED,
                     f"Workflow blocked: {err_msg}",
@@ -475,6 +645,39 @@ class EngineeringOrchestrator:
             if not plan or not approval:
                 raise WorkflowStateError("Cannot execute repair without valid plan and approval.")
 
+            # Idempotency check for repair execution (cached replay check before consuming approval)
+            plan_digest = compute_plan_digest(plan)
+            idemp_key = compute_idempotency_key(
+                workflow_id=self.workflow_id,
+                stage=WorkflowStage.EXECUTION,
+                input_digest=plan_digest,
+            )
+            if self.idempotency_ledger:
+                existing = self.idempotency_ledger.get(idemp_key)
+                if existing and existing.status == OperationStatus.COMPLETED and existing.result_payload:
+                    try:
+                        cached_result = RepairExecutionResult.model_validate(existing.result_payload["execution_result"])
+                        if existing.result_payload.get("repair_workspace"):
+                            cached_ws = RepairWorkspace.model_validate(existing.result_payload["repair_workspace"])
+                            self.stage_outputs.repair_workspace = cached_ws
+                    except Exception as val_err:
+                        raise CorruptedStateError(
+                            f"Corrupted idempotency cached payload for key '{idemp_key}': {val_err}"
+                        ) from val_err
+                    self.stage_outputs.execution_result = cached_result
+                    self._transition(
+                        WorkflowState.REPAIR_EXECUTING,
+                        f"Replaying cached execution for key '{idemp_key}'.",
+                        stage=WorkflowStage.EXECUTION,
+                    )
+                    self._transition(
+                        WorkflowState.REPAIR_COMPLETED,
+                        f"Idempotent repair execution replayed from cache for key '{idemp_key}'.",
+                        stage=WorkflowStage.EXECUTION,
+                        details={"execution_id": cached_result.execution_id, "idempotency_key": idemp_key},
+                    )
+                    return cached_result
+
             # Immediate pre-execution authorization check (immediately before any workspace mutation)
             pre_check = self.approval_manager.verify_approval(
                 approval=approval,
@@ -491,12 +694,32 @@ class EngineeringOrchestrator:
                     error_message=err_msg,
                     metadata={"approval_id": approval.approval_id, "errors": pre_check.errors},
                 )
+                self._save_stage_record_if_store(WorkflowStage.EXECUTION)
                 self._transition(WorkflowState.BLOCKED, err_msg, stage=WorkflowStage.EXECUTION)
                 raise OrchestrationApprovalError(err_msg)
 
             # Ensure fake execution adapters share the approval manager ledger for durable replay protection
             if isinstance(self.execution_adapter, FakeExecutionAdapter) and self.execution_adapter.ledger is None:
                 self.execution_adapter.ledger = self.approval_manager.ledger
+
+            if self.idempotency_ledger:
+                existing = self.idempotency_ledger.register_start(
+                    idempotency_key=idemp_key,
+                    workflow_id=self.workflow_id,
+                    stage=WorkflowStage.EXECUTION,
+                )
+                if existing:
+                    if existing.status in (OperationStatus.STARTED, OperationStatus.UNCERTAIN):
+                        err_msg = f"Operation with key '{idemp_key}' was previously started or uncertain. Re-execution requires explicit reconciliation."
+                        self._transition(
+                            WorkflowState.BLOCKED,
+                            err_msg,
+                            stage=WorkflowStage.EXECUTION,
+                            details={"idempotency_key": idemp_key, "status": existing.status.value},
+                        )
+                        raise UncertainExecutionError(err_msg)
+                    elif existing.status == OperationStatus.FAILED:
+                        raise IdempotencyConflictError(f"Previous execution attempt failed: {existing.error_message}")
 
             self._transition(
                 WorkflowState.REPAIR_EXECUTING,
@@ -516,6 +739,15 @@ class EngineeringOrchestrator:
                 self.stage_outputs.repair_workspace = workspace
 
                 if exec_result.execution_status == ExecutionStatus.APPLIED:
+                    if self.idempotency_ledger:
+                        self.idempotency_ledger.mark_completed(
+                            idempotency_key=idemp_key,
+                            result_payload={
+                                "execution_result": exec_result.model_dump(mode="json"),
+                                "repair_workspace": workspace.model_dump(mode="json"),
+                            },
+                            result_digest=exec_result.applied_patch_digest,
+                        )
                     self.stage_records[WorkflowStage.EXECUTION.value] = StageExecutionRecord(
                         stage=WorkflowStage.EXECUTION,
                         status=StageStatus.COMPLETED,
@@ -527,6 +759,7 @@ class EngineeringOrchestrator:
                             "patch_digest": exec_result.applied_patch_digest,
                         },
                     )
+                    self._save_stage_record_if_store(WorkflowStage.EXECUTION)
                     self._transition(
                         WorkflowState.REPAIR_COMPLETED,
                         f"Controlled repair applied in workspace '{workspace.workspace_id}'.",
@@ -534,6 +767,11 @@ class EngineeringOrchestrator:
                         details={"execution_id": exec_result.execution_id},
                     )
                 else:
+                    if self.idempotency_ledger:
+                        self.idempotency_ledger.mark_failed(
+                            idempotency_key=idemp_key,
+                            error_message=f"Execution status: {exec_result.execution_status.value}",
+                        )
                     err_msg = f"Repair execution ended with status '{exec_result.execution_status.value}'."
                     self.stage_records[WorkflowStage.EXECUTION.value] = StageExecutionRecord(
                         stage=WorkflowStage.EXECUTION,
@@ -543,6 +781,7 @@ class EngineeringOrchestrator:
                         error_message=err_msg,
                         metadata={"execution_id": exec_result.execution_id},
                     )
+                    self._save_stage_record_if_store(WorkflowStage.EXECUTION)
                     self._transition(
                         WorkflowState.BLOCKED,
                         f"Workflow blocked: {err_msg}",
@@ -552,6 +791,11 @@ class EngineeringOrchestrator:
                 return exec_result
 
             except Exception as exc:
+                if self.idempotency_ledger:
+                    self.idempotency_ledger.mark_uncertain(
+                        idempotency_key=idemp_key,
+                        reason=f"Interrupted during execution: {exc}",
+                    )
                 self.stage_records[WorkflowStage.EXECUTION.value] = StageExecutionRecord(
                     stage=WorkflowStage.EXECUTION,
                     status=StageStatus.FAILED,
@@ -559,6 +803,7 @@ class EngineeringOrchestrator:
                     completed_at=datetime.now(timezone.utc),
                     error_message=str(exc),
                 )
+                self._save_stage_record_if_store(WorkflowStage.EXECUTION)
                 self._transition(
                     WorkflowState.FAILED,
                     f"Repair execution stage failed with exception: {exc}",
@@ -591,11 +836,15 @@ class EngineeringOrchestrator:
             started_at = datetime.now(timezone.utc)
 
             try:
-                verif_result = self.verification_adapter.run_verification(
-                    context=self.context,
-                    execution_result=exec_res,
-                    workspace=workspace,
-                    policy=self.context.verification_policy,
+                verif_result = self._execute_with_retry(
+                    WorkflowStage.VERIFICATION,
+                    lambda: self.verification_adapter.run_verification(
+                        context=self.context,
+                        execution_result=exec_res,
+                        workspace=workspace,
+                        policy=self.context.verification_policy,
+                    ),
+                    is_mutating=False,
                 )
                 self.stage_outputs.verification_result = verif_result
 
@@ -613,6 +862,7 @@ class EngineeringOrchestrator:
                             "regression_classification": verif_result.regression_classification.value,
                         },
                     )
+                    self._save_stage_record_if_store(WorkflowStage.VERIFICATION)
                     self._transition(
                         WorkflowState.VERIFICATION_COMPLETED,
                         f"Repair verification passed with zero regressions.",
@@ -633,6 +883,7 @@ class EngineeringOrchestrator:
                         error_message=err_msg,
                         metadata={"verification_id": verif_result.verification_id},
                     )
+                    self._save_stage_record_if_store(WorkflowStage.VERIFICATION)
                     self._transition(
                         WorkflowState.BLOCKED,
                         f"Workflow blocked: {err_msg}",
@@ -649,6 +900,7 @@ class EngineeringOrchestrator:
                     completed_at=datetime.now(timezone.utc),
                     error_message=str(exc),
                 )
+                self._save_stage_record_if_store(WorkflowStage.VERIFICATION)
                 self._transition(
                     WorkflowState.FAILED,
                     f"Repair verification stage failed with exception: {exc}",
@@ -684,15 +936,19 @@ class EngineeringOrchestrator:
             started_at = datetime.now(timezone.utc)
 
             try:
-                quality_result = self.quality_adapter.run_quality(
-                    context=self.context,
-                    execution_result=exec_res,
-                    workspace=workspace,
-                    plan=plan,
-                    verification_result=verif_res,
-                    diagnosis=self.stage_outputs.diagnosis_result,
-                    root_cause=self.stage_outputs.root_cause_report,
-                    policy=self.context.quality_policy,
+                quality_result = self._execute_with_retry(
+                    WorkflowStage.QUALITY,
+                    lambda: self.quality_adapter.run_quality(
+                        context=self.context,
+                        execution_result=exec_res,
+                        workspace=workspace,
+                        plan=plan,
+                        verification_result=verif_res,
+                        diagnosis=self.stage_outputs.diagnosis_result,
+                        root_cause=self.stage_outputs.root_cause_report,
+                        policy=self.context.quality_policy,
+                    ),
+                    is_mutating=False,
                 )
                 self.stage_outputs.quality_result = quality_result
 
@@ -711,6 +967,7 @@ class EngineeringOrchestrator:
                             "overall_score": quality_result.overall_score,
                         },
                     )
+                    self._save_stage_record_if_store(WorkflowStage.QUALITY)
                     self._transition(
                         WorkflowState.COMPLETED,
                         f"Quality evaluation passed (score={quality_result.overall_score:.2f}). Workflow successfully completed.",
@@ -737,6 +994,7 @@ class EngineeringOrchestrator:
                             "violations": quality_result.policy_violations,
                         },
                     )
+                    self._save_stage_record_if_store(WorkflowStage.QUALITY)
                     self._transition(
                         WorkflowState.BLOCKED,
                         f"Workflow blocked: {err_msg}",
@@ -754,6 +1012,7 @@ class EngineeringOrchestrator:
                     completed_at=datetime.now(timezone.utc),
                     error_message=str(exc),
                 )
+                self._save_stage_record_if_store(WorkflowStage.QUALITY)
                 self._transition(
                     WorkflowState.FAILED,
                     f"Quality evaluation stage failed with exception: {exc}",

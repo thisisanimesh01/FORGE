@@ -385,3 +385,87 @@ class GetEngineeringReportOutput(BaseModel):
     state: WorkflowState
     report_markdown: str
     requires_human_review: bool = True
+
+
+class InspectWorkflowRecoveryInput(BaseModel):
+    """Input for inspecting workflow recovery status."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+
+
+class InspectWorkflowRecoveryOutput(BaseModel):
+    """Output providing recovery status and checkpoint information."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+    state: WorkflowState
+    can_recover: bool
+    checkpoint_sequence: Optional[int] = None
+    checkpoint_digest: Optional[str] = None
+    reconciliation_required: bool = False
+    blocking_reason: Optional[str] = None
+
+
+class RecoverOrchestrationWorkflowInput(BaseModel):
+    """Input for executing workflow recovery."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+    allow_discard_unconfirmed_mutation: bool = False
+
+
+class RecoverOrchestrationWorkflowOutput(BaseModel):
+    """Output from executing workflow recovery."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+    recovered: bool
+    state: WorkflowState
+    message: str
+    reconciliation_required: bool = False
+
+
+class InspectWorkflowTasksInput(BaseModel):
+    """Input for inspecting tasks in a coordinated workflow."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+
+
+class InspectWorkflowTasksOutput(BaseModel):
+    """Output listing workflow tasks and their dependency resolution status."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+    tasks: List[Dict[str, Any]] = Field(default_factory=list)
+    ready_task_ids: List[str] = Field(default_factory=list)
+    has_failures: bool = False
+
+
+class ReconcileOrchestrationMutationInput(BaseModel):
+    """Input for attempting reconciliation via ToolRegistry (autonomous callers rejected)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+    resolution: str
+    reconciled_by: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ReconcileOrchestrationMutationOutput(BaseModel):
+    """Output returned when a tool caller attempts reconciliation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str
+    reconciled: bool
+    state: WorkflowState
+    error: str

@@ -4635,7 +4635,174 @@ def orchestrate_status(
     workflow_id: str = typer.Argument(..., help="Workflow ID to inspect"),
 ) -> None:
     """Inspect status of an orchestration workflow."""
-    typer.echo(f"Inspecting workflow: {workflow_id}")
+    from forge.orchestration.persistence import OrchestrationStateStore
+    store = OrchestrationStateStore()
+    wf = store.get_workflow(workflow_id)
+    if wf:
+        typer.echo(f"Workflow ID:   {wf['workflow_id']}")
+        typer.echo(f"State:         {wf['state']}")
+        typer.echo(f"Repository:    {wf['repository_path']}")
+        typer.echo(f"Created At:    {wf['created_at']}")
+        typer.echo(f"Reconcile Req: {bool(wf['reconciliation_required'])}")
+        stages = store.get_stage_records(workflow_id)
+        if stages:
+            typer.echo("Stages:")
+            for s, r in stages.items():
+                typer.echo(f"  - {s:<15} {r.status.value}")
+    else:
+        typer.echo(f"Workflow '{workflow_id}' not found in state store.")
+
+
+@orchestrate_app.command(name="inspect")
+def orchestrate_inspect(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to inspect for recovery"),
+) -> None:
+    """Inspect workflow recovery state, checkpoint validity, and reconciliation status."""
+    from forge.orchestration.persistence import OrchestrationStateStore
+    from forge.orchestration.recovery import WorkflowRecoveryEngine, WorkflowRecoveryError
+
+    engine = WorkflowRecoveryEngine()
+    try:
+        decision = engine.inspect_recovery(workflow_id)
+    except WorkflowRecoveryError as exc:
+        typer.secho(f"Recovery inspection error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"Workflow ID:          {decision.workflow_id}")
+    typer.echo(f"Can Resume:           {decision.can_resume}")
+    typer.echo(f"Recovered State:      {decision.recovered_state.value}")
+    typer.echo(f"Last Completed Stage: {decision.last_completed_stage.value if decision.last_completed_stage else 'None'}")
+    typer.echo(f"Next Stage:           {decision.next_stage_to_execute.value if decision.next_stage_to_execute else 'None'}")
+    typer.echo(f"Reconcile Required:   {decision.reconciliation_required}")
+    typer.echo(f"Events Verified:      {decision.event_count}")
+    typer.echo(f"Reason:               {decision.reason}")
+    if decision.human_action_required:
+        typer.secho(f"Action Required:      {decision.human_action_required}", fg=typer.colors.YELLOW)
+
+
+@orchestrate_app.command(name="recover")
+def orchestrate_recover(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to recover"),
+) -> None:
+    """Safely recover an interrupted workflow from its last verified checkpoint."""
+    from forge.orchestration.recovery import WorkflowRecoveryEngine, WorkflowRecoveryError
+
+    engine = WorkflowRecoveryEngine()
+    try:
+        decision, orchestrator = engine.recover_workflow(workflow_id)
+    except WorkflowRecoveryError as exc:
+        typer.secho(f"Recovery failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if decision.reconciliation_required:
+        typer.secho(
+            f"\n[RECONCILIATION REQUIRED] Workflow was interrupted during repair execution.\n"
+            f"Run 'forge orchestrate reconcile {workflow_id} --resolution <confirm|discard>' to unblock.",
+            fg=typer.colors.YELLOW,
+        )
+        return
+
+    typer.secho(
+        f"Workflow '{workflow_id}' recovered successfully in state '{orchestrator.state.value}'.",
+        fg=typer.colors.GREEN,
+    )
+    if decision.next_stage_to_execute:
+        typer.echo(f"Next stage to execute: {decision.next_stage_to_execute.value}")
+
+
+@orchestrate_app.command(name="tasks")
+def orchestrate_tasks(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to list tasks for"),
+) -> None:
+    """Inspect coordinated tasks, dependencies, and execution state for a workflow."""
+    from forge.orchestration.coordination import TaskCoordinator
+
+    coord = TaskCoordinator()
+    tasks = coord.list_tasks(workflow_id)
+    if not tasks:
+        typer.echo(f"No tasks registered for workflow '{workflow_id}'.")
+        return
+
+    ready_tasks = coord.get_ready_tasks(workflow_id)
+    ready_ids = {t.task_id for t in ready_tasks}
+
+    typer.echo(f"{'Task ID':<25} {'Stage':<15} {'Priority':<10} {'State':<12} {'Ready':<8} {'Dependencies'}")
+    typer.echo("-" * 85)
+    for t in tasks:
+        ready_str = "YES" if t.task_id in ready_ids else "NO"
+        deps_str = ", ".join(t.prerequisite_task_ids) if t.prerequisite_task_ids else "-"
+        typer.echo(f"{t.task_id:<25} {t.stage.value:<15} {t.priority:<10} {t.state.value:<12} {ready_str:<8} {deps_str}")
+
+
+@orchestrate_app.command(name="reconcile")
+def orchestrate_reconcile(
+    workflow_id: str = typer.Argument(..., help="Workflow ID to reconcile"),
+    resolution: str = typer.Option(..., "--resolution", "-r", help="Reconciliation decision: 'confirm', 'discard', or 'revert'"),
+    operator: Optional[str] = typer.Option(None, "--operator", "-o", help="Human operator identity (defaults to current user)"),
+    notes: Optional[str] = typer.Option(None, "--notes", "-n", help="Operator rationale or explanation"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Confirm reconciliation without interactive prompt"),
+    non_interactive: bool = typer.Option(False, "--non-interactive", help="Explicit non-interactive mode flag"),
+) -> None:
+    """Reconcile an unconfirmed or interrupted mutation with interactive human operator authorization."""
+    import getpass
+    import os
+    import sys
+    from forge.orchestration.recovery import WorkflowRecoveryEngine, WorkflowRecoveryError
+
+    operator_user = getpass.getuser()
+    operator_clean = (operator or operator_user).strip()
+
+    # 1. Prohibited synthetic / agentic names
+    prohibited = {"unknown", "none", "auto", "llm", "ai", "model", "agent", "forge", "assistant", "subagent", "bot", "synthetic", "system"}
+    if not operator_clean or operator_clean.lower() in prohibited or any(term in operator_clean.lower() for term in ("llm", "subagent", "synthetic", "auto")):
+        typer.secho("Reconciliation error: Invalid human operator identity. AI/model/agent/auto identities are strictly forbidden.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    # 2. Interactive Confirmation Flow (TTY or --yes required)
+    is_interactive = sys.stdin.isatty() and not non_interactive
+    if not is_interactive and not yes:
+        typer.secho(
+            "Reconciliation error: Non-interactive reconciliation attempt rejected. "
+            "Human operator reconciliation requires an interactive terminal session (TTY) or explicit operator confirmation flag (--yes).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if is_interactive and not yes:
+        typer.echo(f"\n[RECONCILIATION CONFIRMATION REQUIRED]")
+        typer.echo(f"  Workflow ID: {workflow_id}")
+        typer.echo(f"  Resolution:  {resolution}")
+        typer.echo(f"  Operator:    {operator_clean}")
+        typer.echo(f"  Local User:  {operator_user}")
+        if notes:
+            typer.echo(f"  Notes:       {notes}")
+        confirm = typer.confirm(
+            f"Do you, as local operator '{operator_user}', authorize reconciliation '{resolution}' for workflow '{workflow_id}'?",
+            default=False,
+        )
+        if not confirm:
+            typer.secho("Reconciliation aborted by operator.", fg=typer.colors.YELLOW)
+            raise typer.Exit(code=1)
+
+    engine = WorkflowRecoveryEngine()
+    try:
+        engine.reconcile_mutation(
+            workflow_id=workflow_id,
+            resolution=resolution,
+            reconciled_by=operator_clean,
+            notes=notes,
+            operator_principal=operator_user,
+            auth_channel="interactive_cli",
+        )
+    except WorkflowRecoveryError as exc:
+        typer.secho(f"Reconciliation error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    typer.secho(
+        f"Workflow '{workflow_id}' successfully reconciled with resolution '{resolution}' by operator '{operator_clean}'.",
+        fg=typer.colors.GREEN,
+    )
 
 
 @orchestrate_app.command(name="report")

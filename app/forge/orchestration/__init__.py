@@ -17,6 +17,8 @@ from forge.orchestration.schemas import (
     InspectOrchestrationStatusOutput,
     InspectStageResultInput,
     InspectStageResultOutput,
+    ReconcileOrchestrationMutationInput,
+    ReconcileOrchestrationMutationOutput,
     StageExecutionRecord,
     StageOutputs,
     StageStatus,
@@ -51,6 +53,40 @@ from forge.orchestration.approval import (
 from forge.orchestration.report import EngineeringReportGenerator
 from forge.orchestration.orchestrator import EngineeringOrchestrator
 from forge.orchestration.tools import OrchestrationTools
+from forge.orchestration.persistence import (
+    CorruptedStateError,
+    IncompatibleSchemaError,
+    ORCHESTRATION_SCHEMA_VERSION,
+    OrchestrationStateStore,
+    PersistenceError,
+)
+from forge.orchestration.retry import (
+    FailureCategory,
+    FailureClassifier,
+    RetryDecision,
+    RetryPolicy,
+)
+from forge.orchestration.idempotency import (
+    IdempotencyConflictError,
+    IdempotencyLedger,
+    IdempotencyRecord,
+    OperationStatus,
+    UncertainExecutionError,
+    compute_idempotency_key,
+)
+from forge.orchestration.coordination import (
+    DependencyCycleError,
+    TaskCoordinator,
+    TaskDependencyError,
+    TaskRecord,
+    TaskState,
+)
+from forge.orchestration.recovery import (
+    RecoveryDecision,
+    RecoveryStatus,
+    WorkflowRecoveryEngine,
+    WorkflowRecoveryError,
+)
 from forge.orchestration.adapters import (
     DefaultDiagnosisAdapter,
     DefaultExecutionAdapter,
@@ -91,6 +127,8 @@ __all__ = [
     "InspectStageResultOutput",
     "SubmitOrchestrationApprovalInput",
     "SubmitOrchestrationApprovalOutput",
+    "ReconcileOrchestrationMutationInput",
+    "ReconcileOrchestrationMutationOutput",
     "GetEngineeringReportInput",
     "GetEngineeringReportOutput",
     # State Machine
@@ -108,6 +146,35 @@ __all__ = [
     "ApprovalVerificationOutcome",
     "OrchestrationApprovalError",
     "OrchestrationApprovalManager",
+    # Persistence & Checkpointing (M2)
+    "OrchestrationStateStore",
+    "PersistenceError",
+    "CorruptedStateError",
+    "IncompatibleSchemaError",
+    "ORCHESTRATION_SCHEMA_VERSION",
+    # Retry & Failure Classification (M2)
+    "FailureCategory",
+    "FailureClassifier",
+    "RetryDecision",
+    "RetryPolicy",
+    # Idempotency & Mutation Safeguards (M2)
+    "IdempotencyConflictError",
+    "IdempotencyLedger",
+    "IdempotencyRecord",
+    "OperationStatus",
+    "UncertainExecutionError",
+    "compute_idempotency_key",
+    # Task Coordination & DAG Management (M2)
+    "DependencyCycleError",
+    "TaskCoordinator",
+    "TaskDependencyError",
+    "TaskRecord",
+    "TaskState",
+    # Recovery Engine (M2)
+    "RecoveryDecision",
+    "RecoveryStatus",
+    "WorkflowRecoveryEngine",
+    "WorkflowRecoveryError",
     # Reporting
     "EngineeringReportGenerator",
     # Core Orchestration
