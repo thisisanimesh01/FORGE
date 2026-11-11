@@ -55,6 +55,29 @@ class WorkspaceRollbackManager:
         files_to_restore = set(modified_files or workspace.allowed_paths or [])
 
         try:
+            def _assert_safe_ws_dest(rel_p: str) -> Path:
+                cur = ws_root
+                for part in Path(rel_p).parts:
+                    cur = cur / part
+                    if cur.is_symlink():
+                        raise RuntimeError(f"Symlink detected along rollback path '{cur}'.")
+                return assert_contained_path(ws_root / rel_p, ws_root)
+
+            def _safe_write_file(dest: Path, data: bytes) -> None:
+                if dest.is_symlink():
+                    raise RuntimeError(f"Refusing rollback write to symlink '{dest}'.")
+                if dest.exists():
+                    st = os.lstat(dest)
+                    if st.st_nlink > 1:
+                        dest.unlink()
+                oflags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+                fd = os.open(str(dest), oflags, 0o644)
+                try:
+                    with os.fdopen(fd, "wb", closefd=False) as fh:
+                        fh.write(data)
+                finally:
+                    os.close(fd)
+
             # 1. Primary restoration: restore from immutable baseline snapshot captured at allocation
             if snap_path and snap_path.exists() and snap_path.is_dir():
                 # Verify that baseline snapshot has not been corrupted or tampered with
@@ -74,6 +97,11 @@ class WorkspaceRollbackManager:
                             rel_p = str(ws_f.relative_to(ws_root)).replace("\\", "/")
                         except ValueError:
                             continue
+                        if ws_f.is_symlink():
+                            ws_f.unlink()
+                            restored_files.append(rel_p)
+                            continue
+                        _assert_safe_ws_dest(rel_p)
                         snap_f = snap_path / rel_p
                         if not snap_f.exists():
                             ws_f.unlink()
@@ -90,27 +118,28 @@ class WorkspaceRollbackManager:
                             rel_p = str(snap_f.relative_to(snap_path)).replace("\\", "/")
                         except ValueError:
                             continue
-                        ws_f = ws_root / rel_p
-                        try:
-                            if not ws_f.exists() or ws_f.read_bytes() != snap_f.read_bytes():
-                                ws_f.parent.mkdir(parents=True, exist_ok=True)
-                                shutil.copy2(snap_f, ws_f)
-                                restored_files.append(rel_p)
-                        except Exception:
-                            continue
+                        ws_f = _assert_safe_ws_dest(rel_p)
+                        snap_bytes = snap_f.read_bytes()
+                        ws_bytes = ws_f.read_bytes() if (ws_f.exists() and not ws_f.is_symlink() and ws_f.is_file()) else None
+                        if ws_bytes != snap_bytes:
+                            ws_f.parent.mkdir(parents=True, exist_ok=True)
+                            _assert_safe_ws_dest(rel_p)
+                            _safe_write_file(ws_f, snap_bytes)
+                            restored_files.append(rel_p)
 
             # 2. Secondary fallback: restore from in-memory backups if available
             elif backups:
                 for rel_path, original_bytes in backups.items():
                     norm_path = rel_path.replace("\\", "/").strip()
-                    target_file = assert_contained_path(ws_root / norm_path, ws_root)
+                    target_file = _assert_safe_ws_dest(norm_path)
                     if original_bytes is None:
                         if target_file.exists():
                             target_file.unlink()
                             restored_files.append(norm_path)
                     else:
                         target_file.parent.mkdir(parents=True, exist_ok=True)
-                        target_file.write_bytes(original_bytes)
+                        _assert_safe_ws_dest(norm_path)
+                        _safe_write_file(target_file, original_bytes)
                         restored_files.append(norm_path)
                     files_to_restore.discard(norm_path)
 
@@ -118,14 +147,15 @@ class WorkspaceRollbackManager:
             elif original_repo.exists() and original_repo.is_dir():
                 for rel_path in files_to_restore:
                     norm_path = rel_path.replace("\\", "/").strip()
-                    orig_file = original_repo / norm_path
-                    ws_file = assert_contained_path(ws_root / norm_path, ws_root)
+                    orig_file = assert_contained_path(original_repo / norm_path, original_repo)
+                    ws_file = _assert_safe_ws_dest(norm_path)
 
-                    if orig_file.exists() and orig_file.is_file():
+                    if orig_file.exists() and orig_file.is_file() and not orig_file.is_symlink():
                         ws_file.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(orig_file, ws_file)
+                        _assert_safe_ws_dest(norm_path)
+                        _safe_write_file(ws_file, orig_file.read_bytes())
                         restored_files.append(norm_path)
-                    elif ws_file.exists():
+                    elif ws_file.exists() or ws_file.is_symlink():
                         ws_file.unlink()
                         restored_files.append(norm_path)
 

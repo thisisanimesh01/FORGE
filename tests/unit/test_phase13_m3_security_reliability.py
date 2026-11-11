@@ -1055,3 +1055,452 @@ def test_orchestration_tools_recovery_attributes_and_already_blocked_rejection(t
 
     rec_out = json.loads(tools.recover_orchestration_workflow({"workflow_id": orch.workflow_id}))
     assert rec_out["state"] == WorkflowState.BLOCKED.value
+
+
+# ---------------------------------------------------------------------------
+# 6. Second-Pass Closure Audit: SSRF, Archive Races, Git Env, TOCTOU, Migration & Sandbox
+# ---------------------------------------------------------------------------
+
+def test_ssrf_url_validation_blocks_private_ipv6_numeric_creds_redirects_and_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Comprehensive SSRF checks across schemes, credentials, numeric encodings, IPv6/IPv4-mapped, DNS rebinding, IP pinning, and redirects."""
+    import socket
+    import httpx
+    from forge.llm.models import ChatMessage, LLMRequest, MessageRole
+    from forge.llm.provider import LLMUnavailableError
+    from forge.llm.url_safety import URLSecurityError, validate_url_target
+
+    blocked_urls = [
+        "file:///etc/passwd",
+        "ftp://example.com/model",
+        "gopher://127.0.0.1:11434/_test",
+        "http://user:pass@localhost:11434/v1",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.1:11434/v1",
+        "http://172.16.0.5:11434/v1",
+        "http://192.168.1.10:11434/v1",
+        "http://0.0.0.0:11434/v1",
+        "http://[fe80::1]:11434/v1",
+        "http://[fc00::1]:11434/v1",
+        "http://[fd12:3456::1]:11434/v1",
+        "http://[::ffff:169.254.169.254]/v1",
+        "http://[::ffff:127.0.0.1]:11434/v1",
+        "http://[::ffff:10.0.0.1]:11434/v1",
+        "http://2130706433:11434/v1",
+        "http://0x7f000001:11434/v1",
+        "http://0177.0.0.1:11434/v1",
+        "http://127.0.0.1.:11434/v1",
+        "http://localhost\n:11434/v1",
+        "not_a_url",
+    ]
+    for bad in blocked_urls:
+        with pytest.raises(URLSecurityError):
+            validate_url_target(bad, allow_loopback=True, resolve_dns=False)
+        prov = OpenAICompatibleProvider(api_key="sk-test", model="m", api_base=bad)
+        assert prov.is_available() is False
+
+    # Canonical local Ollama loopback endpoints must still succeed cleanly
+    for ok_url in [
+        "http://localhost:11434/v1",
+        "http://127.0.0.1:11434/v1",
+        "http://[::1]:11434/v1",
+    ]:
+        target = validate_url_target(ok_url, allow_loopback=True, resolve_dns=False)
+        assert target.is_loopback_target is True
+
+    # Non-loopback hostname resolving to private/metadata/loopback IP (DNS rebinding) must fail closed
+    def _fake_getaddrinfo_private(host, port, *a, **kw):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo_private)
+    with pytest.raises(URLSecurityError):
+        validate_url_target("https://rebind.attacker.example/v1", allow_loopback=True, resolve_dns=True)
+
+    def _fake_getaddrinfo_loopback(host, port, *a, **kw):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo_loopback)
+    with pytest.raises(URLSecurityError):
+        validate_url_target("https://rebind-local.attacker.example/v1", allow_loopback=True, resolve_dns=True)
+
+    # DNS IP pinning: even if DNS changes between check and request, pinned URL points directly to initial IP
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda host, port, *a, **kw: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))],
+    )
+    pinned = validate_url_target("https://api.example.org/v1", allow_loopback=True, resolve_dns=True)
+    assert pinned.pinned_ip == "93.184.216.34"
+    assert pinned.build_pinned_url().startswith("https://93.184.216.34:443/")
+    assert pinned.host_header == "api.example.org"
+
+    # Redirects from public host to private/metadata target must be rejected
+    redirect_transport = httpx.MockTransport(
+        lambda request: httpx.Response(302, headers={"Location": "http://169.254.169.254/latest/meta-data/"})
+    )
+    prov_redir = OpenAICompatibleProvider(
+        api_key="sk-valid",
+        model="m",
+        api_base="https://api.example.org/v1",
+        http_client=httpx.Client(transport=redirect_transport, follow_redirects=False),
+    )
+    req = LLMRequest(messages=[ChatMessage(role=MessageRole.USER, content="hi")])
+    with pytest.raises(LLMUnavailableError, match="redirect"):
+        prov_redir.generate(req)
+
+
+def test_diagnostics_ollama_probe_blocks_ssrf_urls_and_redirects():
+    """diagnostics.check_llm_provider blocks SSRF targets before network connection."""
+    from forge.config import ForgeSettings
+    from forge.diagnostics import DiagnosticCategory, check_llm_provider
+
+    for bad_base in [
+        "http://169.254.169.254",
+        "file:///etc",
+        "http://user:pass@localhost:11434",
+        "http://0x7f000001:11434",
+        "http://[fd00::1]:11434",
+    ]:
+        settings = ForgeSettings(llm_provider="ollama", ollama_base_url=bad_base, allow_cloud_fallback=False)
+        chk = check_llm_provider(settings)
+        assert chk.is_healthy is False
+        assert chk.category == DiagnosticCategory.MISCONFIGURED_ENV
+        assert "SSRF" in chk.message
+
+
+def test_git_mediator_archive_blocks_traversal_case_collision_duplicates_sparse_and_symlink_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Archive export rejects backslash traversal, case-colliding .GIT, duplicates, sparse members, and symlinked parents."""
+    from forge.repository.git_mediator import GitMediatorSecurityError
+
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    trusted_git = tmp_path / "trusted.git"
+    subprocess.run(["git", "clone", "--bare", str(repo), str(trusted_git)], check=True, capture_output=True)
+    ws_repo = tmp_path / "ws_repo"
+    ws_repo.mkdir()
+    mediator = GitMediator(trusted_git_path=trusted_git, workspace_path=ws_repo)
+
+    class _FakeProc:
+        def __init__(self, stream: io.BytesIO) -> None:
+            self.stdout = stream
+            self.stderr = io.BytesIO(b"")
+            self.returncode = 0
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def communicate(self, timeout: int = 30):
+            return b"", b""
+
+        def kill(self) -> None:
+            pass
+
+    # Case 1: Backslash traversal, case-insensitive .GIT/hooks, ./.env, hardlink, sparse member
+    tar_buf = io.BytesIO()
+    with tarfile.open(fileobj=tar_buf, mode="w") as tf:
+        for name in ["..\\..\\escape.py", ".GIT/hooks/pre-commit", "./.env", "/abs/file.py"]:
+            data = b"x=1\n"
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+
+        hl = tarfile.TarInfo("src/hard.py")
+        hl.type = tarfile.LNKTYPE
+        hl.linkname = "/etc/passwd"
+        tf.addfile(hl)
+
+        sp = tarfile.TarInfo("src/sparse.bin")
+        sp.type = tarfile.GNUTYPE_SPARSE
+        tf.addfile(sp)
+
+        clean_bytes = b"def ok():\n    return 1\n"
+        ok_ti = tarfile.TarInfo("src/ok.py")
+        ok_ti.size = len(clean_bytes)
+        tf.addfile(ok_ti, io.BytesIO(clean_bytes))
+    tar_buf.seek(0)
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _FakeProc(tar_buf))
+    dest = tmp_path / "export_clean"
+    count = mediator.export_sanitized_workspace(dest)
+    assert count == 1
+    assert (dest / "src" / "ok.py").exists()
+    assert not (dest / ".env").exists()
+    assert not (dest / ".GIT").exists()
+
+    # Case 2: Case-colliding duplicate entry must raise GitMediatorSecurityError
+    dup_buf = io.BytesIO()
+    with tarfile.open(fileobj=dup_buf, mode="w") as tf:
+        for name in ["src/Config.py", "src/config.py"]:
+            data = b"a=1\n"
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+    dup_buf.seek(0)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _FakeProc(dup_buf))
+    with pytest.raises(GitMediatorSecurityError, match="duplicate or case-colliding"):
+        mediator.export_sanitized_workspace(tmp_path / "export_dup")
+
+    # Case 3: Pre-existing symlinked subdirectory in destination must raise before writing outside
+    race_dest = tmp_path / "export_race"
+    race_dest.mkdir()
+    outside = tmp_path / "outside_target"
+    outside.mkdir()
+    os.symlink(outside, race_dest / "src")
+    race_buf = io.BytesIO()
+    with tarfile.open(fileobj=race_buf, mode="w") as tf:
+        data = b"pwned\n"
+        ti = tarfile.TarInfo("src/pwn.py")
+        ti.size = len(data)
+        tf.addfile(ti, io.BytesIO(data))
+    race_buf.seek(0)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _FakeProc(race_buf))
+    with pytest.raises((GitMediatorSecurityError, SecurityError)):
+        mediator.export_sanitized_workspace(race_dest)
+    assert not (outside / "pwn.py").exists()
+
+
+def test_git_acquisition_sanitizes_host_git_env_and_hardens_flags(monkeypatch: pytest.MonkeyPatch):
+    """run_git_command scrubs malicious GIT_* env variables and enforces safe flags."""
+    from forge.repository.acquisition import _sanitized_git_env, run_git_command
+
+    monkeypatch.setenv("GIT_EXTERNAL_DIFF", "/tmp/evil_diff.sh")
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'core.sshCommand=evil'")
+    monkeypatch.setenv("GIT_SSH_COMMAND", "nc attacker 4444")
+    monkeypatch.setenv("GIT_TEMPLATE_DIR", "/tmp/evil_templates")
+
+    captured: dict = {}
+
+    def _fake_run(cmd, cwd=None, capture_output=True, text=True, timeout=60, check=False, env=None):
+        captured["cmd"] = cmd
+        captured["env"] = env
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    run_git_command(["rev-parse", "HEAD"])
+
+    assert "-c" in captured["cmd"]
+    assert "core.symlinks=false" in captured["cmd"]
+    assert "protocol.ext.allow=never" in captured["cmd"]
+    assert "core.fsmonitor=false" in captured["cmd"]
+    assert "submodule.recurse=false" in captured["cmd"]
+    assert "GIT_EXTERNAL_DIFF" not in captured["env"]
+    assert "GIT_SSH_COMMAND" not in captured["env"]
+    assert "GIT_TEMPLATE_DIR" not in captured["env"]
+    assert captured["env"]["GIT_CONFIG_PARAMETERS"] == ""
+    assert captured["env"]["GIT_HOOKS_PATH"] == "/dev/null"
+    assert _sanitized_git_env("https")["GIT_ALLOW_PROTOCOL"] == "https"
+
+
+def test_patch_applier_and_rollback_block_ancestor_symlink_hardlink_and_toctou(tmp_path: Path):
+    """PatchApplier and RollbackManager block parent-dir symlink replacement and hardlink escapes, and workspace drops internal symlinks."""
+    from forge.repair_execution.rollback import WorkspaceRollbackManager
+    from forge.repair_execution.schemas import RepairWorkspace, RollbackStatus, WorkspaceStatus
+
+    # 1. RepairWorkspaceManager drops internal symlinks too
+    src_repo = tmp_path / "src_repo"
+    _init_git_repo(src_repo)
+    os.symlink(src_repo / "src" / "logic.py", src_repo / "src" / "internal_link.py")
+    ws_mgr = RepairWorkspaceManager(original_repo_path=src_repo, base_workspaces_dir=tmp_path / "wss")
+    ws = ws_mgr.allocate_workspace(allowed_paths=["src/logic.py"], plan_id="p_sym")
+    ws_path = Path(ws.isolated_workspace_path)
+    assert not (ws_path / "src" / "internal_link.py").exists()
+    assert not (ws_path / "src" / "internal_link.py").is_symlink()
+
+    # 2. Hardlink escape in workspace blocked by ControlledPatchApplier
+    outside = tmp_path / "outside_secret.py"
+    outside.write_text("x = 1\n")
+    hard_target = ws_path / "src" / "hardlinked.py"
+    os.link(outside, hard_target)
+    applier = ControlledPatchApplier(workspace_path=ws_path)
+    out_hl = applier.apply_patch(
+        workspace_path=ws_path,
+        unified_diff="--- a/src/hardlinked.py\n+++ b/src/hardlinked.py\n@@ -1 +1 @@\n-x = 1\n+x = 99\n",
+        allowed_files=["src/hardlinked.py"],
+    )
+    assert out_hl.success is False
+    assert outside.read_text() == "x = 1\n"
+
+    # 3. Parent directory replaced by symlink -> outside target blocked by PatchApplier & RollbackManager
+    outside_dir = tmp_path / "outside_dir"
+    outside_dir.mkdir()
+    (outside_dir / "logic.py").write_text("UNTOUCHED\n")
+    ws2 = ws_mgr.allocate_workspace(allowed_paths=["src/logic.py"], plan_id="p_dir")
+    ws2_path = Path(ws2.isolated_workspace_path)
+    import shutil
+    shutil.rmtree(ws2_path / "src")
+    os.symlink(outside_dir, ws2_path / "src")
+
+    out_parent = applier.apply_patch(
+        workspace_path=ws2_path,
+        unified_diff="--- a/src/logic.py\n+++ b/src/logic.py\n@@ -1 +1 @@\n-UNTOUCHED\n+PWNED\n",
+        allowed_files=["src/logic.py"],
+    )
+    assert out_parent.success is False
+    assert (outside_dir / "logic.py").read_text() == "UNTOUCHED\n"
+
+    rb_mgr = WorkspaceRollbackManager()
+    rb_status, _, _ = rb_mgr.rollback(workspace=ws2, modified_files=["src/logic.py"])
+    assert rb_status == RollbackStatus.FAILED
+    assert ws2.workspace_status == WorkspaceStatus.PRESERVED_FOR_INSPECTION
+    assert (outside_dir / "logic.py").read_text() == "UNTOUCHED\n"
+
+    # Workspace cleanup succeeds safely even after preserved state when forced
+    assert ws_mgr.cleanup_workspace(ws2.workspace_id, force=True) is True
+    assert not ws2_path.exists()
+
+
+def test_approval_ledger_legacy_migration_concurrency_and_tamper_detection(tmp_path: Path):
+    """Pre-M3 DB schemas migrate cleanly, concurrent consumption permits at most 1 winner, and tampering raises."""
+    import sqlite3
+    from concurrent.futures import ThreadPoolExecutor
+
+    legacy_db = tmp_path / "legacy_pre_m3.db"
+    conn = sqlite3.connect(str(legacy_db))
+    conn.execute("""
+        CREATE TABLE repair_approval_ledger (
+            approval_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            execution_id TEXT,
+            reason TEXT,
+            recorded_at TEXT NOT NULL
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE orchestration_approval_records (
+            approval_id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            repair_plan_id TEXT NOT NULL,
+            plan_digest TEXT NOT NULL,
+            approved_strategy_id TEXT NOT NULL,
+            approved_file_paths TEXT NOT NULL,
+            approval_timestamp TEXT NOT NULL,
+            approval_expiry TEXT NOT NULL,
+            approver_reference TEXT NOT NULL,
+            auth_channel TEXT NOT NULL,
+            status TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+        );
+    """)
+    conn.execute(
+        "INSERT INTO repair_approval_ledger VALUES ('appr_legacy_cons', 'consumed', 'exec_old', NULL, '2026-01-01T00:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO repair_approval_ledger VALUES ('appr_legacy_rev', 'revoked', NULL, 'old revoke', '2026-01-01T00:00:00Z')"
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = ApprovalLedger(db_path=legacy_db)
+    assert migrated.is_consumed("appr_legacy_cons") is True
+    assert migrated.is_revoked("appr_legacy_rev") is True
+    # Revoking legacy consumed approval preserves consumed status
+    migrated.record_revoked("appr_legacy_cons", reason="post-audit revoke")
+    assert migrated.is_consumed("appr_legacy_cons") is True
+    assert migrated.is_revoked("appr_legacy_cons") is True
+    # Revoking an unused approval prevents subsequent consumption
+    migrated.record_revoked("appr_unused", reason="revoked before use")
+    assert migrated.record_consumed("appr_unused", "exec_new") is False
+
+    # Concurrent consumption race across threads: exactly 1 winner
+    race_db = tmp_path / "race_ledger.db"
+    race_ledger = ApprovalLedger(db_path=race_db)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        outcomes = list(
+            pool.map(lambda i: race_ledger.record_consumed("appr_race_1", f"exec_{i}"), range(8))
+        )
+    assert outcomes.count(True) == 1
+    assert outcomes.count(False) == 7
+
+    # Tampering orchestration_approval_records triggers record_digest mismatch detection
+    now = datetime.now(timezone.utc).isoformat()
+    later = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
+    migrated.record_approval(
+        approval_id="appr_digest_1",
+        workflow_id="wf_1",
+        repair_plan_id="plan_1",
+        plan_digest="digest_1",
+        approved_strategy_id="strat_1",
+        approved_file_paths=["src/logic.py"],
+        approval_timestamp=now,
+        approval_expiry=later,
+        approver_reference="alice",
+        auth_channel="interactive_cli",
+        operator_principal="alice",
+    )
+    tconn = sqlite3.connect(str(legacy_db))
+    tconn.execute(
+        "UPDATE orchestration_approval_records SET approver_reference = 'mallory' WHERE approval_id = 'appr_digest_1';"
+    )
+    tconn.commit()
+    tconn.close()
+    with pytest.raises(ValueError, match="Tampered approval ledger record"):
+        migrated.get_approval("appr_digest_1")
+
+
+def test_docker_sandbox_isolation_arguments_timeout_cleanup_and_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """DockerSandbox enforces isolation flags, fails closed without daemon, and cleans up after forced termination."""
+    from forge.sandbox.docker import DockerSandbox
+    from forge.sandbox.models import ExecutionLimits, ExecutionStatus as SbxStatus
+
+    ws = tmp_path / "repo"
+    ws.mkdir()
+
+    sbx_no_docker = DockerSandbox(docker_binary=None)
+    req = SandboxRequest(
+        request_id="req_iso",
+        run_id="run_iso",
+        command=["pytest", "-q"],
+        workspace_path=ws,
+        limits=ExecutionLimits(timeout_seconds=1, memory_limit="256m", cpu_quota=0.5, pids_limit=32),
+        env_vars={"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+        read_only_workspace=True,
+        network_policy=NetworkPolicy.DISABLED,
+    )
+    res_unavail = sbx_no_docker.run(req)
+    assert res_unavail.status == SbxStatus.UNAVAILABLE
+    assert res_unavail.isolation_established is False
+
+    sbx_fake = DockerSandbox(docker_binary="/usr/bin/docker")
+    args = sbx_fake.build_docker_arguments(req, "forge_req_iso")
+    joined = " ".join(args)
+    assert "--network none" in joined
+    assert "--read-only" in joined
+    assert "--cap-drop ALL" in joined
+    assert "--security-opt no-new-privileges" in joined
+    assert "--user 1000:1000" in joined
+    assert "--pids-limit 32" in joined
+    assert "--memory 256m" in joined
+    assert ",readonly" in joined
+
+    # Timeout triggers proc.kill() and _cleanup_container rm -f
+    cleanup_calls: list[list[str]] = []
+    monkeypatch.setattr(sbx_fake, "check_health", lambda: (True, "mock healthy"))
+
+    class _TimeoutPopen:
+        def __init__(self, *a, **kw):
+            self.returncode = -9
+            self._calls = 0
+
+        def communicate(self, timeout=None):
+            self._calls += 1
+            if self._calls == 1:
+                raise subprocess.TimeoutExpired(cmd=args, timeout=timeout or 1)
+            return b"", b""
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _TimeoutPopen())
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: cleanup_calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""),
+    )
+    res_to = sbx_fake.run(req)
+    assert res_to.status == SbxStatus.TIMED_OUT
+    assert any(c[:3] == ["/usr/bin/docker", "rm", "-f"] and "forge_req_iso" in c for c in cleanup_calls)

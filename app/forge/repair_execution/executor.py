@@ -346,6 +346,31 @@ class ControlledRepairExecutor:
             outcome="started",
         )
 
+        # Re-verify live evidence freshness immediately before workspace mutation (TOCTOU guard)
+        live_stale_pre_apply = self._check_live_evidence_freshness(plan)
+        if live_stale_pre_apply:
+            self.event_recorder.record_event(
+                execution_id=execution_id,
+                event_type=RepairEventType.APPROVAL_REJECTED,
+                action_description=f"Pre-apply freshness violation: {', '.join(live_stale_pre_apply)}",
+                outcome="failure",
+            )
+            result = RepairExecutionResult(
+                execution_id=execution_id,
+                repair_plan_id=plan.plan_id,
+                execution_status=ExecutionStatus.BLOCKED,
+                workspace_id=ws.workspace_id,
+                diff_summary=f"Execution blocked: Pre-apply freshness check failed: {'; '.join(live_stale_pre_apply)}",
+                execution_events=self.event_recorder.get_events(execution_id),
+                rollback_status=RollbackStatus.NOT_TRIGGERED,
+                failure_classification=FailureClassification.UNAUTHORIZED_EXECUTION,
+                limitations=self._format_limitations(plan.limitations, ["Target repository modified between validation and patch application."]),
+                verification_pending=True,
+                approval_reference=approval.approval_id,
+            )
+            self._executions[execution_id] = result
+            return result
+
         app_outcome = self.patch_applier.apply_patch(
             workspace_path=Path(ws.isolated_workspace_path),
             patch=patch,

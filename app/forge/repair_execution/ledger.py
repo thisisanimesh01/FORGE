@@ -7,8 +7,9 @@ Provides:
 - Graceful in-memory fallback when database storage is not configured.
 """
 
-import json
 from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 import sqlite3
 import threading
@@ -17,6 +18,34 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 class ApprovalLedger:
     """Manages persistent tracking of approval consumption, revocation, and workflow bindings."""
+
+    @staticmethod
+    def _compute_record_digest(
+        approval_id: str,
+        workflow_id: str,
+        repair_plan_id: str,
+        plan_digest: str,
+        approved_strategy_id: str,
+        approved_file_paths: List[str],
+        approver_reference: str,
+        auth_channel: str,
+        operator_principal: Optional[str],
+    ) -> str:
+        payload = json.dumps(
+            {
+                "approval_id": approval_id,
+                "workflow_id": workflow_id,
+                "repair_plan_id": repair_plan_id,
+                "plan_digest": plan_digest,
+                "approved_strategy_id": approved_strategy_id,
+                "approved_file_paths": list(approved_file_paths),
+                "approver_reference": approver_reference,
+                "auth_channel": auth_channel,
+                "operator_principal": operator_principal,
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self.db_path = db_path.resolve() if db_path else None
@@ -72,13 +101,16 @@ class ApprovalLedger:
                         auth_channel TEXT NOT NULL,
                         operator_principal TEXT,
                         status TEXT NOT NULL,
-                        recorded_at TEXT NOT NULL
+                        recorded_at TEXT NOT NULL,
+                        record_digest TEXT
                     );
                 """)
                 cur = conn.execute("PRAGMA table_info(orchestration_approval_records);")
                 rec_cols = {row[1] for row in cur.fetchall()}
                 if "operator_principal" not in rec_cols:
                     conn.execute("ALTER TABLE orchestration_approval_records ADD COLUMN operator_principal TEXT;")
+                if "record_digest" not in rec_cols:
+                    conn.execute("ALTER TABLE orchestration_approval_records ADD COLUMN record_digest TEXT;")
             finally:
                 conn.close()
 
@@ -98,7 +130,7 @@ class ApprovalLedger:
                 cur.execute(
                     "SELECT approval_id, workflow_id, repair_plan_id, plan_digest, "
                     "approved_strategy_id, approved_file_paths, approval_timestamp, "
-                    "approval_expiry, approver_reference, auth_channel, operator_principal, status, recorded_at "
+                    "approval_expiry, approver_reference, auth_channel, operator_principal, status, recorded_at, record_digest "
                     "FROM orchestration_approval_records;"
                 )
                 for row in cur.fetchall():
@@ -120,6 +152,7 @@ class ApprovalLedger:
                         "operator_principal": row[10],
                         "status": row[11],
                         "recorded_at": row[12],
+                        "record_digest": row[13],
                     }
             finally:
                 conn.close()
@@ -305,6 +338,17 @@ class ApprovalLedger:
             True if recorded or identically present; raises ValueError on conflicting mutation.
         """
         now = datetime.now(timezone.utc).isoformat()
+        rec_digest = self._compute_record_digest(
+            approval_id=approval_id,
+            workflow_id=workflow_id,
+            repair_plan_id=repair_plan_id,
+            plan_digest=plan_digest,
+            approved_strategy_id=approved_strategy_id,
+            approved_file_paths=list(approved_file_paths),
+            approver_reference=approver_reference,
+            auth_channel=auth_channel,
+            operator_principal=operator_principal,
+        )
         with self._lock:
             record = {
                 "approval_id": approval_id,
@@ -320,13 +364,14 @@ class ApprovalLedger:
                 "operator_principal": operator_principal,
                 "status": status,
                 "recorded_at": now,
+                "record_digest": rec_digest,
             }
             if self.db_path:
                 conn = self._get_connection()
                 try:
                     conn.execute("BEGIN IMMEDIATE;")
                     cur = conn.execute(
-                        "SELECT workflow_id, repair_plan_id, plan_digest, approved_strategy_id, approver_reference "
+                        "SELECT workflow_id, repair_plan_id, plan_digest, approved_strategy_id, approver_reference, approved_file_paths "
                         "FROM orchestration_approval_records WHERE approval_id = ?;",
                         (approval_id,),
                     )
@@ -338,6 +383,7 @@ class ApprovalLedger:
                             or existing[2] != plan_digest
                             or existing[3] != approved_strategy_id
                             or existing[4] != approver_reference
+                            or existing[5] != json.dumps(approved_file_paths)
                         ):
                             conn.execute("ROLLBACK;")
                             raise ValueError(
@@ -353,9 +399,9 @@ class ApprovalLedger:
                         INSERT INTO orchestration_approval_records (
                             approval_id, workflow_id, repair_plan_id, plan_digest,
                             approved_strategy_id, approved_file_paths, approval_timestamp,
-                            approval_expiry, approver_reference, auth_channel, operator_principal, status, recorded_at
+                            approval_expiry, approver_reference, auth_channel, operator_principal, status, recorded_at, record_digest
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                         """,
                         (
                             approval_id,
@@ -371,6 +417,7 @@ class ApprovalLedger:
                             operator_principal,
                             status,
                             now,
+                            rec_digest,
                         ),
                     )
                     conn.execute("COMMIT;")
@@ -384,6 +431,7 @@ class ApprovalLedger:
                     or existing_mem["plan_digest"] != plan_digest
                     or existing_mem["approved_strategy_id"] != approved_strategy_id
                     or existing_mem["approver_reference"] != approver_reference
+                    or existing_mem["approved_file_paths"] != list(approved_file_paths)
                 ):
                     raise ValueError(
                         f"Immutable approval conflict: approval_id '{approval_id}' is already bound "
@@ -392,6 +440,42 @@ class ApprovalLedger:
 
             self._memory_approvals[approval_id] = record
             return True
+
+    def _row_to_approval_dict(self, row: tuple) -> Dict[str, Any]:
+        files = json.loads(row[5])
+        rec_digest = row[13] if len(row) > 13 else None
+        if rec_digest:
+            expected = self._compute_record_digest(
+                approval_id=row[0],
+                workflow_id=row[1],
+                repair_plan_id=row[2],
+                plan_digest=row[3],
+                approved_strategy_id=row[4],
+                approved_file_paths=files,
+                approver_reference=row[8],
+                auth_channel=row[9],
+                operator_principal=row[10],
+            )
+            if expected != rec_digest:
+                raise ValueError(
+                    f"Tampered approval ledger record detected for approval_id '{row[0]}'."
+                )
+        return {
+            "approval_id": row[0],
+            "workflow_id": row[1],
+            "repair_plan_id": row[2],
+            "plan_digest": row[3],
+            "approved_strategy_id": row[4],
+            "approved_file_paths": files,
+            "approval_timestamp": row[6],
+            "approval_expiry": row[7],
+            "approver_reference": row[8],
+            "auth_channel": row[9],
+            "operator_principal": row[10],
+            "status": row[11],
+            "recorded_at": row[12],
+            "record_digest": rec_digest,
+        }
 
     def get_approval(self, approval_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve persisted approval record by approval ID."""
@@ -403,27 +487,13 @@ class ApprovalLedger:
                     cur.execute(
                         "SELECT approval_id, workflow_id, repair_plan_id, plan_digest, "
                         "approved_strategy_id, approved_file_paths, approval_timestamp, "
-                        "approval_expiry, approver_reference, auth_channel, operator_principal, status, recorded_at "
+                        "approval_expiry, approver_reference, auth_channel, operator_principal, status, recorded_at, record_digest "
                         "FROM orchestration_approval_records WHERE approval_id = ?;",
                         (approval_id,),
                     )
                     row = cur.fetchone()
                     if row:
-                        rec = {
-                            "approval_id": row[0],
-                            "workflow_id": row[1],
-                            "repair_plan_id": row[2],
-                            "plan_digest": row[3],
-                            "approved_strategy_id": row[4],
-                            "approved_file_paths": json.loads(row[5]),
-                            "approval_timestamp": row[6],
-                            "approval_expiry": row[7],
-                            "approver_reference": row[8],
-                            "auth_channel": row[9],
-                            "operator_principal": row[10],
-                            "status": row[11],
-                            "recorded_at": row[12],
-                        }
+                        rec = self._row_to_approval_dict(row)
                         self._memory_approvals[approval_id] = rec
                         return dict(rec)
                     return None
@@ -462,27 +532,13 @@ class ApprovalLedger:
                     cur.execute(
                         "SELECT approval_id, workflow_id, repair_plan_id, plan_digest, "
                         "approved_strategy_id, approved_file_paths, approval_timestamp, "
-                        "approval_expiry, approver_reference, auth_channel, operator_principal, status, recorded_at "
+                        "approval_expiry, approver_reference, auth_channel, operator_principal, status, recorded_at, record_digest "
                         "FROM orchestration_approval_records WHERE repair_plan_id = ? ORDER BY recorded_at DESC LIMIT 1;",
                         (plan_id,),
                     )
                     row = cur.fetchone()
                     if row:
-                        return {
-                            "approval_id": row[0],
-                            "workflow_id": row[1],
-                            "repair_plan_id": row[2],
-                            "plan_digest": row[3],
-                            "approved_strategy_id": row[4],
-                            "approved_file_paths": json.loads(row[5]),
-                            "approval_timestamp": row[6],
-                            "approval_expiry": row[7],
-                            "approver_reference": row[8],
-                            "auth_channel": row[9],
-                            "operator_principal": row[10],
-                            "status": row[11],
-                            "recorded_at": row[12],
-                        }
+                        return self._row_to_approval_dict(row)
                     return None
                 finally:
                     conn.close()
