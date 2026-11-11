@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from pydantic import ValidationError
 
-from forge.config import redact_secrets
+from forge.config import get_settings, redact_secrets
 from forge.llm.models import ToolDefinition
 from forge.repair_execution.schemas import RepairExecutionResult, RepairWorkspace
 from forge.repair_verification.discovery import RepairTestDiscoverer
@@ -51,7 +51,7 @@ from forge.repair_verification.schemas import (
     VerificationResult,
     VerificationStatus,
 )
-from forge.repository.validation import SecurityError
+from forge.repository.validation import SecurityError, assert_contained_path
 
 
 class RepairVerificationTools:
@@ -136,6 +136,18 @@ class RepairVerificationTools:
         except Exception as e:
             return json.dumps({"error": f"Failed to generate verification plan: {e}"})
 
+    def _is_contained_workspace(self, target: Path) -> bool:
+        resolved = target.resolve()
+        roots = [self.repository_path, get_settings().workspace_dir.resolve()]
+        roots.extend(Path(ws.isolated_workspace_path).resolve() for ws in self._workspaces.values())
+        for root in roots:
+            try:
+                assert_contained_path(resolved, root)
+                return True
+            except SecurityError:
+                continue
+        return False
+
     def discover_repair_tests(self, args: Dict[str, Any]) -> str:
         """Handle discover_repair_tests tool."""
         try:
@@ -143,7 +155,9 @@ class RepairVerificationTools:
         except ValidationError as e:
             return json.dumps({"error": f"Validation error: {e}"})
 
-        ws_path = Path(inp.workspace_path)
+        ws_path = Path(inp.workspace_path).resolve()
+        if not self._is_contained_workspace(ws_path):
+            return json.dumps({"error": f"Security boundary violation: workspace path '{ws_path}' is outside allowed roots."})
         if not ws_path.exists():
             return json.dumps({"error": f"Workspace path does not exist: {inp.workspace_path}"})
 

@@ -12,16 +12,18 @@ Exposes 8 structured, typed, read-only tools:
 """
 
 import json
+import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from pydantic import ValidationError
 
-from forge.config import redact_secrets
+from forge.config import get_settings, redact_secrets
 from forge.llm.models import ToolDefinition
 from forge.repair_planning.schemas import RepairPlan
 from forge.repair_execution.approval import RepairApprovalValidator
 from forge.repair_execution.events import RepairEventRecorder
 from forge.repair_execution.executor import ControlledRepairExecutor
+from forge.repair_execution.ledger import ApprovalLedger
 from forge.repair_execution.patch_generator import RepairPatchGenerator
 from forge.repair_execution.patch_validator import RepairPatchValidator
 from forge.repair_execution.rollback import WorkspaceRollbackManager
@@ -47,7 +49,7 @@ from forge.repair_execution.schemas import (
     ValidateRepairPatchOutput,
 )
 from forge.repair_execution.workspace import RepairWorkspaceManager
-from forge.repository.validation import SecurityError
+from forge.repository.validation import SecurityError, assert_contained_path
 
 
 class RepairExecutionTools:
@@ -59,21 +61,41 @@ class RepairExecutionTools:
         workspace_manager: Optional[RepairWorkspaceManager] = None,
         event_recorder: Optional[RepairEventRecorder] = None,
         max_output_chars: int = 50_000,
+        trusted_approver_identities: Optional[Set[str]] = None,
+        approval_ledger: Optional[ApprovalLedger] = None,
     ) -> None:
         self.repository_path = repository_path.resolve()
         self.max_output_chars = max_output_chars
+        self._explicit_trusted_approvers = (
+            set(trusted_approver_identities) if trusted_approver_identities is not None else None
+        )
+        if approval_ledger is not None:
+            self.approval_ledger = approval_ledger
+        else:
+            ledger_env = os.environ.get("FORGE_LEDGER_DB_PATH")
+            ledger_db = Path(ledger_env).resolve() if ledger_env else get_settings().db_path
+            self.approval_ledger = ApprovalLedger(db_path=ledger_db)
+
         self.workspace_manager = workspace_manager or RepairWorkspaceManager(original_repo_path=self.repository_path)
         self.event_recorder = event_recorder or RepairEventRecorder()
         self.executor = ControlledRepairExecutor(
             repo_path=self.repository_path,
             workspace_manager=self.workspace_manager,
             event_recorder=self.event_recorder,
+            trusted_approver_identities=self._resolve_trusted_approvers() or None,
+            approval_ledger=self.approval_ledger,
         )
         self.approval_validator = RepairApprovalValidator()
         self.patch_generator = RepairPatchGenerator()
         self.patch_validator = RepairPatchValidator()
         self.rollback_manager = WorkspaceRollbackManager()
         self._plans: Dict[str, RepairPlan] = {}
+
+    def _resolve_trusted_approvers(self) -> Set[str]:
+        if self._explicit_trusted_approvers is not None:
+            return {x.strip() for x in self._explicit_trusted_approvers if x.strip()}
+        raw_env = os.environ.get("FORGE_TRUSTED_APPROVERS", "")
+        return {x.strip() for x in raw_env.split(",") if x.strip()}
 
     def register_plan(self, plan: RepairPlan) -> None:
         """Register a known RepairPlan in memory for tool lookups."""
@@ -95,6 +117,11 @@ class RepairExecutionTools:
             return json.dumps({"error": f"Invalid arguments for prepare_repair_workspace: {e}"})
 
         repo_path = Path(params.repository_path).resolve()
+        try:
+            assert_contained_path(repo_path, self.repository_path)
+        except SecurityError as exc:
+            return json.dumps({"error": f"Security boundary violation: {exc}"})
+
         ws_mgr = self.workspace_manager
         if repo_path != self.repository_path:
             ws_mgr = RepairWorkspaceManager(original_repo_path=repo_path)
@@ -137,16 +164,28 @@ class RepairExecutionTools:
         elif params.plan_id and params.plan_id in self._plans:
             plan = self._plans[params.plan_id]
 
+        trusted = self._resolve_trusted_approvers()
         check = self.approval_validator.validate_approval(
             approval=approval,
             plan=plan,
-            revoked_approvals=set(self.executor._revoked_approvals.keys()),
-            consumed_approvals=self.executor._consumed_approvals,
+            revoked_approvals=self.approval_ledger.get_revoked_map(
+                extra=self.executor._revoked_approvals
+            ),
+            consumed_approvals=self.approval_ledger.get_consumed_map(
+                extra=self.executor._consumed_approvals
+            ),
+            trusted_approver_identities=trusted or None,
         )
+        errors = list(check.errors)
+        if not trusted:
+            errors.append(
+                "Trusted approver allowlist is empty/unconfigured (FORGE_TRUSTED_APPROVERS)."
+            )
+        is_valid = check.is_valid and bool(trusted)
         output = ValidateRepairApprovalOutput(
-            is_valid=check.is_valid,
+            is_valid=is_valid,
             approval_status=approval.approval_status,
-            validation_errors=check.errors,
+            validation_errors=errors,
             approved_plan_id=approval.repair_plan_id,
             approved_strategy_id=approval.approved_strategy_id,
             approved_file_paths=approval.approved_file_paths,
@@ -223,6 +262,41 @@ class RepairExecutionTools:
             approval = RepairApproval.model_validate_json(params.approval_json)
         except Exception as e:
             return json.dumps({"error": f"Failed to parse approval JSON: {e}"})
+
+        # Fail closed: autonomous tool callers must supply a durable CLI-issued approval backed by ApprovalLedger
+        trusted = self._resolve_trusted_approvers()
+        if not trusted:
+            return json.dumps({
+                "error": "Execution blocked: Trusted approver allowlist is empty/unconfigured (FORGE_TRUSTED_APPROVERS)."
+            })
+
+        allowed_channels = {"interactive_cli", "trusted_operator", "cli"}
+        if approval.auth_channel not in allowed_channels:
+            return json.dumps({
+                "error": f"Execution blocked: Unauthorized approval auth_channel '{approval.auth_channel}'."
+            })
+
+        persisted = self.approval_ledger.get_approval(approval.approval_id)
+        if not persisted:
+            return json.dumps({
+                "error": (
+                    f"Execution blocked: Approval '{approval.approval_id}' has no durable operator record in ApprovalLedger. "
+                    "Autonomous tool callers cannot forge in-memory approval contracts."
+                )
+            })
+        if (
+            persisted.get("repair_plan_id") != approval.repair_plan_id
+            or persisted.get("plan_digest") != approval.plan_digest
+            or persisted.get("approved_strategy_id") != approval.approved_strategy_id
+            or persisted.get("approver_reference") != approval.approver_reference
+            or persisted.get("auth_channel") not in allowed_channels
+        ):
+            return json.dumps({
+                "error": f"Execution blocked: Approval '{approval.approval_id}' does not match durable ledger binding."
+            })
+
+        # Propagate latest trusted allowlist before executing
+        self.executor.trusted_approver_identities = trusted
 
         plan = None
         if params.plan_json:

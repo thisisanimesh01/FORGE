@@ -13,6 +13,9 @@ from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from forge.repository.protection import is_protected_path
+from forge.repository.validation import assert_contained_path, SecurityError
+
 HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
@@ -75,8 +78,13 @@ class ControlledPatchApplier:
             )
 
         allowed_set: Set[str] = set()
-        if allowed_files:
+        if allowed_files is not None:
             allowed_set = {f.strip().replace("\\", "/") for f in allowed_files if f.strip()}
+            if not allowed_set:
+                return PatchApplicationOutcome(
+                    success=False,
+                    errors=["Security error: approved file scope allowlist is empty."],
+                )
 
         file_diffs = self._split_diff_by_file(diff_text)
         if not file_diffs:
@@ -85,21 +93,46 @@ class ControlledPatchApplier:
                 errors=["No valid file diffs found in patch."],
             )
 
-        # Verify all target files are within allowed scope
-        if allowed_set:
-            for target_path in file_diffs.keys():
-                if target_path not in allowed_set:
-                    return PatchApplicationOutcome(
-                        success=False,
-                        errors=[f"Security error: target file '{target_path}' is outside approved scope."],
-                    )
+        # Verify all target files are contained, non-protected, non-symlink, and within allowed scope
+        for target_path in file_diffs.keys():
+            if not target_path or target_path.startswith("/") or ".." in Path(target_path).parts:
+                return PatchApplicationOutcome(
+                    success=False,
+                    errors=[f"Security error: invalid or traversing target path '{target_path}'."],
+                )
+            if is_protected_path(target_path, base_dir=ws_root):
+                return PatchApplicationOutcome(
+                    success=False,
+                    errors=[f"Security error: target file '{target_path}' is a protected path."],
+                )
+            candidate_raw = ws_root / target_path
+            if candidate_raw.is_symlink():
+                return PatchApplicationOutcome(
+                    success=False,
+                    errors=[f"Security error: target file '{target_path}' is a symlink (modification forbidden)."],
+                )
+            try:
+                assert_contained_path(candidate_raw, ws_root)
+            except SecurityError as sec_err:
+                return PatchApplicationOutcome(
+                    success=False,
+                    errors=[f"Security error: {sec_err}"],
+                )
+            if allowed_files is not None and target_path not in allowed_set:
+                return PatchApplicationOutcome(
+                    success=False,
+                    errors=[f"Security error: target file '{target_path}' is outside approved scope."],
+                )
 
         self._backups.clear()
         modified_files: List[str] = []
 
         try:
             for target_path, diff_lines in file_diffs.items():
-                abs_path = (ws_root / target_path).resolve()
+                candidate_raw = ws_root / target_path
+                if candidate_raw.is_symlink():
+                    raise PatchApplicationError(f"Security error: target '{target_path}' became a symlink.")
+                abs_path = assert_contained_path(candidate_raw, ws_root)
                 if not abs_path.exists() or not abs_path.is_file():
                     raise PatchApplicationError(f"Target file '{target_path}' does not exist in workspace.")
 
@@ -138,15 +171,19 @@ class ControlledPatchApplier:
             )
 
     def revert_backups(self, workspace_path: Optional[Path] = None) -> None:
-        """Restore all original file contents from recorded backups."""
+        """Restore all original file contents from recorded backups safely within workspace."""
         ws_root = workspace_path or self.workspace_path
         if not ws_root:
             return
+        ws_root = ws_root.resolve()
 
         for rel_path, orig_bytes in self._backups.items():
-            abs_path = (ws_root / rel_path).resolve()
             try:
-                if abs_path.exists():
+                raw_path = ws_root / rel_path
+                if raw_path.is_symlink():
+                    continue
+                abs_path = assert_contained_path(raw_path, ws_root)
+                if abs_path.exists() and abs_path.is_file():
                     abs_path.write_bytes(orig_bytes)
             except Exception:
                 pass

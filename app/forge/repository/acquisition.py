@@ -47,12 +47,32 @@ class AcquisitionError(Exception):
     pass
 
 
+_VALID_GIT_REF_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/\-]{0,254}$")
+
+
+def _validate_git_ref(ref_value: str, label: str = "ref") -> str:
+    """Validate git branch/tag/commit reference against flag injection and traversal."""
+    cleaned = ref_value.strip()
+    if (
+        not cleaned
+        or cleaned.startswith("-")
+        or ".." in cleaned
+        or "//" in cleaned
+        or not _VALID_GIT_REF_RE.match(cleaned)
+    ):
+        raise SecurityError(f"Unsafe or invalid git {label}: '{ref_value}'")
+    return cleaned
+
+
 def run_git_command(args: list[str], cwd: Optional[Path] = None, timeout_seconds: int = 60) -> subprocess.CompletedProcess:
     """Run git command securely without shell interpolation and with hooks disabled."""
-    # Ensure hooks are globally and locally disabled for any invoked git command
+    # Ensure hooks, fsmonitor, external protocols, and recursive submodules are disabled
     base_cmd = [
         "git",
         "-c", "core.hooksPath=/dev/null",
+        "-c", "protocol.ext.allow=never",
+        "-c", "core.fsmonitor=false",
+        "-c", "submodule.recurse=false",
     ]
     if cwd:
         base_cmd.extend(["-c", f"safe.directory={cwd.resolve()}"])
@@ -111,6 +131,9 @@ def acquire_repository(
     if not validation.is_valid:
         raise SecurityError(f"Target validation failed: {validation.error}")
 
+    safe_branch = _validate_git_ref(branch, "branch") if branch and branch.strip() else None
+    safe_commit = _validate_git_ref(commit_sha, "commit_sha") if commit_sha and commit_sha.strip() else None
+
     settings = get_settings()
     base_dir = (custom_workspace or settings.workspace_dir).resolve()
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -121,9 +144,9 @@ def acquire_repository(
     dest_dir.mkdir(parents=True, exist_ok=False)
     trusted_dir = base_dir / f"trusted_{run_token}.git"
 
-    target_commit = (commit_sha or "").strip() or None
-    if not target_commit and branch and re.match(r"^[0-9a-fA-F]{40}$", branch.strip()):
-        target_commit = branch.strip()
+    target_commit = safe_commit
+    if not target_commit and safe_branch and re.match(r"^[0-9a-fA-F]{40}$", safe_branch):
+        target_commit = safe_branch
 
     if validation.target_type == TargetType.REMOTE_GIT:
         # Clone into isolated trusted repository mirror outside analysis workspace
@@ -131,8 +154,8 @@ def acquire_repository(
             "clone",
             "--config", "core.hooksPath=/dev/null",
         ]
-        if branch and not target_commit:
-            clone_args.extend(["--branch", branch])
+        if safe_branch and not target_commit:
+            clone_args.extend(["--branch", safe_branch])
         clone_args.extend([validation.sanitized_target, str(trusted_dir)])
 
         result = run_git_command(clone_args, timeout_seconds=settings.step_timeout_seconds)
@@ -242,14 +265,14 @@ def acquire_repository(
 
             if target_commit:
                 run_git_command(["checkout", target_commit], cwd=trusted_dir)
-            elif branch:
-                run_git_command(["checkout", branch], cwd=trusted_dir)
+            elif safe_branch:
+                run_git_command(["checkout", safe_branch], cwd=trusted_dir)
 
             commit_res = run_git_command(["rev-parse", "HEAD"], cwd=trusted_dir)
             upstream_commit_sha = commit_res.stdout.strip() if commit_res.returncode == 0 else target_commit
 
             branch_res = run_git_command(["rev-parse", "--abbrev-ref", "HEAD"], cwd=trusted_dir)
-            resolved_branch = branch_res.stdout.strip() if branch_res.returncode == 0 else branch
+            resolved_branch = branch_res.stdout.strip() if branch_res.returncode == 0 else safe_branch
 
             mediator = GitMediator(trusted_git_path=trusted_dir, workspace_path=dest_dir)
 

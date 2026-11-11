@@ -7,7 +7,7 @@ fake adapters for adversarial testing and simulation.
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import uuid
 
 from forge.diagnosis.schemas import (
@@ -241,9 +241,13 @@ class DefaultExecutionAdapter(ExecutionAdapter):
         self,
         workspace_manager: Optional[RepairWorkspaceManager] = None,
         executor: Optional[ControlledRepairExecutor] = None,
+        approval_ledger: Optional[ApprovalLedger] = None,
+        trusted_approvers: Optional[Set[str]] = None,
     ) -> None:
         self.workspace_manager = workspace_manager
         self.executor = executor
+        self.ledger = approval_ledger
+        self.trusted_approvers = trusted_approvers
 
     def run_execution(
         self,
@@ -253,13 +257,19 @@ class DefaultExecutionAdapter(ExecutionAdapter):
         workspace: Optional[RepairWorkspace] = None,
     ) -> Tuple[RepairExecutionResult, RepairWorkspace]:
         repo_root = Path(context.repository_path)
-        wm = self.workspace_manager or RepairWorkspaceManager()
-        active_ws = workspace or wm.create_workspace(repo_root)
+        wm = self.workspace_manager or RepairWorkspaceManager(original_repo_path=repo_root)
+        active_ws = workspace or wm.allocate_workspace(
+            allowed_paths=approval.approved_file_paths or [],
+            plan_id=plan.plan_id,
+            baseline_commit=context.commit_sha,
+        )
 
+        effective_approvers = context.trusted_approvers if context.trusted_approvers is not None else self.trusted_approvers
         exec_engine = self.executor or ControlledRepairExecutor(
             repo_path=repo_root,
             workspace_manager=wm,
-            trusted_approver_identities=context.trusted_approvers,
+            trusted_approver_identities=effective_approvers,
+            approval_ledger=self.ledger,
         )
         result = exec_engine.execute_repair(
             plan=plan,

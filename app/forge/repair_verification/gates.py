@@ -130,10 +130,26 @@ class VerificationGateKeeper:
                 else:
                     optional_failed.append(chk.check_id)
 
-        # Gate 4: Regression evaluation
+        # Gate 4: Regression & Baseline Completeness evaluation
         if plan.policy.fail_on_regression and regression_class == RegressionClassification.REGRESSION_DETECTED:
             return (
                 VerificationStatus.REGRESSION_DETECTED,
+                "FAILED",
+                required_completed,
+                required_failed,
+                optional_failed,
+            )
+
+        if plan.policy.require_baseline_comparison and (
+            baseline_summary is None
+            or regression_class
+            in (
+                RegressionClassification.INCONCLUSIVE,
+                RegressionClassification.ENVIRONMENT_MISMATCH,
+            )
+        ):
+            return (
+                VerificationStatus.INCOMPLETE,
                 "FAILED",
                 required_completed,
                 required_failed,

@@ -609,28 +609,45 @@ class GitMediator:
         if tar_proc.stdout is None:
             raise GitMediatorError("Failed to open pipe from git archive")
 
-        with tarfile.open(fileobj=tar_proc.stdout, mode="r|") as tar:
-            for member in tar:
-                m_path = Path(member.name)
-                # Disallow path traversal
-                if member.name.startswith("/") or ".." in m_path.parts:
-                    continue
-                # Disallow .git entries
-                if ".git" in m_path.parts:
-                    continue
-                # Disallow protected files
-                if is_protected_name(m_path.name) or is_protected_path(member.name, base_dir=dest_path):
-                    continue
+        try:
+            with tarfile.open(fileobj=tar_proc.stdout, mode="r|") as tar:
+                for member in tar:
+                    # Strictly reject symlinks, hard links, device nodes, and FIFOs
+                    if (
+                        member.issym()
+                        or member.islnk()
+                        or member.isdev()
+                        or member.isfifo()
+                        or member.ischr()
+                        or member.isblk()
+                    ):
+                        continue
+                    m_path = Path(member.name)
+                    # Disallow path traversal
+                    if member.name.startswith("/") or ".." in m_path.parts:
+                        continue
+                    # Disallow .git entries
+                    if ".git" in m_path.parts:
+                        continue
+                    # Disallow protected files
+                    if is_protected_name(m_path.name) or is_protected_path(member.name, base_dir=dest_path):
+                        continue
 
-                if hasattr(tarfile, "data_filter"):
-                    tar.extract(member, path=dest_path, filter="data")
-                else:
-                    tar.extract(member, path=dest_path)
-                exported_count += 1
+                    if hasattr(tarfile, "data_filter"):
+                        tar.extract(member, path=dest_path, filter="data")
+                    else:
+                        tar.extract(member, path=dest_path)
+                    exported_count += 1
+        finally:
+            if tar_proc.poll() is None:
+                try:
+                    tar_proc.terminate()
+                except Exception:
+                    pass
 
-        tar_proc.wait()
+        _, stderr_bytes = tar_proc.communicate(timeout=30)
         if tar_proc.returncode != 0:
-            err = tar_proc.stderr.read().decode("utf-8", errors="replace") if tar_proc.stderr else ""
+            err = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
             raise GitMediatorError(f"git archive failed during workspace export: {redact_secrets(err)}")
 
         return exported_count

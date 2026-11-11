@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, ConfigDict, Field
 
 from forge.config import get_settings
+from forge.orchestration.persistence import CorruptedStateError
 from forge.orchestration.schemas import WorkflowStage
 
 
@@ -318,7 +319,20 @@ class IdempotencyLedger:
                 conn.close()
 
     def _row_to_record(self, row: sqlite3.Row) -> IdempotencyRecord:
-        payload = json.loads(row["result_payload_json"]) if row["result_payload_json"] else None
+        raw_payload = row["result_payload_json"]
+        if raw_payload:
+            try:
+                payload = json.loads(raw_payload)
+            except json.JSONDecodeError as exc:
+                raise CorruptedStateError(
+                    f"Corrupted idempotency payload JSON for key '{row['idempotency_key']}': {exc}"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise CorruptedStateError(
+                    f"Corrupted idempotency payload for key '{row['idempotency_key']}': expected dict."
+                )
+        else:
+            payload = None
         return IdempotencyRecord(
             idempotency_key=row["idempotency_key"],
             workflow_id=row["workflow_id"],

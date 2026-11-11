@@ -3,6 +3,7 @@
 import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 import httpx
 
 from forge.config import redact_secrets, get_settings
@@ -237,11 +238,13 @@ class OpenAICompatibleProvider:
         self._custom_client = http_client
 
     def is_available(self) -> bool:
-        """Return True if API key or local/loopback endpoint is configured."""
+        """Return True if API key or local loopback endpoint is configured."""
         if self.api_key and self.api_key.strip():
             return True
-        if self.api_base and ("localhost" in self.api_base or "127.0.0.1" in self.api_base):
-            return True
+        if self.api_base:
+            parsed = urlparse(self.api_base)
+            if parsed.hostname and parsed.hostname.lower() in {"localhost", "127.0.0.1", "::1"}:
+                return True
         return False
 
     def _get_client(self) -> httpx.Client:

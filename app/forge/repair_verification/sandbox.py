@@ -29,7 +29,7 @@ from forge.repair_verification.schemas import (
 )
 
 
-DISALLOWED_COMMAND_CHARS = re.compile(r"[;&|`$<>]")
+DISALLOWED_COMMAND_CHARS = re.compile(r"[;&|`$<>\r\n\x00]")
 
 
 class VerificationSandbox:
@@ -71,6 +71,17 @@ class VerificationSandbox:
             )
 
         binary = check.command[0]
+        if "/" in binary or "\\" in binary:
+            return SandboxResult(
+                request_id=f"chk_{check.check_id}",
+                run_id=run_id,
+                status=ExecutionStatus.REJECTED,
+                exit_code=1,
+                stdout="",
+                stderr=f"Rejected: binary '{binary}' cannot contain path separators.",
+                failure_classification=FailureClassification.POLICY_VIOLATION,
+                error_message="Path separator in executable",
+            )
         # Allow python3 / python interchangeably if allowed
         base_binary = Path(binary).name
         if base_binary not in policy.allowed_executables:

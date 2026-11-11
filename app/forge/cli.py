@@ -4562,6 +4562,14 @@ def orchestrate_approve(
 
     # 3. Local Operator Identity Resolution & Interactive Confirmation Flow
     operator_user = getpass.getuser()
+    if operator_user not in trusted_set:
+        typer.secho(
+            f"Authorization error: Authenticated local operator '{operator_user}' is not in the configured trusted approver allowlist.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     is_interactive = sys.stdin.isatty() and not non_interactive
 
     if not is_interactive and not yes:
@@ -4620,6 +4628,7 @@ def orchestrate_approve(
         approval_expiry=approval.approval_expiry,
         approver_reference=approver_clean,
         auth_channel="interactive_cli",
+        operator_principal=operator_user,
     )
 
     typer.secho(f"Generated human approval contract '{approval.approval_id}' for workflow '{workflow_id}'.", fg=typer.colors.GREEN)
