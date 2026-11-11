@@ -28,15 +28,31 @@ PROTECTED_FILE_PATTERNS: Tuple[str, ...] = (
     "contacts.json",
     "*.log",
 )
+_DEFAULT_PROTECTED_PATTERNS: Tuple[str, ...] = PROTECTED_FILE_PATTERNS
 
 
 def _matches_protected_component(component: str) -> bool:
     """Return whether a path component matches a protected filename pattern (case-insensitive)."""
     normalized = component.casefold()
+    if PROTECTED_FILE_PATTERNS == _DEFAULT_PROTECTED_PATTERNS:
+        return (
+            normalized.startswith(".env")
+            or ".db" in normalized
+            or normalized == "contacts.json"
+            or normalized.endswith(".log")
+        )
     return any(
         fnmatchcase(normalized, pattern.casefold())
         for pattern in PROTECTED_FILE_PATTERNS
     )
+
+
+def _has_protected_part(parts: Tuple[str, ...]) -> bool:
+    """Return True if any path component matches protected patterns."""
+    for part in parts:
+        if _matches_protected_component(part):
+            return True
+    return False
 
 
 def is_protected_name(name: str) -> bool:
@@ -66,30 +82,41 @@ def is_protected_path(
     if path is None:
         return True
 
-    raw_str = str(path).strip()
-    if not raw_str:
-        return True
+    if isinstance(path, Path):
+        raw_str = str(path)
+        candidate = path
+    else:
+        raw_str = path.strip()
+        candidate = Path(raw_str)
 
-    candidate = Path(path)
+    if not raw_str or not raw_str.strip():
+        return True
 
     # 1. Lexical check of all path components
-    lexical_parts = candidate.parts
-    if any(_matches_protected_component(part) for part in lexical_parts):
+    if _has_protected_part(candidate.parts):
         return True
 
+    # Resolve base_dir once if provided
+    resolved_base: Optional[Path] = None
+    if base_dir is not None:
+        try:
+            base_path = base_dir if isinstance(base_dir, Path) else Path(base_dir)
+            resolved_base = base_path.resolve(strict=False)
+        except (OSError, RuntimeError):
+            return True
+
     # Anchor candidate to base_dir if relative and base_dir is supplied
-    if base_dir is not None and not candidate.is_absolute():
-        candidate_target = Path(base_dir) / candidate
+    if resolved_base is not None and not candidate.is_absolute():
+        candidate_target = resolved_base / candidate
     else:
         candidate_target = candidate
 
     # 2. Check raw symlink target before full resolution if it is a symlink
     try:
-        if candidate_target.is_symlink():
+        if os.path.islink(candidate_target):
             try:
                 link_target = os.readlink(candidate_target)
-                target_parts = Path(link_target).parts
-                if any(_matches_protected_component(part) for part in target_parts):
+                if _has_protected_part(Path(link_target).parts):
                     return True
             except (OSError, RuntimeError):
                 # Fail closed on broken / cyclic symlink
@@ -100,21 +127,23 @@ def is_protected_path(
     # 3. Full path resolution (checks canonical target for symlinks and traversal)
     try:
         resolved = candidate_target.resolve(strict=False)
-        resolved_parts = resolved.parts
     except (OSError, RuntimeError):
         # Fail closed when a path cannot be resolved safely.
         return True
 
-    if any(_matches_protected_component(part) for part in resolved_parts):
-        return True
-
-    # 4. Containment check against base_dir if supplied
-    if base_dir is not None:
+    # 4. Containment & resolved component check
+    if resolved_base is not None:
         try:
-            resolved_base = Path(base_dir).resolve(strict=False)
-            resolved.relative_to(resolved_base)
-        except (ValueError, OSError, RuntimeError):
+            rel_parts = resolved.relative_to(resolved_base).parts
+        except ValueError:
             # Escaping symlink or path outside base_dir: fail closed
+            return True
+        if _has_protected_part(rel_parts):
+            return True
+        if _has_protected_part(resolved_base.parts):
+            return True
+    else:
+        if _has_protected_part(resolved.parts):
             return True
 
     return False

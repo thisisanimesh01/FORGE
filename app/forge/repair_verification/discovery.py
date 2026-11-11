@@ -10,10 +10,12 @@ Performs bounded, evidence-driven test discovery across repository workspaces:
 
 import ast
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 import re
 from typing import Dict, List, Optional, Set, Tuple
 
+from forge.repository.indexer import discover_workspace_python_files
 from forge.repository.validation import assert_contained_path, SecurityError
 from forge.repair_verification.schemas import (
     TestIdentifier,
@@ -57,10 +59,33 @@ class RepairTestDiscoverer:
                 norm = mf.strip().replace("\\", "/").lstrip("/")
                 normalized_mods.append(norm)
 
-        # 1. Discover all test files under workspace
-        all_tests = self._find_test_files()
+        # 1. Discover all test files and candidate non-test python files in one pruned walk
+        all_py_paths = discover_workspace_python_files(
+            self.workspace_path,
+            max_python_files=MAX_DISCOVERY_FILES,
+            max_file_size_bytes=MAX_FILE_BYTES,
+            exclude_forge=True,
+        )
+        all_tests_set: Set[str] = set()
+        non_test_paths: List[Path] = []
+        for p in all_py_paths:
+            rel_str = str(p.relative_to(self.workspace_path)).replace("\\", "/")
+            name = p.name
+            if (
+                name.startswith("test_")
+                or name.endswith("_test.py")
+                or "tests/" in rel_str
+                or "test/" in rel_str
+                or rel_str.startswith("tests/")
+                or rel_str.startswith("test/")
+            ):
+                all_tests_set.add(rel_str)
+            else:
+                non_test_paths.append(p)
+
+        all_tests = sorted(all_tests_set)
         result.all_test_files = all_tests
-        if len(all_tests) >= MAX_DISCOVERY_FILES:
+        if len(all_py_paths) >= MAX_DISCOVERY_FILES:
             result.scan_limit_exceeded = True
             result.limitations.append(f"Reached maximum file scan cap of {MAX_DISCOVERY_FILES} files")
 
@@ -72,29 +97,29 @@ class RepairTestDiscoverer:
             if m.endswith(".py")
         }
 
-        # 2b. Map 1-hop indirect dependencies from non-test workspace source files
+        # 2b. Map 1-hop indirect dependencies only for files that textually mention any modified stem
         indirect_dependent_stems: Set[str] = set()
-        for p in self.workspace_path.rglob("*.py"):
-            parts = p.parts
-            if any(part in {".git", ".venv", "venv", "__pycache__", ".tox", ".pytest_cache"} for part in parts):
-                continue
-            rel_p = str(p.relative_to(self.workspace_path)).replace("\\", "/")
-            if rel_p in all_tests or p.name.startswith("test_") or "tests/" in rel_p:
-                continue
-            try:
-                if p.stat().st_size <= MAX_FILE_BYTES:
+        if mod_stems:
+            mod_stem_keys = list(mod_stems.keys())
+            for p in non_test_paths:
+                try:
                     src_content = p.read_text(encoding="utf-8", errors="replace")
+                    if not any(st in src_content for st in mod_stem_keys):
+                        continue
                     src_tree = ast.parse(src_content, filename=str(p))
-                    for node in ast.walk(src_tree):
+                    for node in ast.iter_child_nodes(src_tree):
                         if isinstance(node, ast.Import):
                             for alias in node.names:
-                                if any(st == alias.name.split(".")[-1] or st in alias.name.split(".") for st in mod_stems):
+                                alias_parts = alias.name.split(".")
+                                if any(st == alias_parts[-1] or st in alias_parts for st in mod_stem_keys):
                                     indirect_dependent_stems.add(p.stem)
                         elif isinstance(node, ast.ImportFrom):
-                            if node.module and any(st == node.module.split(".")[-1] or st in node.module.split(".") for st in mod_stems):
-                                indirect_dependent_stems.add(p.stem)
-            except Exception:
-                pass
+                            if node.module:
+                                mod_parts = node.module.split(".")
+                                if any(st == mod_parts[-1] or st in mod_parts for st in mod_stem_keys):
+                                    indirect_dependent_stems.add(p.stem)
+                except Exception:
+                    pass
 
         seen_test_ids: Set[str] = set()
 
@@ -175,24 +200,12 @@ class RepairTestDiscoverer:
     def _find_test_files(self) -> List[str]:
         """Find Python test files matching standard patterns."""
         test_files: List[str] = []
-        count = 0
-
-        # Look in tests/, test/, and root
-        for p in self.workspace_path.rglob("*.py"):
-            count += 1
-            if count > MAX_DISCOVERY_FILES:
-                break
-            try:
-                # Check containment & symlink boundary
-                assert_contained_path(p, self.workspace_path)
-            except SecurityError:
-                continue
-
-            # Ignore virtualenvs, git directories, caches
-            parts = p.parts
-            if any(part in {".git", ".venv", "venv", "__pycache__", ".tox", ".pytest_cache"} for part in parts):
-                continue
-
+        for p in discover_workspace_python_files(
+            self.workspace_path,
+            max_python_files=MAX_DISCOVERY_FILES,
+            max_file_size_bytes=MAX_FILE_BYTES,
+            exclude_forge=True,
+        ):
             rel_str = str(p.relative_to(self.workspace_path)).replace("\\", "/")
             name = p.name
             if (

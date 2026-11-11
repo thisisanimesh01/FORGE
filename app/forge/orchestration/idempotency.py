@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from forge.config import get_settings
 from forge.orchestration.persistence import CorruptedStateError
 from forge.orchestration.schemas import WorkflowStage
+from forge.storage.sqlite_pool import ThreadLocalSQLitePool
 
 
 class OperationStatus(str, Enum):
@@ -87,15 +88,15 @@ class IdempotencyLedger:
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self.db_path = Path(db_path or get_settings().db_path).resolve()
         self._lock = threading.Lock()
+        self._pool = ThreadLocalSQLitePool(self.db_path, owner=self)
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON;")
-        conn.execute("PRAGMA journal_mode = WAL;")
-        return conn
+    def _get_connection(self) -> Any:
+        return self._pool.get_connection()
+
+    def close(self) -> None:
+        """Close all pooled SQLite connections."""
+        self._pool.close_all()
 
     def _init_db(self) -> None:
         with self._lock:

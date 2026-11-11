@@ -16,7 +16,7 @@ from forge.repository.graph_schemas import (
     GraphNode,
     NodeKind,
 )
-from forge.repository.indexer import parse_python_file_details
+from forge.repository.indexer import discover_workspace_python_files, parse_python_file_details
 from forge.repository.protection import is_protected_path
 from forge.repository.resolver import WorkspaceImportResolver
 from forge.repository.validation import assert_contained_path
@@ -181,42 +181,22 @@ def build_call_graph(
 ) -> CallGraph:
     """Build a complete call graph across all eligible Python files in repo_root."""
     root = repo_root.resolve()
-    resolver = WorkspaceImportResolver(root)
+    discovered = discover_workspace_python_files(
+        root,
+        max_python_files=max_python_files,
+        max_file_size_bytes=max_file_size_bytes,
+        exclude_forge=False,
+    )
 
     # Step 1: Parse AST and collect symbols from all eligible files
-    parsed_files: Dict[str, any] = {}
-    all_nodes: Dict[str, GraphNode] = {}
-    class_bases_map: Dict[str, List[str]] = {}  # "rel_path:ClassName" -> list of base class names
-
-    processed_count = 0
-    for py_file in root.rglob("*.py"):
-        if is_protected_path(py_file, base_dir=root):
-            continue
-
-        try:
-            resolved = assert_contained_path(py_file, root)
-        except Exception:
-            continue
-
-        if is_protected_path(resolved, base_dir=root):
-            continue
-
-        parts = resolved.relative_to(root).parts
-        if any(p in [".venv", "venv", "__pycache__", ".pytest_cache", "build", "dist", ".git"] for p in parts):
-            continue
-
-        if py_file.stat().st_size > max_file_size_bytes:
-            continue
-
-        visitor = parse_python_file_details(resolved, root)
+    parsed_files: Dict[str, Any] = {}
+    for resolved in discovered:
+        visitor = parse_python_file_details(resolved, root, preverified=True)
         if visitor:
             rel_str = str(resolved.relative_to(root))
             parsed_files[rel_str] = visitor
 
-        processed_count += 1
-        if processed_count >= max_python_files:
-            break
-
+    resolver = WorkspaceImportResolver(root, known_python_files=list(parsed_files.keys()))
     return resolve_call_graph_from_records(parsed_files, root, resolver=resolver)
 
 

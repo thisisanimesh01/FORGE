@@ -37,7 +37,7 @@ class RepairRiskAnalyzer:
         root_cause_report: Optional[RootCauseReport] = None,
     ) -> RepairRiskAssessment:
         """Perform comprehensive deterministic risk assessment."""
-        symbols = affected_symbols or []
+        symbols = [s for s in (affected_symbols or []) if s]
         approach = proposed_approach or RepairApproach.LOCAL_LOGIC_CORRECTION
 
         risk_score = 0.20  # Baseline low risk

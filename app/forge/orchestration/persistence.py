@@ -24,6 +24,7 @@ from forge.orchestration.schemas import (
     WorkflowStage,
     WorkflowState,
 )
+from forge.storage.sqlite_pool import ThreadLocalSQLitePool
 
 ORCHESTRATION_SCHEMA_VERSION = 1
 
@@ -46,17 +47,16 @@ class OrchestrationStateStore:
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self.db_path = Path(db_path or get_settings().db_path).resolve()
         self._lock = threading.Lock()
+        self._pool = ThreadLocalSQLitePool(self.db_path, owner=self)
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """Create a dedicated SQLite connection with WAL journaling and busy timeout."""
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0, isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON;")
-        conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA busy_timeout = 30000;")
-        return conn
+    def _get_connection(self) -> Any:
+        """Return a pooled thread-local SQLite connection with WAL journaling and busy timeout."""
+        return self._pool.get_connection()
+
+    def close(self) -> None:
+        """Close all pooled SQLite connections."""
+        self._pool.close_all()
 
     def _init_db(self) -> None:
         """Initialize tables and indexes idempotently with schema tracking."""
@@ -192,6 +192,7 @@ class OrchestrationStateStore:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_orch_stage_wf ON orchestration_stage_records(workflow_id);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_orch_events_wf ON orchestration_events(workflow_id, sequence);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_orch_checkpoints_wf ON orchestration_recovery_checkpoints(workflow_id);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_orch_checkpoints_wf_latest ON orchestration_recovery_checkpoints(workflow_id, created_at DESC);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_orch_tasks_wf ON orchestration_tasks(workflow_id, state);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_orch_tasks_key ON orchestration_tasks(idempotency_key);")
 

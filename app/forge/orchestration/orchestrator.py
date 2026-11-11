@@ -135,10 +135,22 @@ class EngineeringOrchestrator:
             IdempotencyLedger(db_path=state_store.db_path) if state_store else None
         )
 
+        # Shared lazy index across default intelligence stages (avoids triple indexing)
+        self._shared_repo_index: Optional[Any] = None
+        self._shared_repo_root: Optional[Path] = None
+
+        def _get_shared_index(repo_root: Path) -> Any:
+            resolved = repo_root.resolve()
+            if self._shared_repo_index is None or self._shared_repo_root != resolved:
+                from forge.repository.incremental import IncrementalRepositoryIndex
+                self._shared_repo_root = resolved
+                self._shared_repo_index = IncrementalRepositoryIndex(repo_root=resolved)
+            return self._shared_repo_index
+
         # Stage Adapters
-        self.diagnosis_adapter = diagnosis_adapter or DefaultDiagnosisAdapter()
-        self.root_cause_adapter = root_cause_adapter or DefaultRootCauseAdapter()
-        self.planning_adapter = planning_adapter or DefaultPlanningAdapter()
+        self.diagnosis_adapter = diagnosis_adapter or DefaultDiagnosisAdapter(index_provider=_get_shared_index)
+        self.root_cause_adapter = root_cause_adapter or DefaultRootCauseAdapter(index_provider=_get_shared_index)
+        self.planning_adapter = planning_adapter or DefaultPlanningAdapter(index_provider=_get_shared_index)
         self.execution_adapter = execution_adapter or DefaultExecutionAdapter()
         self.verification_adapter = verification_adapter or DefaultVerificationAdapter()
         self.quality_adapter = quality_adapter or DefaultQualityAdapter()

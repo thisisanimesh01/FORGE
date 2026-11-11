@@ -5,11 +5,12 @@ Resolves Python imports strictly within the sanitized analysis workspace without
 
 from pathlib import Path
 import sys
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 from pydantic import BaseModel, Field
 
 from forge.repository.graph_schemas import CallResolutionStatus, ImportRecord
-from forge.repository.protection import is_protected_path
+from forge.repository.indexer import discover_workspace_python_files
+from forge.repository.protection import is_protected_name, is_protected_path
 from forge.repository.validation import assert_contained_path
 
 
@@ -28,65 +29,101 @@ class ResolvedImport(BaseModel):
 class WorkspaceImportResolver:
     """Static resolver that maps import statements to workspace files or external packages."""
 
-    def __init__(self, repo_root: Path):
+    def __init__(
+        self,
+        repo_root: Path,
+        known_python_files: Optional[Iterable[Union[str, Path]]] = None,
+    ):
         self.repo_root = repo_root.resolve()
         self.module_to_file: Dict[str, str] = {}
         self.file_to_module: Dict[str, str] = {}
         self.package_roots: Set[str] = set()
         self._stdlib_modules: Set[str] = set(getattr(sys, "stdlib_module_names", set()))
-        self._build_workspace_module_map()
+        self._build_workspace_module_map(known_python_files=known_python_files)
 
-    def _build_workspace_module_map(self) -> None:
+    def _build_workspace_module_map(
+        self,
+        known_python_files: Optional[Iterable[Union[str, Path]]] = None,
+    ) -> None:
         """Scan workspace and map dotted module names to workspace-relative file paths."""
         if not self.repo_root.exists() or not self.repo_root.is_dir():
             return
 
-        # Find potential source roots (repo_root, src, app, lib, etc.)
-        candidate_roots = [self.repo_root]
-        for candidate_name in ["src", "app", "lib", "packages"]:
+        # Find potential source roots (repo_root, src, app, lib, etc.) as normalized relative prefixes
+        candidate_prefixes: List[str] = []
+        seen_prefixes: Set[str] = set()
+
+        def _add_prefix_from_path(root_dir: Path) -> None:
+            try:
+                rel_p = root_dir.relative_to(self.repo_root).as_posix().strip("/")
+            except ValueError:
+                return
+            if not rel_p or rel_p == ".":
+                return
+            pref = f"{rel_p}/"
+            if pref not in seen_prefixes:
+                seen_prefixes.add(pref)
+                candidate_prefixes.append(pref)
+
+        for candidate_name in ("src", "app", "lib", "packages"):
             candidate_dir = self.repo_root / candidate_name
             if candidate_dir.is_dir() and not is_protected_path(candidate_dir, base_dir=self.repo_root):
                 try:
                     contained = assert_contained_path(candidate_dir, self.repo_root)
-                    candidate_roots.append(contained)
+                    _add_prefix_from_path(contained)
                 except Exception:
                     pass
 
-        # Identify all packages with __init__.py to find package root directories
-        for init_file in self.repo_root.rglob("__init__.py"):
-            if is_protected_path(init_file, base_dir=self.repo_root):
-                continue
-            try:
-                contained_init = assert_contained_path(init_file, self.repo_root)
-                parent_dir = contained_init.parent.parent
-                if parent_dir not in candidate_roots:
-                    candidate_roots.append(parent_dir)
-            except Exception:
-                continue
+        rel_files: List[Tuple[str, Tuple[str, ...]]] = []
+        if known_python_files is not None:
+            for item in known_python_files:
+                if isinstance(item, Path):
+                    abs_path = item if item.is_absolute() else (self.repo_root / item)
+                    try:
+                        rel_str = abs_path.relative_to(self.repo_root).as_posix()
+                    except ValueError:
+                        continue
+                else:
+                    rel_str = str(item).replace("\\", "/").lstrip("/")
+                if not rel_str:
+                    continue
+                rel_parts = tuple(rel_str.split("/"))
+                if is_protected_name(rel_parts[-1]):
+                    continue
+                if rel_parts[-1] == "__init__.py" and len(rel_parts) >= 3:
+                    parent_pref = "/".join(rel_parts[:-2]) + "/"
+                    if parent_pref not in seen_prefixes:
+                        seen_prefixes.add(parent_pref)
+                        candidate_prefixes.append(parent_pref)
+                rel_files.append((rel_str, rel_parts))
+        else:
+            py_files = discover_workspace_python_files(
+                self.repo_root,
+                max_python_files=10_000,
+                max_file_size_bytes=50_000_000,
+                exclude_forge=True,
+            )
+            for resolved_file in py_files:
+                rel_str = resolved_file.relative_to(self.repo_root).as_posix()
+                rel_parts = tuple(rel_str.split("/"))
+                if rel_parts[-1] == "__init__.py" and len(rel_parts) >= 3:
+                    parent_pref = "/".join(rel_parts[:-2]) + "/"
+                    if parent_pref not in seen_prefixes:
+                        seen_prefixes.add(parent_pref)
+                        candidate_prefixes.append(parent_pref)
+                rel_files.append((rel_str, rel_parts))
 
-        # Map all .py files
-        for py_file in self.repo_root.rglob("*.py"):
-            if is_protected_path(py_file, base_dir=self.repo_root):
+        excluded = {".venv", "venv", "__pycache__", ".pytest_cache", "build", "dist", ".git"}
+        # Map all .py files deterministically
+        for rel_str, rel_parts in rel_files:
+            if not rel_parts or any(p in excluded for p in rel_parts):
                 continue
-            try:
-                resolved_file = assert_contained_path(py_file, self.repo_root)
-            except Exception:
-                continue
-
-            rel_parts = resolved_file.relative_to(self.repo_root).parts
-            if any(p in [".venv", "venv", "__pycache__", ".pytest_cache", "build", "dist", ".git"] for p in rel_parts):
-                continue
-
-            rel_str = str(resolved_file.relative_to(self.repo_root))
 
             # Primary module name from repo root
-            if rel_str.endswith("/__init__.py"):
+            if rel_parts[-1] == "__init__.py":
                 mod_from_root = ".".join(rel_parts[:-1])
-            elif rel_str == "__init__.py":
-                mod_from_root = ""
             elif rel_str.endswith(".py"):
-                parts_without_ext = list(rel_parts[:-1]) + [rel_parts[-1][:-3]]
-                mod_from_root = ".".join(parts_without_ext)
+                mod_from_root = ".".join((*rel_parts[:-1], rel_parts[-1][:-3]))
             else:
                 continue
 
@@ -94,21 +131,17 @@ class WorkspaceImportResolver:
                 self.module_to_file[mod_from_root] = rel_str
                 self.file_to_module[rel_str] = mod_from_root
 
-            # Also index relative to candidate source roots
-            for s_root in candidate_roots:
-                if s_root == self.repo_root:
-                    continue
-                try:
-                    sub_rel = resolved_file.relative_to(s_root)
-                    sub_parts = sub_rel.parts
-                    if sub_rel.name == "__init__.py":
+            # Also index relative to candidate source root prefixes without Path.relative_to()
+            for pref in candidate_prefixes:
+                if rel_str.startswith(pref):
+                    sub_str = rel_str[len(pref):]
+                    sub_parts = sub_str.split("/")
+                    if sub_parts[-1] == "__init__.py":
                         alt_mod = ".".join(sub_parts[:-1])
                     else:
-                        alt_mod = ".".join(list(sub_parts[:-1]) + [sub_parts[-1][:-3]])
+                        alt_mod = ".".join((*sub_parts[:-1], sub_parts[-1][:-3]))
                     if alt_mod and alt_mod not in self.module_to_file:
                         self.module_to_file[alt_mod] = rel_str
-                except ValueError:
-                    continue
 
     def get_module_name_for_file(self, rel_path: str) -> str:
         """Get the canonical dotted module name for a workspace relative file path."""

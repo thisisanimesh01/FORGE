@@ -44,6 +44,7 @@ from forge.repository.indexer import (
     ASTSymbolVisitor,
     SymbolIndex,
     SymbolRecord,
+    discover_workspace_python_files,
     parse_python_file_details,
     rel_path_to_module_name,
 )
@@ -94,15 +95,19 @@ def parse_file_to_record(
     file_path: Path,
     repo_root: Path,
     content_hash: Optional[str] = None,
+    preverified: bool = False,
 ) -> Optional[FileIndexRecord]:
     """Parse a single Python file into a FileIndexRecord with full containment and security validation."""
-    try:
-        resolved = assert_contained_path(file_path, repo_root)
-    except Exception:
-        return None
+    if not preverified:
+        try:
+            resolved = assert_contained_path(file_path, repo_root)
+        except Exception:
+            return None
 
-    if is_protected_path(resolved, base_dir=repo_root):
-        return None
+        if is_protected_path(resolved, base_dir=repo_root):
+            return None
+    else:
+        resolved = file_path
 
     rel_path = str(resolved.relative_to(repo_root))
 
@@ -119,7 +124,12 @@ def parse_file_to_record(
     if content_hash is None:
         content_hash = hashlib.sha256(raw_bytes).hexdigest()
 
-    visitor = parse_python_file_details(resolved, repo_root)
+    visitor = parse_python_file_details(
+        resolved,
+        repo_root,
+        preloaded_content=content,
+        preverified=True,
+    )
     if not visitor:
         # File has syntax error or is unparseable: return clean empty record for graph consistency
         return FileIndexRecord(
@@ -138,20 +148,13 @@ def parse_file_to_record(
             callable_local_vars={},
         )
 
-    docstring = None
-    try:
-        tree = ast.parse(content, filename=rel_path)
-        docstring = ast.get_docstring(tree)
-    except Exception:
-        pass
-
     return visitor_to_file_record(
         visitor=visitor,
         file_path=rel_path,
         content_hash=content_hash,
         size_bytes=size_bytes,
         mtime_ns=mtime_ns,
-        docstring=docstring,
+        docstring=visitor.module_docstring,
         total_lines=total_lines,
     )
 
@@ -424,37 +427,12 @@ class IncrementalRepositoryIndex:
 
     def _discover_python_files(self) -> List[Path]:
         """Discover valid workspace Python files respecting boundaries and exclusions."""
-        discovered: List[Path] = []
-        if not self.repo_root.exists() or not self.repo_root.is_dir():
-            return []
-
-        for py_file in self.repo_root.rglob("*.py"):
-            if is_protected_path(py_file, base_dir=self.repo_root):
-                continue
-            try:
-                resolved = assert_contained_path(py_file, self.repo_root)
-            except Exception:
-                continue
-
-            if is_protected_path(resolved, base_dir=self.repo_root):
-                continue
-
-            parts = resolved.relative_to(self.repo_root).parts
-            if any(p in [".venv", "venv", "__pycache__", ".pytest_cache", "build", "dist", ".git", ".forge"] for p in parts):
-                continue
-
-            try:
-                if resolved.stat().st_size > self.max_file_size_bytes:
-                    continue
-            except OSError:
-                continue
-
-            discovered.append(resolved)
-
-        discovered.sort(key=lambda p: str(p.relative_to(self.repo_root)))
-        if len(discovered) > self.max_python_files:
-            discovered = discovered[:self.max_python_files]
-        return discovered
+        return discover_workspace_python_files(
+            self.repo_root,
+            max_python_files=self.max_python_files,
+            max_file_size_bytes=self.max_file_size_bytes,
+            exclude_forge=True,
+        )
 
     def _load_persisted_state(self) -> Optional[RepositoryIndexState]:
         """Load persisted repository index state if present and schema-compatible."""
@@ -491,7 +469,7 @@ class IncrementalRepositoryIndex:
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             temp_path = self.state_file.parent / f".tmp.state.{os.getpid()}"
-            temp_path.write_text(state.model_dump_json(indent=2), encoding="utf-8")
+            temp_path.write_text(state.model_dump_json(), encoding="utf-8")
             os.replace(temp_path, self.state_file)
         except Exception:
             pass
@@ -524,13 +502,15 @@ class IncrementalRepositoryIndex:
         """Internal worker for incremental build and delta processing."""
         discovered_files = self._discover_python_files()
 
-        # Step 1: Compute content hashes for current files
+        # Step 1: Compute content hashes for already-verified files cleanly
         current_hashes: Dict[str, str] = {}
         for f in discovered_files:
             rel_str = str(f.relative_to(self.repo_root))
-            h = IndexCacheManager.compute_file_content_hash(f, self.repo_root)
-            if h is not None:
-                current_hashes[rel_str] = h
+            try:
+                raw_bytes = f.read_bytes()
+                current_hashes[rel_str] = hashlib.sha256(raw_bytes).hexdigest()
+            except (OSError, IOError):
+                continue
 
         # Step 2: Compare against previous state
         prev_state = None if force_rebuild else self._load_persisted_state()
@@ -573,16 +553,15 @@ class IncrementalRepositoryIndex:
         cache_hits_before = self.cache_manager.stats.cache_hits
         cache_misses_before = self.cache_manager.stats.cache_misses
 
-        # Unchanged files: try cache first
+        # Unchanged files: try cache first (always checks disk checksum Integrity)
         for rel_str in unchanged_set:
             rec = None
             if not force_rebuild:
                 rec = self.cache_manager.get(rel_str, current_hashes[rel_str])
 
             if rec is None:
-                # Cache miss or forced rebuild: parse and cache
                 abs_file = self.repo_root / rel_str
-                rec = parse_file_to_record(abs_file, self.repo_root, content_hash=current_hashes[rel_str])
+                rec = parse_file_to_record(abs_file, self.repo_root, content_hash=current_hashes[rel_str], preverified=True)
                 if rec:
                     self.cache_manager.put(rel_str, rec)
 
@@ -594,7 +573,7 @@ class IncrementalRepositoryIndex:
         self.cache_manager.stats.cache_misses += len(to_parse) + len(raw_added - added_set)
         for rel_str in to_parse:
             abs_file = self.repo_root / rel_str
-            rec = parse_file_to_record(abs_file, self.repo_root, content_hash=current_hashes[rel_str])
+            rec = parse_file_to_record(abs_file, self.repo_root, content_hash=current_hashes[rel_str], preverified=True)
             if rec:
                 self.cache_manager.put(rel_str, rec)
                 records[rel_str] = rec
@@ -602,13 +581,13 @@ class IncrementalRepositoryIndex:
         # For detected renames: load or parse under new path
         for rel_str in (raw_added - added_set):
             abs_file = self.repo_root / rel_str
-            rec = parse_file_to_record(abs_file, self.repo_root, content_hash=current_hashes[rel_str])
+            rec = parse_file_to_record(abs_file, self.repo_root, content_hash=current_hashes[rel_str], preverified=True)
             if rec:
                 self.cache_manager.put(rel_str, rec)
                 records[rel_str] = rec
 
-        # Step 4: Assemble graphs from records
-        resolver = WorkspaceImportResolver(self.repo_root)
+        # Step 4: Assemble graphs from records sharing a single resolver instance
+        resolver = WorkspaceImportResolver(self.repo_root, known_python_files=list(current_hashes.keys()))
         symbol_index = build_symbol_index_from_records(records)
         call_graph = build_call_graph_from_records(records, self.repo_root, resolver=resolver)
         module_graph = build_module_graph_from_records(records, self.repo_root, resolver=resolver)
@@ -631,8 +610,9 @@ class IncrementalRepositoryIndex:
             affected_modules.difference_update(changed_modules)
             invalidated_dependents = len(affected_modules)
 
-        # Persist updated state snapshot
-        self._save_persisted_state(current_hashes)
+        # Persist updated state snapshot only when needed
+        if force_rebuild or prev_state is None or current_hashes != prev_hashes or not self.state_file.exists():
+            self._save_persisted_state(current_hashes)
 
         duration = time.time() - start_time
         hits_delta = self.cache_manager.stats.cache_hits - cache_hits_before

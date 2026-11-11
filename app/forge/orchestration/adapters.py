@@ -175,8 +175,15 @@ class QualityAdapter(ABC):
 class DefaultDiagnosisAdapter(DiagnosisAdapter):
     """Production diagnosis adapter wrapping EvidenceDrivenDiagnosisEngine."""
 
-    def __init__(self, workspace_path: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        workspace_path: Optional[Path] = None,
+        incremental_index: Optional[Any] = None,
+        index_provider: Optional[Any] = None,
+    ) -> None:
         self.workspace_path = workspace_path
+        self.incremental_index = incremental_index
+        self.index_provider = index_provider
 
     def run_diagnosis(
         self,
@@ -186,9 +193,11 @@ class DefaultDiagnosisAdapter(DiagnosisAdapter):
         from forge.diagnosis.engine import EvidenceDrivenDiagnosisEngine
 
         repo_root = self.workspace_path or Path(context.repository_path)
+        shared_idx = self.incremental_index or (self.index_provider(repo_root) if self.index_provider else None)
         engine = EvidenceDrivenDiagnosisEngine(
             workspace_path=repo_root,
             run_id=context.run_id,
+            incremental_index=shared_idx,
         )
         diag_input = input_data or context.defect_input or DiagnosisInput()
         return engine.diagnose(diag_input)
@@ -197,8 +206,15 @@ class DefaultDiagnosisAdapter(DiagnosisAdapter):
 class DefaultRootCauseAdapter(RootCauseAdapter):
     """Production root-cause adapter wrapping RootCauseAnalysisEngine."""
 
-    def __init__(self, workspace_path: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        workspace_path: Optional[Path] = None,
+        incremental_index: Optional[Any] = None,
+        index_provider: Optional[Any] = None,
+    ) -> None:
         self.workspace_path = workspace_path
+        self.incremental_index = incremental_index
+        self.index_provider = index_provider
 
     def run_root_cause(
         self,
@@ -208,15 +224,27 @@ class DefaultRootCauseAdapter(RootCauseAdapter):
         from forge.causality.engine import RootCauseAnalysisEngine
 
         repo_root = self.workspace_path or Path(context.repository_path)
-        engine = RootCauseAnalysisEngine(workspace_path=repo_root)
-        return engine.analyze_root_cause(diagnosis=diagnosis)
+        shared_idx = self.incremental_index or (self.index_provider(repo_root) if self.index_provider else None)
+        engine = RootCauseAnalysisEngine(
+            workspace_path=repo_root,
+            run_id=context.run_id,
+            incremental_index=shared_idx,
+        )
+        return engine.analyze(diagnosis=diagnosis)
 
 
 class DefaultPlanningAdapter(PlanningAdapter):
     """Production planning adapter wrapping RepairPlanningEngine."""
 
-    def __init__(self, workspace_path: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        workspace_path: Optional[Path] = None,
+        incremental_index: Optional[Any] = None,
+        index_provider: Optional[Any] = None,
+    ) -> None:
         self.workspace_path = workspace_path
+        self.incremental_index = incremental_index
+        self.index_provider = index_provider
 
     def run_planning(
         self,
@@ -227,7 +255,11 @@ class DefaultPlanningAdapter(PlanningAdapter):
         from forge.repair_planning.planner import RepairPlanningEngine
 
         repo_root = self.workspace_path or Path(context.repository_path)
-        engine = RepairPlanningEngine(workspace_path=repo_root)
+        shared_idx = self.incremental_index or (self.index_provider(repo_root) if self.index_provider else None)
+        engine = RepairPlanningEngine(
+            workspace_path=repo_root,
+            incremental_index=shared_idx,
+        )
         return engine.plan_repair(
             root_cause_report=root_cause,
             diagnosis=diagnosis,
