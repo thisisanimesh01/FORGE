@@ -229,6 +229,7 @@ class OpenAICompatibleProvider:
         max_retries: int = 1,
         http_client: Optional[httpx.Client] = None,
     ):
+        import threading
         settings = get_settings()
         self.api_key = api_key if api_key is not None else ""
         self.model = model or settings.llm_model
@@ -237,6 +238,8 @@ class OpenAICompatibleProvider:
         self.timeout_seconds = timeout_seconds if timeout_seconds is not None else getattr(settings, "llm_timeout_seconds", 60.0)
         self.max_retries = max(0, max_retries)
         self._custom_client = http_client
+        self._shared_client: Optional[httpx.Client] = None
+        self._client_lock = threading.Lock()
 
     def is_available(self) -> bool:
         """Return True if API key (on a safe URL) or canonical local loopback endpoint is configured."""
@@ -253,7 +256,17 @@ class OpenAICompatibleProvider:
     def _get_client(self) -> httpx.Client:
         if self._custom_client:
             return self._custom_client
-        return httpx.Client(timeout=self.timeout_seconds, follow_redirects=False)
+        with self._client_lock:
+            if self._shared_client is None or self._shared_client.is_closed:
+                self._shared_client = httpx.Client(timeout=self.timeout_seconds, follow_redirects=False)
+            return self._shared_client
+
+    def close(self) -> None:
+        """Close the pooled HTTP client if initialized."""
+        with self._client_lock:
+            if self._shared_client is not None and not self._shared_client.is_closed:
+                self._shared_client.close()
+                self._shared_client = None
 
     def _format_message(self, msg: ChatMessage) -> Dict[str, Any]:
         """Convert ChatMessage into OpenAI wire format."""

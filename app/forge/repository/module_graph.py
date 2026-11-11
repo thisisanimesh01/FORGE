@@ -7,7 +7,7 @@ Python files without executing code, strictly enforcing Phase 10 isolation bound
 from collections import deque
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from forge.repository.graph_schemas import (
     CallResolutionStatus,
@@ -21,7 +21,7 @@ from forge.repository.graph_schemas import (
     StronglyConnectedComponent,
     UnresolvedImportRecord,
 )
-from forge.repository.indexer import parse_python_file_details
+from forge.repository.indexer import discover_workspace_python_files, parse_python_file_details
 from forge.repository.protection import is_protected_path
 from forge.repository.resolver import WorkspaceImportResolver
 from forge.repository.validation import assert_contained_path
@@ -40,6 +40,7 @@ class ModuleDependencyGraph(BaseModel):
     # Lookup indices
     alias_to_module: Dict[str, str] = Field(default_factory=dict)
     file_to_module: Dict[str, str] = Field(default_factory=dict)
+    _cached_cycles: Dict[Tuple[int, int], List[DependencyCycle]] = PrivateAttr(default_factory=dict)
 
     def get_module(self, module_identifier: str) -> Optional[ModuleNode]:
         """Lookup a module node by module_id, file path, or known module alias."""
@@ -221,6 +222,10 @@ class ModuleDependencyGraph(BaseModel):
         - Multi-module cycles (length >= 3, [A, B, ..., A])
         All cycle representations are canonicalized to start and end with their lexicographically smallest module.
         """
+        cache_key = (max_cycles, max_depth)
+        if cache_key in self._cached_cycles:
+            return list(self._cached_cycles[cache_key])
+
         cyclic_sccs = self.get_strongly_connected_components(only_cyclic=True)
         detected_cycles: List[DependencyCycle] = []
         seen_cycle_signatures: Set[str] = set()
@@ -302,6 +307,7 @@ class ModuleDependencyGraph(BaseModel):
 
         # Sort cycles deterministically by length, then by cycle_id
         detected_cycles.sort(key=lambda c: (c.length, c.cycle_id))
+        self._cached_cycles[(max_cycles, max_depth)] = list(detected_cycles)
         return detected_cycles
 
     def is_in_cycle(self, module_identifier: str) -> bool:
@@ -362,38 +368,14 @@ def build_module_dependency_graph(
     if not root.exists() or not root.is_dir():
         return ModuleDependencyGraph()
 
-    resolver = WorkspaceImportResolver(root)
-
-    # 1. Discover all candidate workspace Python files
-    discovered_files: List[Path] = []
-    for py_file in root.rglob("*.py"):
-        if is_protected_path(py_file, base_dir=root):
-            continue
-
-        try:
-            resolved_file = assert_contained_path(py_file, root)
-        except Exception:
-            continue
-
-        if is_protected_path(resolved_file, base_dir=root):
-            continue
-
-        parts = resolved_file.relative_to(root).parts
-        if any(p in [".venv", "venv", "__pycache__", ".pytest_cache", "build", "dist", ".git"] for p in parts):
-            continue
-
-        try:
-            if resolved_file.stat().st_size > max_file_size_bytes:
-                continue
-        except OSError:
-            continue
-
-        discovered_files.append(resolved_file)
-
-    # Deterministic file ordering
-    discovered_files.sort(key=lambda p: str(p.relative_to(root)))
-    if len(discovered_files) > max_python_files:
-        discovered_files = discovered_files[:max_python_files]
+    # 1. Discover all candidate workspace Python files via pruned os.walk
+    discovered_files = discover_workspace_python_files(
+        root,
+        max_python_files=max_python_files,
+        max_file_size_bytes=max_file_size_bytes,
+        exclude_forge=False,
+    )
+    resolver = WorkspaceImportResolver(root, known_python_files=discovered_files)
 
     # 2. Initialize ModuleNode for each discovered file
     nodes: Dict[str, ModuleNode] = {}
@@ -412,8 +394,9 @@ def build_module_dependency_graph(
         docstring = None
         total_lines = 0
         try:
-            content = file_path.read_text(encoding="utf-8", errors="ignore")
-            total_lines = len(content.splitlines())
+            raw_bytes = file_path.read_bytes()
+            if raw_bytes:
+                total_lines = raw_bytes.count(b"\n") + (0 if raw_bytes.endswith(b"\n") else 1)
         except Exception:
             pass
 

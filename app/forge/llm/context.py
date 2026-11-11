@@ -14,11 +14,13 @@ Invariants:
 - Clear distinction between confirmed source facts and inferred graph relationships.
 """
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 import hashlib
+import os
 from pathlib import Path
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from pydantic import BaseModel, Field
 
 from forge.config import redact_secrets
@@ -26,7 +28,7 @@ from forge.llm.repo_tool_schemas import CallEdgeInfo, SourceExcerpt, SymbolMatch
 from forge.repository.call_graph import CallGraph
 from forge.repository.graph_schemas import CallEdge, CallResolutionStatus, DependencyCycle, ModuleNode
 from forge.repository.incremental import IncrementalRepositoryIndex
-from forge.repository.indexer import SymbolIndex, SymbolRecord
+from forge.repository.indexer import SymbolIndex, SymbolRecord, discover_workspace_python_files
 from forge.repository.module_graph import ModuleDependencyGraph
 from forge.repository.protection import is_protected_path
 from forge.repository.validation import assert_contained_path, SecurityError
@@ -35,6 +37,7 @@ from forge.repository.validation import assert_contained_path, SecurityError
 DEFAULT_CONTEXT_CHAR_BUDGET = 16_000
 MAX_SOURCE_EXCERPTS = 6
 MAX_LINES_PER_EXCERPT = 80
+MAX_CONTEXT_CACHE_ENTRIES = 16
 
 
 class BuiltRepositoryContext(BaseModel):
@@ -64,6 +67,8 @@ class RepositoryContextBuilder:
         self.default_char_budget = default_char_budget
         self._incremental_index = incremental_index
         self._impact_analyzer: Optional[Any] = None
+        self._last_stat_sig: Optional[Tuple[Tuple[str, int, int], ...]] = None
+        self._context_cache: "OrderedDict[Tuple[Any, ...], BuiltRepositoryContext]" = OrderedDict()
 
     def get_incremental_index(self) -> IncrementalRepositoryIndex:
         """Lazily initialize or return the IncrementalRepositoryIndex."""
@@ -82,6 +87,21 @@ class RepositoryContextBuilder:
             )
         return self._impact_analyzer
 
+    def _compute_workspace_stat_sig(self, idx: IncrementalRepositoryIndex) -> Tuple[Tuple[str, int, int], ...]:
+        sig: List[Tuple[str, int, int]] = []
+        for p in discover_workspace_python_files(
+            self.workspace_path,
+            max_python_files=idx.max_python_files,
+            max_file_size_bytes=idx.max_file_size_bytes,
+            exclude_forge=True,
+        ):
+            try:
+                st = p.stat()
+                sig.append((str(p.relative_to(self.workspace_path)), st.st_size, getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))))
+            except OSError:
+                continue
+        return tuple(sig)
+
     def build_context(
         self,
         query: Optional[str] = None,
@@ -96,13 +116,67 @@ class RepositoryContextBuilder:
         """Construct deterministic, budgeted repository context."""
         budget = char_budget or self.default_char_budget
 
-        # Step 1: Ensure fresh index
-        idx = self.get_incremental_index()
-        symbols, call_graph, module_graph, summary = idx.build()
-
         target_files_clean = [f.strip().replace("\\", "/") for f in (target_files or []) if f.strip()]
         target_symbols_clean = [s.strip() for s in (target_symbols or []) if s.strip()]
         change_files_clean = [f.strip().replace("\\", "/") for f in (change_set_files or []) if f.strip()]
+
+        # Step 1: Ensure fresh index while avoiding full rebuilds when workspace files are unchanged
+        idx = self.get_incremental_index()
+        stat_sig = self._compute_workspace_stat_sig(idx)
+        diff_hash = hashlib.sha256(change_set_diff.encode("utf-8")).hexdigest() if change_set_diff else None
+        cache_key = (
+            stat_sig,
+            query,
+            tuple(target_files_clean),
+            tuple(target_symbols_clean),
+            tuple(change_files_clean),
+            diff_hash,
+            max_excerpts,
+            max_lines_per_excerpt,
+            budget,
+        )
+        if cache_key in self._context_cache and idx._symbol_index is not None:
+            cached = self._context_cache[cache_key]
+            # Adversarial freshness check: ensure cached source excerpts have not drifted on disk
+            # even if size/mtime appear identical (Audit A invariant)
+            is_stale = False
+            for excerpt in cached.source_excerpts:
+                try:
+                    fpath = assert_contained_path(self.workspace_path / excerpt.file_path, self.workspace_path)
+                    if not fpath.is_file():
+                        is_stale = True
+                        break
+                    raw_lines = fpath.read_text(encoding="utf-8", errors="replace").splitlines()
+                    if excerpt.start_line > len(raw_lines):
+                        is_stale = True
+                        break
+                    selected = raw_lines[excerpt.start_line - 1 : excerpt.end_line]
+                    cur_sha = hashlib.sha256("\n".join(selected).encode("utf-8")).hexdigest()
+                    if cur_sha != excerpt.content_sha256:
+                        is_stale = True
+                        break
+                except Exception:
+                    is_stale = True
+                    break
+
+            if not is_stale:
+                self._context_cache.move_to_end(cache_key)
+                return cached.model_copy(deep=True)
+            else:
+                del self._context_cache[cache_key]
+
+        if (
+            self._last_stat_sig == stat_sig
+            and idx._symbol_index is not None
+            and idx._call_graph is not None
+            and idx._module_graph is not None
+        ):
+            symbols = idx._symbol_index
+            call_graph = idx._call_graph
+            module_graph = idx._module_graph
+        else:
+            symbols, call_graph, module_graph, _ = idx.build()
+            self._last_stat_sig = stat_sig
 
         # Step 2: Rank and select relevant symbols
         selected_symbols = self._select_relevant_symbols(
@@ -175,7 +249,7 @@ class RepositoryContextBuilder:
             for s in selected_symbols
         ]
 
-        return BuiltRepositoryContext(
+        built = BuiltRepositoryContext(
             rendered_context=rendered,
             relevant_symbols=symbol_matches,
             source_excerpts=excerpts,
@@ -187,6 +261,10 @@ class RepositoryContextBuilder:
             char_budget=budget,
             was_truncated=was_truncated,
         )
+        self._context_cache[cache_key] = built
+        if len(self._context_cache) > MAX_CONTEXT_CACHE_ENTRIES:
+            self._context_cache.popitem(last=False)
+        return built.model_copy(deep=True)
 
     # -----------------------------------------------------------------------
     # Helper: Relevant Symbol Selection
@@ -269,8 +347,9 @@ class RepositoryContextBuilder:
 
         for edge in call_graph.edges:
             callee_name = edge.target_id or edge.target_qualified_name or edge.raw_call_expr
-            caller_matches = (edge.source_id in selected_can_ids) or any(
-                edge.source_id.endswith(f":{name}") for name in selected_names
+            src_id = edge.source_id
+            caller_matches = (src_id in selected_can_ids) or (
+                ":" in src_id and src_id.rsplit(":", 1)[-1] in selected_names
             )
             callee_matches = (callee_name in selected_names) or (callee_name in selected_can_ids)
 

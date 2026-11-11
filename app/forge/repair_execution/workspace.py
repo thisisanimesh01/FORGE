@@ -169,6 +169,64 @@ def _set_directory_writable(path: Path) -> None:
                 pass
 
 
+def _safe_copy_dual_and_digest(src_dir: Path, isolated_dir: Path, snapshot_dir: Path) -> str:
+    """Copy protected-filtered repository files into workspace and snapshot while computing baseline SHA-256 in one pass."""
+    src_root = src_dir.resolve()
+    iso_root = isolated_dir.resolve()
+    snap_root = snapshot_dir.resolve()
+    iso_root.mkdir(parents=True, exist_ok=True)
+    snap_root.mkdir(parents=True, exist_ok=True)
+
+    file_hashes: List[Tuple[str, str]] = []
+    for root, dirs, files in os.walk(src_root, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d != ".git" and not is_protected_name(d))
+        rel_root = Path(root).relative_to(src_root)
+        iso_sub = iso_root / rel_root
+        snap_sub = snap_root / rel_root
+        iso_sub.mkdir(parents=True, exist_ok=True)
+        snap_sub.mkdir(parents=True, exist_ok=True)
+
+        for file_name in sorted(files):
+            if is_protected_name(file_name):
+                continue
+            src_file = Path(root) / file_name
+            try:
+                st = os.lstat(src_file)
+                if (
+                    stat.S_ISFIFO(st.st_mode)
+                    or stat.S_ISSOCK(st.st_mode)
+                    or stat.S_ISCHR(st.st_mode)
+                    or stat.S_ISBLK(st.st_mode)
+                    or stat.S_ISLNK(st.st_mode)
+                    or not stat.S_ISREG(st.st_mode)
+                ):
+                    continue
+            except OSError:
+                continue
+
+            rel_path = str((rel_root / file_name)).replace("\\", "/")
+            if is_protected_path(rel_path, base_dir=src_root):
+                continue
+
+            iso_dst = iso_sub / file_name
+            snap_dst = snap_sub / file_name
+            try:
+                raw_bytes = src_file.read_bytes()
+                iso_dst.write_bytes(raw_bytes)
+                snap_dst.write_bytes(raw_bytes)
+                shutil.copystat(src_file, iso_dst, follow_symlinks=False)
+                shutil.copystat(src_file, snap_dst, follow_symlinks=False)
+                file_hashes.append((rel_path, hashlib.sha256(raw_bytes).hexdigest()))
+            except Exception:
+                continue
+
+    file_hashes.sort(key=lambda x: x[0])
+    hasher = hashlib.sha256()
+    for rel_p, f_h in file_hashes:
+        hasher.update(f"{rel_p}:{f_h}\n".encode("utf-8"))
+    return hasher.hexdigest()
+
+
 class RepairWorkspaceManager:
     """Manages the lifecycle of isolated repair workspaces."""
 
@@ -217,16 +275,12 @@ class RepairWorkspaceManager:
             isolated_dir = self.base_workspaces_dir / workspace_id
             snapshot_dir = self.base_workspaces_dir / f"{workspace_id}_baseline"
 
-            # Safely copy files into isolated directory and baseline snapshot
-            _safe_copy_tree(src_dir=self.original_repo_path, dst_dir=isolated_dir)
-            _safe_copy_tree(src_dir=self.original_repo_path, dst_dir=snapshot_dir)
-
-            # Deep purge of any nested protected files
-            purge_protected_paths_from_workspace(isolated_dir)
-            purge_protected_paths_from_workspace(snapshot_dir)
-
-            # Compute clean baseline tree digest before write-protecting snapshot
-            baseline_digest = compute_tree_digest(isolated_dir)
+            # Single-pass copy into isolated workspace + baseline snapshot and compute baseline tree digest
+            baseline_digest = _safe_copy_dual_and_digest(
+                src_dir=self.original_repo_path,
+                isolated_dir=isolated_dir,
+                snapshot_dir=snapshot_dir,
+            )
 
             # Write-protect baseline snapshot directory to prevent accidental or malicious tampering
             _set_directory_read_only(snapshot_dir)

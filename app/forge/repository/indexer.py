@@ -1,13 +1,97 @@
 """AST-based Python source code indexing without executing code."""
 
 import ast
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from pydantic import BaseModel, Field
 
 from forge.repository.graph_schemas import CallSiteRecord, GraphNode, ImportRecord, NodeKind
-from forge.repository.protection import is_protected_path
+from forge.repository.protection import is_protected_name, is_protected_path
 from forge.repository.validation import assert_contained_path
+
+DEFAULT_EXCLUDED_WALK_DIRS: Set[str] = {
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    "build",
+    "dist",
+    ".git",
+    "node_modules",
+}
+
+
+def discover_workspace_python_files(
+    repo_root: Path,
+    max_python_files: int = 500,
+    max_file_size_bytes: int = 500_000,
+    exclude_forge: bool = True,
+) -> List[Path]:
+    """Safely discover eligible Python files using a pruned os.walk without descending into VCS/venv/cache dirs."""
+    root = Path(repo_root).resolve()
+    if not root.exists() or not root.is_dir():
+        return []
+
+    excluded_dirs = set(DEFAULT_EXCLUDED_WALK_DIRS)
+    if exclude_forge:
+        excluded_dirs.add(".forge")
+
+    root_str = str(root)
+    prefix_len = len(root_str) + (0 if root_str.endswith(os.sep) else 1)
+    discovered: List[Tuple[str, Path]] = []
+
+    for dirpath_str, dirnames, filenames in os.walk(root_str, followlinks=False):
+        dirpath = Path(dirpath_str)
+        if dirpath_str != root_str and os.path.islink(dirpath_str):
+            dirnames[:] = []
+            continue
+
+        kept_dirs: List[str] = []
+        for d in dirnames:
+            if d in excluded_dirs or d.endswith(".egg-info") or is_protected_name(d):
+                continue
+            cand_dir = os.path.join(dirpath_str, d)
+            if os.path.islink(cand_dir):
+                continue
+            kept_dirs.append(d)
+        dirnames[:] = sorted(kept_dirs)
+
+        rel_dir = "" if dirpath_str == root_str else dirpath_str[prefix_len:].replace(os.sep, "/")
+        for fname in sorted(filenames):
+            if not fname.endswith(".py") or is_protected_name(fname):
+                continue
+            full_path_str = os.path.join(dirpath_str, fname)
+            try:
+                st = os.lstat(full_path_str)
+            except OSError:
+                continue
+
+            if (st.st_mode & 0o170000) == 0o120000:  # Symlink: run full boundary check
+                py_file = Path(full_path_str)
+                try:
+                    resolved = assert_contained_path(py_file, root)
+                except Exception:
+                    continue
+                if is_protected_path(resolved, base_dir=root):
+                    continue
+                try:
+                    if resolved.stat().st_size > max_file_size_bytes:
+                        continue
+                except OSError:
+                    continue
+                rel_str = str(resolved.relative_to(root))
+                discovered.append((rel_str, resolved))
+            else:
+                if st.st_size > max_file_size_bytes:
+                    continue
+                rel_str = f"{rel_dir}/{fname}" if rel_dir else fname
+                discovered.append((rel_str, Path(full_path_str)))
+
+    discovered.sort(key=lambda item: item[0])
+    if len(discovered) > max_python_files:
+        discovered = discovered[:max_python_files]
+    return [item[1] for item in discovered]
 
 
 class SymbolType:
@@ -76,6 +160,7 @@ class ASTSymbolVisitor(ast.NodeVisitor):
         self.imports: List[ImportRecord] = []
         self.class_bases: Dict[str, List[str]] = {}
         self.callable_local_vars: Dict[str, Set[str]] = {}
+        self.module_docstring: Optional[str] = None
 
         self.current_class: Optional[str] = None
         self._scope_stack: List[str] = []
@@ -392,28 +477,40 @@ class ASTSymbolVisitor(ast.NodeVisitor):
         return unparsed, "dynamic", None, None, True
 
 
-def parse_python_file_details(file_path: Path, repo_root: Path) -> Optional[ASTSymbolVisitor]:
+def parse_python_file_details(
+    file_path: Path,
+    repo_root: Path,
+    preloaded_content: Optional[str] = None,
+    preverified: bool = False,
+) -> Optional[ASTSymbolVisitor]:
     """Parse a single Python file into AST and return the populated ASTSymbolVisitor."""
-    if is_protected_path(file_path, base_dir=repo_root):
-        return None
+    if not preverified:
+        if is_protected_path(file_path, base_dir=repo_root):
+            return None
 
-    try:
-        resolved_file = assert_contained_path(file_path, repo_root)
-    except Exception:
-        return None
+        try:
+            resolved_file = assert_contained_path(file_path, repo_root)
+        except Exception:
+            return None
 
-    if is_protected_path(resolved_file, base_dir=repo_root):
-        return None
+        if is_protected_path(resolved_file, base_dir=repo_root):
+            return None
+    else:
+        resolved_file = file_path
 
     rel_path = str(resolved_file.relative_to(repo_root))
 
     try:
-        content = resolved_file.read_text(encoding="utf-8", errors="ignore")
+        content = preloaded_content if preloaded_content is not None else resolved_file.read_text(encoding="utf-8", errors="ignore")
         tree = ast.parse(content, filename=rel_path)
     except Exception:
         return None
 
     visitor = ASTSymbolVisitor(rel_path)
+    try:
+        visitor.module_docstring = ast.get_docstring(tree)
+    except Exception:
+        visitor.module_docstring = None
 
     # Register top-level module node
     end_line = getattr(tree, "end_lineno", 1) or len(content.splitlines()) or 1
@@ -453,27 +550,14 @@ def build_symbol_index(
     methods = 0
     imports = 0
 
-    processed_count = 0
-    for py_file in root.rglob("*.py"):
-        if is_protected_path(py_file, base_dir=root):
-            continue
-
-        try:
-            resolved = assert_contained_path(py_file, root)
-        except Exception:
-            continue
-
-        if is_protected_path(resolved, base_dir=root):
-            continue
-
-        parts = resolved.relative_to(root).parts
-        if any(p in [".venv", "venv", "__pycache__", ".pytest_cache", "build", "dist", ".git"] for p in parts):
-            continue
-
-        if py_file.stat().st_size > max_file_size_bytes:
-            continue
-
-        symbols = index_python_file(py_file, root)
+    for resolved in discover_workspace_python_files(
+        root,
+        max_python_files=max_python_files,
+        max_file_size_bytes=max_file_size_bytes,
+        exclude_forge=False,
+    ):
+        visitor = parse_python_file_details(resolved, root, preverified=True)
+        symbols = visitor.symbols if visitor else []
         if symbols:
             rel_str = str(resolved.relative_to(root))
             file_map[rel_str] = symbols
@@ -488,10 +572,6 @@ def build_symbol_index(
                     methods += 1
                 elif sym.symbol_type == SymbolType.IMPORT:
                     imports += 1
-
-        processed_count += 1
-        if processed_count >= max_python_files:
-            break
 
     return SymbolIndex(
         symbols=all_symbols,

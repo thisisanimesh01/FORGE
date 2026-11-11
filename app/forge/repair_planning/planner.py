@@ -146,17 +146,17 @@ class RepairPlanningEngine:
         primary_node = root_cause_report.primary_root_cause if root_cause_report else None
         target_file = (
             primary_node.file_path
-            if primary_node
+            if (primary_node and primary_node.file_path)
             else (normalize_relative_path(file_path) if file_path else "unknown")
         )
         target_symbol = (
             primary_node.symbol_id
-            if primary_node
+            if (primary_node and primary_node.symbol_id)
             else (failing_symbol or "unknown")
         )
 
-        affected_files = [target_file] if target_file != "unknown" else []
-        affected_symbols = [target_symbol] if target_symbol != "unknown" else []
+        affected_files = [target_file] if target_file and target_file != "unknown" else []
+        affected_symbols = [target_symbol] if target_symbol and target_symbol != "unknown" else []
 
         # Audit target file existence and freshness on disk
         if target_file != "unknown":

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Set
 from pydantic import BaseModel, Field
 
-from forge.repository.protection import is_protected_path
+from forge.repository.protection import is_protected_name, is_protected_path
 from forge.repository.validation import assert_contained_path
 
 
@@ -126,12 +126,10 @@ def detect_repository(
             test_dirs.add(rel_dir_str)
 
         for filename in filenames:
-            file_path = dirpath / filename
-            # Exclude protected files before inspecting, reading, or counting
-            if is_protected_path(file_path, base_dir=root):
+            if is_protected_name(filename):
                 continue
-
-            # Prevent following symlinks outside root
+            file_path = dirpath / filename
+            # Prevent following symlinks outside root and check symlink target protection
             try:
                 resolved_file = assert_contained_path(file_path, root)
             except Exception:
@@ -167,10 +165,12 @@ def detect_repository(
                 intel.total_python_files += 1
                 if filename in ["main.py", "app.py", "cli.py", "manage.py", "wsgi.py", "__main__.py"]:
                     entrypoints.append(rel_file_str)
-                # Count lines safely
+                # Count lines safely without allocating decoded line lists
                 try:
-                    if file_path.stat().st_size <= max_file_size_bytes:
-                        line_count = len(file_path.read_text(encoding="utf-8", errors="ignore").splitlines())
+                    st_size = file_path.stat().st_size
+                    if st_size <= max_file_size_bytes and st_size > 0:
+                        raw_bytes = file_path.read_bytes()
+                        line_count = raw_bytes.count(b"\n") + (0 if raw_bytes.endswith(b"\n") else 1)
                         intel.total_lines += line_count
                 except Exception:
                     pass

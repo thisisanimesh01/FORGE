@@ -50,22 +50,26 @@ class ApprovalLedger:
     def __init__(self, db_path: Optional[Path] = None) -> None:
         self.db_path = db_path.resolve() if db_path else None
         self._lock = threading.Lock()
+        self._pool: Optional[Any] = None
         self._memory_consumed: Dict[str, str] = {}
         self._memory_revoked: Dict[str, str] = {}
         self._memory_approvals: Dict[str, Dict[str, Any]] = {}
 
         if self.db_path:
+            from forge.storage.sqlite_pool import ThreadLocalSQLitePool
+            self._pool = ThreadLocalSQLitePool(self.db_path, owner=self)
             self._init_db()
             self._load_from_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        if not self.db_path:
+    def _get_connection(self) -> Any:
+        if not self.db_path or self._pool is None:
             raise RuntimeError("Database path is not configured.")
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0, isolation_level=None)
-        conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA busy_timeout = 30000;")
-        return conn
+        return self._pool.get_connection()
+
+    def close(self) -> None:
+        """Close all pooled SQLite connections."""
+        if self._pool is not None:
+            self._pool.close_all()
 
     def _init_db(self) -> None:
         """Initialize the approval ledger table in SQLite with safe migrations."""
@@ -111,6 +115,9 @@ class ApprovalLedger:
                     conn.execute("ALTER TABLE orchestration_approval_records ADD COLUMN operator_principal TEXT;")
                 if "record_digest" not in rec_cols:
                     conn.execute("ALTER TABLE orchestration_approval_records ADD COLUMN record_digest TEXT;")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_orch_approval_wf ON orchestration_approval_records(workflow_id);"
+                )
             finally:
                 conn.close()
 
