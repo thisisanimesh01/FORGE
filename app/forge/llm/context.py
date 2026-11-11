@@ -137,8 +137,33 @@ class RepositoryContextBuilder:
         )
         if cache_key in self._context_cache and idx._symbol_index is not None:
             cached = self._context_cache[cache_key]
-            self._context_cache.move_to_end(cache_key)
-            return cached.model_copy(deep=True)
+            # Adversarial freshness check: ensure cached source excerpts have not drifted on disk
+            # even if size/mtime appear identical (Audit A invariant)
+            is_stale = False
+            for excerpt in cached.source_excerpts:
+                try:
+                    fpath = assert_contained_path(self.workspace_path / excerpt.file_path, self.workspace_path)
+                    if not fpath.is_file():
+                        is_stale = True
+                        break
+                    raw_lines = fpath.read_text(encoding="utf-8", errors="replace").splitlines()
+                    if excerpt.start_line > len(raw_lines):
+                        is_stale = True
+                        break
+                    selected = raw_lines[excerpt.start_line - 1 : excerpt.end_line]
+                    cur_sha = hashlib.sha256("\n".join(selected).encode("utf-8")).hexdigest()
+                    if cur_sha != excerpt.content_sha256:
+                        is_stale = True
+                        break
+                except Exception:
+                    is_stale = True
+                    break
+
+            if not is_stale:
+                self._context_cache.move_to_end(cache_key)
+                return cached.model_copy(deep=True)
+            else:
+                del self._context_cache[cache_key]
 
         if (
             self._last_stat_sig == stat_sig

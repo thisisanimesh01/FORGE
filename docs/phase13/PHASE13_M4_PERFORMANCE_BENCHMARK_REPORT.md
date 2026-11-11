@@ -28,13 +28,15 @@ Phase 13 Milestone 4 establishes a reproducible, deterministic benchmark suite (
 | **Cold Incremental Indexing (250 modules)** | 26,391 ms | **1,867 ms** | **14.1x** |
 | **Warm Incremental Rebuild (250 modules)** | 2,617 ms | **856 ms** | **3.1x** |
 | **1-File Delta Rebuild (250 modules)** | 2,786 ms | **963 ms** | **2.9x** |
-| **Context Build (Cached Repeat)** | 2,729 ms | **3.15 ms** | **866x** |
+| **Context Retrieval (Cached Repeat vs Cold Build)** | 2,729 ms (Cold Build) | **3.15 ms** (Cached Retrieval) | **866x** (Cached vs Cold) |
 | **Repair Workspace Allocation** | 3,534 ms | **674 ms** | **5.2x** |
 | **Test Verification Discovery** | 667 ms | **57 ms** | **11.7x** |
 | **100 Workflow + Event + Checkpoint DB Writes** | 276.8 ms | **26.1 ms** | **10.6x** |
 | **100 Workflow DB Reads** | 159.6 ms | **7.3 ms** | **21.8x** |
 | **100 Crash Recovery Inspections** | 232.0 ms | **13.3 ms** | **17.4x** |
 | **Concurrent 8-Thread Workflows (40 WFs)** | 354.0 ms | **12.9 ms** | **27.4x** |
+
+> **Note on Context Retrieval Metric:** The 866x figure represents serving budgeted context from the bounded in-memory LRU cache with live disk excerpt freshness verification (3.15 ms) versus the cold reconstruction path that computes full ASTs, call graphs, symbol indices, and module topology (~2.73 s).
 
 ---
 
