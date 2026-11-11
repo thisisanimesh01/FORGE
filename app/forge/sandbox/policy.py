@@ -68,6 +68,7 @@ ALLOWED_ENV_VAR_NAMES: Set[str] = {
     "PYTHONPATH",
     "PYTHONDONTWRITEBYTECODE",
     "PYTHONUNBUFFERED",
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
     "LANG",
     "LC_ALL",
     "TERM",
@@ -120,12 +121,20 @@ def validate_sandbox_request(request: SandboxRequest) -> None:
             f"Executable '{binary}' is not in the approved sandbox allowlist: {sorted(APPROVED_EXECUTABLES)}"
         )
 
-
     # 2. Executable-specific policy constraints
-    # python / python3: Disallow '-c' with inline arbitrary scripts or interactive modes
+    # python / python3: Disallow '-c' / '--command' at any position and forbidden 'pip' module invocations
     if binary in {"python", "python3"}:
-        if len(request.command) > 1 and request.command[1] in {"-c", "--command"}:
-            raise PolicyViolationError("Inline python script execution ('-c') is forbidden by execution policy")
+        args_after = request.command[1:]
+        for idx, arg in enumerate(args_after):
+            if arg in {"-c", "--command"} or arg.startswith("-c"):
+                raise PolicyViolationError("Inline python script execution ('-c') is forbidden by execution policy")
+            if arg == "-m" and idx + 1 < len(args_after) and args_after[idx + 1] == "pip":
+                pip_sub = args_after[idx + 2].lower() if idx + 2 < len(args_after) else ""
+                if pip_sub in FORBIDDEN_PIP_SUBCOMMANDS:
+                    raise PolicyViolationError(
+                        f"python -m pip {pip_sub} is forbidden by execution policy. "
+                        "Dependency installation from untrusted repositories is disabled."
+                    )
 
     # pip: Reject package installs/downloads
     if binary == "pip":
@@ -149,7 +158,6 @@ def validate_sandbox_request(request: SandboxRequest) -> None:
                     f"Command argument at index {idx} contains forbidden shell character or operator: {arg!r}"
                 )
 
-
     # 4. Working directory containment
     norm_cwd = request.relative_cwd.strip().replace("\\", "/")
     if norm_cwd.startswith("/") or norm_cwd.startswith("../") or "/../" in norm_cwd or norm_cwd == "..":
@@ -161,10 +169,27 @@ def validate_sandbox_request(request: SandboxRequest) -> None:
     if not request.workspace_path.is_absolute():
         raise PolicyViolationError(f"Workspace path must be an absolute path: {request.workspace_path}")
 
-    # Check for forbidden host mounts (e.g. root, home, /etc)
+    # Check for forbidden host mounts (e.g. root, home, /etc, credential dirs)
     resolved_workspace = request.workspace_path.resolve()
     user_home = Path.home().resolve()
-    if resolved_workspace == user_home or resolved_workspace == Path("/").resolve():
+    sensitive_exact = {
+        user_home,
+        Path("/").resolve(),
+    }
+    sensitive_prefixes = [
+        Path("/etc").resolve(),
+        Path("/root").resolve(),
+        Path("/System").resolve(),
+        user_home / ".ssh",
+        user_home / ".aws",
+        user_home / ".gnupg",
+        user_home / ".kube",
+        user_home / ".docker",
+    ]
+    if resolved_workspace in sensitive_exact or any(
+        resolved_workspace == p or resolved_workspace.is_relative_to(p)
+        for p in sensitive_prefixes
+    ):
         raise PolicyViolationError(
             f"Workspace path points to sensitive host directory: {resolved_workspace}"
         )

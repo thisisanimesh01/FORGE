@@ -21,9 +21,11 @@ from forge.llm.models import ToolDefinition
 from forge.repair_execution.schemas import ApprovalStatus, RepairApproval
 from forge.orchestration.orchestrator import EngineeringOrchestrator
 from forge.orchestration.persistence import OrchestrationStateStore
+from forge.orchestration.state import TERMINAL_STATES
 from forge.orchestration.idempotency import IdempotencyLedger
 from forge.orchestration.coordination import TaskCoordinator, TaskState
 from forge.orchestration.recovery import WorkflowRecoveryEngine
+from forge.repository.validation import SecurityError, assert_contained_path
 from forge.orchestration.schemas import (
     CreateOrchestrationWorkflowInput,
     CreateOrchestrationWorkflowOutput,
@@ -99,6 +101,11 @@ class OrchestrationTools:
             return json.dumps({"error": f"Validation error: {e}"})
 
         repo_path = Path(inp.repository_path).resolve()
+        try:
+            assert_contained_path(repo_path, self.repository_path)
+        except SecurityError as exc:
+            return json.dumps({"error": f"Security boundary violation: {exc}"})
+
         defect_input = DiagnosisInput(
             target_files=inp.target_files or [],
             target_symbols=inp.target_symbols or [],
@@ -317,19 +324,22 @@ class OrchestrationTools:
         orchestrator = self.get_orchestrator(wf_id)
         if orchestrator:
             from forge.orchestration.events import OrchestrationEventType
-            orchestrator.event_recorder.record_event(
+            ev = orchestrator.event_recorder.record_event(
                 workflow_id=wf_id,
                 event_type=OrchestrationEventType.STAGE_FAILED,
                 state=orchestrator.state,
                 action_description="Autonomous tool attempted to manufacture human approval (rejected).",
                 details={"caller": "tool_registry", "attempted_approver": args.get("approver_identity")},
             )
-            orchestrator._transition(
-                WorkflowState.BLOCKED,
-                "Workflow blocked: Autonomous tool caller attempted to manufacture human approval.",
-                stage=WorkflowStage.APPROVAL,
-                details={"error": "Tool callers cannot manufacture human approval"},
-            )
+            if orchestrator.state_store:
+                orchestrator.state_store.save_event(ev)
+            if orchestrator.state not in TERMINAL_STATES and orchestrator.state != WorkflowState.BLOCKED:
+                orchestrator._transition(
+                    WorkflowState.BLOCKED,
+                    "Workflow blocked: Autonomous tool caller attempted to manufacture human approval.",
+                    stage=WorkflowStage.APPROVAL,
+                    details={"error": "Tool callers cannot manufacture human approval"},
+                )
 
         out = SubmitOrchestrationApprovalOutput(
             workflow_id=wf_id,
@@ -371,17 +381,21 @@ class OrchestrationTools:
         except ValidationError as e:
             return json.dumps({"error": f"Validation error: {e}"})
 
-        decision = self.recovery_engine.inspect_recovery(inp.workflow_id)
-        out = InspectWorkflowRecoveryOutput(
-            workflow_id=inp.workflow_id,
-            state=decision.checkpoint.state if decision.checkpoint else WorkflowState.BLOCKED,
-            can_recover=decision.can_recover,
-            checkpoint_sequence=decision.checkpoint.sequence if decision.checkpoint else None,
-            checkpoint_digest=decision.checkpoint.checkpoint_digest if decision.checkpoint else None,
-            reconciliation_required=decision.reconciliation_required,
-            blocking_reason=decision.blocking_reason,
-        )
-        return out.model_dump_json()
+        try:
+            decision = self.recovery_engine.inspect_recovery(inp.workflow_id)
+            latest_cp = self.state_store.get_latest_checkpoint(inp.workflow_id)
+            out = InspectWorkflowRecoveryOutput(
+                workflow_id=inp.workflow_id,
+                state=decision.recovered_state,
+                can_recover=decision.can_resume,
+                checkpoint_sequence=latest_cp.get("last_event_sequence") if latest_cp else None,
+                checkpoint_digest=latest_cp.get("outputs_digest") if latest_cp else None,
+                reconciliation_required=decision.reconciliation_required,
+                blocking_reason=None if decision.can_resume else decision.reason,
+            )
+            return out.model_dump_json()
+        except Exception as exc:
+            return json.dumps({"error": f"Recovery inspection failed: {exc}"})
 
     def recover_orchestration_workflow(self, args: Dict[str, Any]) -> str:
         """Tool: recover_orchestration_workflow."""
@@ -399,9 +413,9 @@ class OrchestrationTools:
                 self.register_orchestrator(orchestrator)
             out = RecoverOrchestrationWorkflowOutput(
                 workflow_id=inp.workflow_id,
-                recovered=decision.can_recover,
-                state=orchestrator.state if orchestrator else WorkflowState.BLOCKED,
-                message=decision.blocking_reason or f"Workflow '{inp.workflow_id}' recovered successfully in state '{orchestrator.state.value if orchestrator else 'BLOCKED'}'.",
+                recovered=decision.can_resume,
+                state=orchestrator.state if orchestrator else decision.recovered_state,
+                message=decision.reason,
                 reconciliation_required=decision.reconciliation_required,
             )
             return out.model_dump_json()
@@ -441,19 +455,22 @@ class OrchestrationTools:
         orchestrator = self.get_orchestrator(wf_id)
         if orchestrator:
             from forge.orchestration.events import OrchestrationEventType
-            orchestrator.event_recorder.record_event(
+            ev = orchestrator.event_recorder.record_event(
                 workflow_id=wf_id,
                 event_type=OrchestrationEventType.STAGE_FAILED,
                 state=orchestrator.state,
                 action_description="Autonomous tool attempted to reconcile interrupted mutation (rejected).",
                 details={"caller": "tool_registry", "attempted_operator": args.get("reconciled_by"), "attempted_resolution": args.get("resolution")},
             )
-            orchestrator._transition(
-                WorkflowState.BLOCKED,
-                "Workflow blocked: Autonomous tool caller attempted to reconcile interrupted mutation.",
-                stage=WorkflowStage.EXECUTION,
-                details={"error": "Tool callers cannot reconcile interrupted mutations"},
-            )
+            if orchestrator.state_store:
+                orchestrator.state_store.save_event(ev)
+            if orchestrator.state not in TERMINAL_STATES and orchestrator.state != WorkflowState.BLOCKED:
+                orchestrator._transition(
+                    WorkflowState.BLOCKED,
+                    "Workflow blocked: Autonomous tool caller attempted to reconcile interrupted mutation.",
+                    stage=WorkflowStage.EXECUTION,
+                    details={"error": "Tool callers cannot reconcile interrupted mutations"},
+                )
 
         out = ReconcileOrchestrationMutationOutput(
             workflow_id=wf_id,

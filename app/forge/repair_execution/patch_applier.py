@@ -13,6 +13,9 @@ from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from forge.repository.protection import is_protected_path
+from forge.repository.validation import assert_contained_path, SecurityError
+
 HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
@@ -75,8 +78,13 @@ class ControlledPatchApplier:
             )
 
         allowed_set: Set[str] = set()
-        if allowed_files:
+        if allowed_files is not None:
             allowed_set = {f.strip().replace("\\", "/") for f in allowed_files if f.strip()}
+            if not allowed_set:
+                return PatchApplicationOutcome(
+                    success=False,
+                    errors=["Security error: approved file scope allowlist is empty."],
+                )
 
         file_diffs = self._split_diff_by_file(diff_text)
         if not file_diffs:
@@ -85,25 +93,86 @@ class ControlledPatchApplier:
                 errors=["No valid file diffs found in patch."],
             )
 
-        # Verify all target files are within allowed scope
-        if allowed_set:
-            for target_path in file_diffs.keys():
-                if target_path not in allowed_set:
-                    return PatchApplicationOutcome(
-                        success=False,
-                        errors=[f"Security error: target file '{target_path}' is outside approved scope."],
+        # Verify all target files are contained, non-protected, non-symlink, single-link, and within allowed scope
+        import os
+        import stat
+
+        def _validate_safe_workspace_target(rel_target: str, require_exists: bool = False) -> Path:
+            cur = ws_root
+            for part in Path(rel_target).parts:
+                cur = cur / part
+                if cur.is_symlink():
+                    raise PatchApplicationError(
+                        f"Security error: symlink encountered at '{cur}' for target '{rel_target}'."
                     )
+            abs_p = assert_contained_path(ws_root / rel_target, ws_root)
+            if require_exists:
+                st = os.lstat(abs_p)
+                if stat.S_ISLNK(st.st_mode):
+                    raise PatchApplicationError(f"Security error: target '{rel_target}' is a symlink.")
+                if not stat.S_ISREG(st.st_mode):
+                    raise PatchApplicationError(f"Target file '{rel_target}' is not a regular file.")
+                if st.st_nlink > 1:
+                    raise PatchApplicationError(
+                        f"Security error: target file '{rel_target}' has hardlinks (st_nlink={st.st_nlink})."
+                    )
+            return abs_p
+
+        def _read_bytes_nofollow(path_obj: Path) -> bytes:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(str(path_obj), flags)
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+                    raise PatchApplicationError(f"Security error: unsafe file descriptor state for '{path_obj}'.")
+                with os.fdopen(fd, "rb", closefd=False) as fh:
+                    return fh.read()
+            finally:
+                os.close(fd)
+
+        def _write_bytes_nofollow(path_obj: Path, data: bytes) -> None:
+            flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(str(path_obj), flags)
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+                    raise PatchApplicationError(f"Security error: unsafe write descriptor state for '{path_obj}'.")
+                with os.fdopen(fd, "wb", closefd=False) as fh:
+                    fh.write(data)
+            finally:
+                os.close(fd)
+
+        for target_path in file_diffs.keys():
+            if not target_path or target_path.startswith("/") or ".." in Path(target_path).parts:
+                return PatchApplicationOutcome(
+                    success=False,
+                    errors=[f"Security error: invalid or traversing target path '{target_path}'."],
+                )
+            if is_protected_path(target_path, base_dir=ws_root):
+                return PatchApplicationOutcome(
+                    success=False,
+                    errors=[f"Security error: target file '{target_path}' is a protected path."],
+                )
+            try:
+                _validate_safe_workspace_target(target_path, require_exists=False)
+            except (SecurityError, PatchApplicationError) as sec_err:
+                return PatchApplicationOutcome(
+                    success=False,
+                    errors=[f"Security error: {sec_err}"],
+                )
+            if allowed_files is not None and target_path not in allowed_set:
+                return PatchApplicationOutcome(
+                    success=False,
+                    errors=[f"Security error: target file '{target_path}' is outside approved scope."],
+                )
 
         self._backups.clear()
         modified_files: List[str] = []
 
         try:
             for target_path, diff_lines in file_diffs.items():
-                abs_path = (ws_root / target_path).resolve()
-                if not abs_path.exists() or not abs_path.is_file():
-                    raise PatchApplicationError(f"Target file '{target_path}' does not exist in workspace.")
-
-                original_bytes = abs_path.read_bytes()
+                abs_path = _validate_safe_workspace_target(target_path, require_exists=True)
+                original_bytes = _read_bytes_nofollow(abs_path)
                 self._backups[target_path] = original_bytes
                 is_crlf = b"\r\n" in original_bytes
                 original_content = original_bytes.decode("utf-8")
@@ -114,7 +183,9 @@ class ControlledPatchApplier:
                     had_trailing_nl = new_content.endswith("\n")
                     new_content = "\r\n".join(lines_split) + ("\r\n" if had_trailing_nl else "")
 
-                abs_path.write_bytes(new_content.encode("utf-8"))
+                # Re-validate path ancestors right before opening for write
+                abs_path = _validate_safe_workspace_target(target_path, require_exists=True)
+                _write_bytes_nofollow(abs_path, new_content.encode("utf-8"))
                 modified_files.append(target_path)
 
             summary = f"Successfully modified {len(modified_files)} file(s): {', '.join(modified_files)}"
@@ -138,16 +209,37 @@ class ControlledPatchApplier:
             )
 
     def revert_backups(self, workspace_path: Optional[Path] = None) -> None:
-        """Restore all original file contents from recorded backups."""
+        """Restore all original file contents from recorded backups safely within workspace."""
+        import os
+        import stat
+
         ws_root = workspace_path or self.workspace_path
         if not ws_root:
             return
+        ws_root = ws_root.resolve()
 
         for rel_path, orig_bytes in self._backups.items():
-            abs_path = (ws_root / rel_path).resolve()
             try:
-                if abs_path.exists():
-                    abs_path.write_bytes(orig_bytes)
+                cur = ws_root
+                has_symlink = False
+                for part in Path(rel_path).parts:
+                    cur = cur / part
+                    if cur.is_symlink():
+                        has_symlink = True
+                        break
+                if has_symlink:
+                    continue
+                abs_path = assert_contained_path(ws_root / rel_path, ws_root)
+                st = os.lstat(abs_path)
+                if not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode) or st.st_nlink > 1:
+                    continue
+                flags = os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+                fd = os.open(str(abs_path), flags)
+                try:
+                    with os.fdopen(fd, "wb", closefd=False) as fh:
+                        fh.write(orig_bytes)
+                finally:
+                    os.close(fd)
             except Exception:
                 pass
         self._backups.clear()

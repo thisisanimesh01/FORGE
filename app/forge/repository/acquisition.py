@@ -47,12 +47,57 @@ class AcquisitionError(Exception):
     pass
 
 
-def run_git_command(args: list[str], cwd: Optional[Path] = None, timeout_seconds: int = 60) -> subprocess.CompletedProcess:
-    """Run git command securely without shell interpolation and with hooks disabled."""
-    # Ensure hooks are globally and locally disabled for any invoked git command
+_VALID_GIT_REF_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/\-]{0,254}$")
+
+
+def _validate_git_ref(ref_value: str, label: str = "ref") -> str:
+    """Validate git branch/tag/commit reference against flag injection and traversal."""
+    cleaned = ref_value.strip()
+    if (
+        not cleaned
+        or cleaned.startswith("-")
+        or ".." in cleaned
+        or "//" in cleaned
+        or not _VALID_GIT_REF_RE.match(cleaned)
+    ):
+        raise SecurityError(f"Unsafe or invalid git {label}: '{ref_value}'")
+    return cleaned
+
+
+def _sanitized_git_env(allowed_protocols: Optional[str] = None) -> dict[str, str]:
+    """Build a minimal subprocess environment stripping dangerous GIT_* redirection/hook variables."""
+    safe_keys = {"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR"}
+    env = {k: os.environ[k] for k in safe_keys if k in os.environ}
+    if "PATH" not in env:
+        env["PATH"] = "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_CONFIG_SYSTEM"] = "/dev/null"
+    env["GIT_CONFIG_PARAMETERS"] = ""
+    env["GIT_CONFIG_COUNT"] = "0"
+    env["GIT_HOOKS_PATH"] = "/dev/null"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_DISCOVERY_ACROSS_FILESYSTEM"] = "0"
+    env["GIT_ALLOW_PROTOCOL"] = allowed_protocols or "https:file"
+    return env
+
+
+def run_git_command(
+    args: list[str],
+    cwd: Optional[Path] = None,
+    timeout_seconds: int = 60,
+    allowed_protocols: Optional[str] = None,
+) -> subprocess.CompletedProcess:
+    """Run git command securely without shell interpolation and with hooks/filters/symlinks disabled."""
     base_cmd = [
         "git",
         "-c", "core.hooksPath=/dev/null",
+        "-c", "protocol.ext.allow=never",
+        "-c", "core.fsmonitor=false",
+        "-c", "core.symlinks=false",
+        "-c", "submodule.recurse=false",
+        "-c", "diff.external=",
     ]
     if cwd:
         base_cmd.extend(["-c", f"safe.directory={cwd.resolve()}"])
@@ -65,6 +110,7 @@ def run_git_command(args: list[str], cwd: Optional[Path] = None, timeout_seconds
             text=True,
             timeout=timeout_seconds,
             check=False,
+            env=_sanitized_git_env(allowed_protocols=allowed_protocols),
         )
         return result
     except subprocess.TimeoutExpired as e:
@@ -111,6 +157,9 @@ def acquire_repository(
     if not validation.is_valid:
         raise SecurityError(f"Target validation failed: {validation.error}")
 
+    safe_branch = _validate_git_ref(branch, "branch") if branch and branch.strip() else None
+    safe_commit = _validate_git_ref(commit_sha, "commit_sha") if commit_sha and commit_sha.strip() else None
+
     settings = get_settings()
     base_dir = (custom_workspace or settings.workspace_dir).resolve()
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -121,21 +170,27 @@ def acquire_repository(
     dest_dir.mkdir(parents=True, exist_ok=False)
     trusted_dir = base_dir / f"trusted_{run_token}.git"
 
-    target_commit = (commit_sha or "").strip() or None
-    if not target_commit and branch and re.match(r"^[0-9a-fA-F]{40}$", branch.strip()):
-        target_commit = branch.strip()
+    target_commit = safe_commit
+    if not target_commit and safe_branch and re.match(r"^[0-9a-fA-F]{40}$", safe_branch):
+        target_commit = safe_branch
 
     if validation.target_type == TargetType.REMOTE_GIT:
         # Clone into isolated trusted repository mirror outside analysis workspace
         clone_args = [
             "clone",
             "--config", "core.hooksPath=/dev/null",
+            "--config", "core.symlinks=false",
         ]
-        if branch and not target_commit:
-            clone_args.extend(["--branch", branch])
-        clone_args.extend([validation.sanitized_target, str(trusted_dir)])
+        if safe_branch and not target_commit:
+            clone_args.extend(["--branch", safe_branch])
+        clone_args.extend(["--", validation.sanitized_target, str(trusted_dir)])
 
-        result = run_git_command(clone_args, timeout_seconds=settings.step_timeout_seconds)
+        remote_proto = "https" if validation.sanitized_target.startswith("https://") else "file"
+        result = run_git_command(
+            clone_args,
+            timeout_seconds=settings.step_timeout_seconds,
+            allowed_protocols=remote_proto,
+        )
         if result.returncode != 0:
             err_msg = redact_secrets(result.stderr or result.stdout)
             cleanup_errors = _cleanup_acquisition_paths(dest_dir, trusted_dir)
@@ -156,7 +211,7 @@ def acquire_repository(
         run_git_command(["config", "core.hooksPath", "/dev/null"], cwd=trusted_dir)
 
         if target_commit:
-            run_git_command(["checkout", target_commit], cwd=trusted_dir)
+            run_git_command(["checkout", "--detach", target_commit], cwd=trusted_dir)
 
         # Extract authentic upstream commit SHA and branch from trusted mirror
         commit_res = run_git_command(["rev-parse", "HEAD"], cwd=trusted_dir)
@@ -219,10 +274,16 @@ def acquire_repository(
                 "clone",
                 "--no-hardlinks",
                 "--config", "core.hooksPath=/dev/null",
+                "--config", "core.symlinks=false",
+                "--",
                 str(local_src),
                 str(trusted_dir),
             ]
-            res_clone = run_git_command(clone_args, timeout_seconds=settings.step_timeout_seconds)
+            res_clone = run_git_command(
+                clone_args,
+                timeout_seconds=settings.step_timeout_seconds,
+                allowed_protocols="file",
+            )
             if res_clone.returncode != 0:
                 err_msg = redact_secrets(res_clone.stderr or res_clone.stdout)
                 cleanup_errors = _cleanup_acquisition_paths(dest_dir, trusted_dir)
@@ -241,15 +302,15 @@ def acquire_repository(
             run_git_command(["config", "core.hooksPath", "/dev/null"], cwd=trusted_dir)
 
             if target_commit:
-                run_git_command(["checkout", target_commit], cwd=trusted_dir)
-            elif branch:
-                run_git_command(["checkout", branch], cwd=trusted_dir)
+                run_git_command(["checkout", "--detach", target_commit], cwd=trusted_dir)
+            elif safe_branch:
+                run_git_command(["checkout", "--detach", safe_branch], cwd=trusted_dir)
 
             commit_res = run_git_command(["rev-parse", "HEAD"], cwd=trusted_dir)
             upstream_commit_sha = commit_res.stdout.strip() if commit_res.returncode == 0 else target_commit
 
             branch_res = run_git_command(["rev-parse", "--abbrev-ref", "HEAD"], cwd=trusted_dir)
-            resolved_branch = branch_res.stdout.strip() if branch_res.returncode == 0 else branch
+            resolved_branch = branch_res.stdout.strip() if branch_res.returncode == 0 else safe_branch
 
             mediator = GitMediator(trusted_git_path=trusted_dir, workspace_path=dest_dir)
 

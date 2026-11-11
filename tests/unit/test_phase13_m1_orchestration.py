@@ -129,9 +129,11 @@ runner = CliRunner()
 @pytest.fixture(autouse=True)
 def configure_trusted_approvers_env(monkeypatch: pytest.MonkeyPatch):
     """Ensure trusted approver allowlist is configured by default for tests."""
+    import getpass
+    local_user = getpass.getuser()
     monkeypatch.setenv(
         "FORGE_TRUSTED_APPROVERS",
-        "security-lead@example.com,lead_engineer@example.com,senior_staff@example.com,auditor@corp.com,lead@example.com",
+        f"security-lead@example.com,lead_engineer@example.com,senior_staff@example.com,auditor@corp.com,lead@example.com,{local_user}",
     )
 
 

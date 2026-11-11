@@ -10,7 +10,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import threading
 from typing import Any, Dict, List, Optional, Set, Tuple
+import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -91,6 +93,7 @@ class WorkflowRecoveryEngine:
     ) -> None:
         self.store = store or state_store or OrchestrationStateStore()
         self.idempotency_ledger = idempotency_ledger or IdempotencyLedger(db_path=self.store.db_path)
+        self._lock = threading.Lock()
         if trusted_approvers is not None:
             self.trusted_approvers: Set[str] = set(trusted_approvers)
         else:
@@ -206,7 +209,8 @@ class WorkflowRecoveryEngine:
         if operator_principal and operator_principal not in trusted_set:
             return False, f"Reconciliation record tampered: operator principal '{operator_principal}' is not in trusted approver allowlist {sorted(trusted_set)}."
 
-        if auth_channel in {"autonomous_tool", "untrusted_caller", "synthetic"}:
+        allowed_auth_channels = {"interactive_cli", "trusted_operator", "cli"}
+        if auth_channel not in allowed_auth_channels:
             return False, f"Reconciliation record tampered: unauthorized auth channel '{auth_channel}'."
 
         # 2. Check alignment with cryptographic event log
@@ -225,6 +229,12 @@ class WorkflowRecoveryEngine:
 
         if ev_details.get("reconciled_by") and ev_details.get("reconciled_by") != reconciled_by:
             return False, "Reconciliation record tampered: reconciled_by mismatch with audit event."
+
+        if ev_details.get("operator_principal") and operator_principal and ev_details.get("operator_principal") != operator_principal:
+            return False, "Reconciliation record tampered: operator_principal mismatch with audit event."
+
+        if ev_details.get("resolution") and rec.get("resolution") and ev_details.get("resolution") != rec.get("resolution"):
+            return False, "Reconciliation record tampered: resolution mismatch with audit event."
 
         return True, None
 
@@ -439,7 +449,7 @@ class WorkflowRecoveryEngine:
                     "Interrupted repairs require explicit, authenticated human operator reconciliation via 'forge orchestrate reconcile'."
                 )
             orchestrator.state = WorkflowState.BLOCKED
-            event_recorder.record_event(
+            ev = event_recorder.record_event(
                 workflow_id=workflow_id,
                 event_type=OrchestrationEventType.WORKFLOW_BLOCKED,
                 state=WorkflowState.BLOCKED,
@@ -447,14 +457,17 @@ class WorkflowRecoveryEngine:
                 stage=WorkflowStage.EXECUTION,
                 details={"reason": decision.reason},
             )
+            self.store.save_event(ev)
             self.store.save_workflow(
                 context=ctx,
                 state=WorkflowState.BLOCKED,
                 current_stage=WorkflowStage.EXECUTION,
+                active_repair_plan_id=wf_data.get("active_repair_plan_id"),
+                active_approval_id=wf_data.get("active_approval_id"),
                 reconciliation_required=True,
             )
         else:
-            event_recorder.record_event(
+            ev = event_recorder.record_event(
                 workflow_id=workflow_id,
                 event_type=OrchestrationEventType.STAGE_COMPLETED,
                 state=orchestrator.state,
@@ -465,6 +478,7 @@ class WorkflowRecoveryEngine:
                     "recovered_state": orchestrator.state.value,
                 },
             )
+            self.store.save_event(ev)
 
         return decision, orchestrator
 
@@ -478,6 +492,25 @@ class WorkflowRecoveryEngine:
         auth_channel: str = "interactive_cli",
     ) -> None:
         """Apply an operator reconciliation to unblock an interrupted repair with mandatory authorization."""
+        with self._lock:
+            self._reconcile_mutation_locked(
+                workflow_id=workflow_id,
+                resolution=resolution,
+                reconciled_by=reconciled_by,
+                notes=notes,
+                operator_principal=operator_principal,
+                auth_channel=auth_channel,
+            )
+
+    def _reconcile_mutation_locked(
+        self,
+        workflow_id: str,
+        resolution: str,
+        reconciled_by: str,
+        notes: Optional[str] = None,
+        operator_principal: Optional[str] = None,
+        auth_channel: str = "interactive_cli",
+    ) -> None:
         wf_data = self.store.get_workflow(workflow_id)
         if not wf_data:
             raise RecoveryValidationError(f"Workflow '{workflow_id}' not found.")
@@ -504,9 +537,9 @@ class WorkflowRecoveryEngine:
         # 3. Mandatory Trusted Approver Allowlist Verification (Fail-Closed)
         trusted_set = self._resolve_trusted_approvers(wf_data)
 
-        # 4. Authentication Channel & Autonomous Tool Caller Rejection
-        prohibited_channels = {"autonomous_tool", "untrusted_caller", "synthetic", "agent", "subagent"}
-        if auth_channel in prohibited_channels:
+        # 4. Authentication Channel Strict Allowlist Enforcement
+        allowed_auth_channels = {"interactive_cli", "trusted_operator", "cli"}
+        if auth_channel not in allowed_auth_channels:
             raise RecoveryValidationError(
                 f"Reconciliation rejected: Untrusted auth channel '{auth_channel}'. "
                 "Autonomous tool callers cannot reconcile interrupted mutations. "
@@ -581,7 +614,13 @@ class WorkflowRecoveryEngine:
             exec_idemp = [r for r in idemp_records if r.stage == WorkflowStage.EXECUTION]
 
             has_completed_record = exec_record is not None and exec_record.status == StageStatus.COMPLETED
-            has_applied_output = isinstance(exec_output, dict) and exec_output.get("execution_status") == "applied"
+            has_applied_output = isinstance(exec_output, dict) and (
+                exec_output.get("execution_status") == "applied"
+                or (
+                    isinstance(exec_output.get("execution_result"), dict)
+                    and exec_output["execution_result"].get("execution_status") == "applied"
+                )
+            )
             has_completed_idemp = any(r.status == OperationStatus.COMPLETED for r in exec_idemp)
 
             if not (has_completed_record or has_applied_output or has_completed_idemp):
@@ -610,17 +649,21 @@ class WorkflowRecoveryEngine:
                     stage=WorkflowStage.EXECUTION,
                     error_message=f"Mutation {norm_res}ed by operator reconciliation ({norm_operator}).",
                 )
-            # Remove consumed approval from stage records so it cannot be re-applied
+            # Remove consumed approval and stale partial execution outputs so they cannot be re-applied or rehydrated
             conn = self.store._get_connection()
             try:
                 conn.execute(
                     "DELETE FROM orchestration_stage_records WHERE workflow_id = ? AND stage = ?;",
                     (workflow_id, WorkflowStage.APPROVAL.value),
                 )
+                conn.execute(
+                    "UPDATE orchestration_stage_records SET outputs_json = '{}' WHERE workflow_id = ? AND stage = ?;",
+                    (workflow_id, WorkflowStage.EXECUTION.value),
+                )
             finally:
                 conn.close()
 
-        reconcile_id = f"rec_{workflow_id[-6:]}_{datetime.now(timezone.utc).strftime('%H%M%S')}"
+        reconcile_id = f"rec_{workflow_id[-6:]}_{datetime.now(timezone.utc).strftime('%H%M%S')}_{uuid.uuid4().hex[:6]}"
         self.store.record_reconciliation(
             reconciliation_id=reconcile_id,
             workflow_id=workflow_id,
@@ -672,49 +715,25 @@ class WorkflowRecoveryEngine:
             conn.close()
 
     def _hydrate_stage_outputs(self, target: StageOutputs, raw_map: Dict[str, Dict[str, Any]]) -> None:
-        """Hydrate StageOutputs fields from raw dictionaries."""
+        """Hydrate StageOutputs fields from raw dictionaries (fail closed on corruption)."""
         try:
             if WorkflowStage.DIAGNOSIS.value in raw_map and raw_map[WorkflowStage.DIAGNOSIS.value]:
                 target.diagnosis_result = DiagnosisResult.model_validate(raw_map[WorkflowStage.DIAGNOSIS.value])
-        except Exception:
-            pass
-
-        try:
             if WorkflowStage.ROOT_CAUSE.value in raw_map and raw_map[WorkflowStage.ROOT_CAUSE.value]:
                 target.root_cause_report = RootCauseReport.model_validate(raw_map[WorkflowStage.ROOT_CAUSE.value])
-        except Exception:
-            pass
-
-        try:
             if WorkflowStage.PLANNING.value in raw_map and raw_map[WorkflowStage.PLANNING.value]:
                 target.repair_plan = RepairPlan.model_validate(raw_map[WorkflowStage.PLANNING.value])
-        except Exception:
-            pass
-
-        try:
             if WorkflowStage.APPROVAL.value in raw_map and raw_map[WorkflowStage.APPROVAL.value]:
                 target.approval = RepairApproval.model_validate(raw_map[WorkflowStage.APPROVAL.value])
-        except Exception:
-            pass
-
-        try:
             if WorkflowStage.EXECUTION.value in raw_map and raw_map[WorkflowStage.EXECUTION.value]:
                 payload = raw_map[WorkflowStage.EXECUTION.value]
                 if "execution_result" in payload:
                     target.execution_result = RepairExecutionResult.model_validate(payload["execution_result"])
                 if "repair_workspace" in payload:
                     target.repair_workspace = RepairWorkspace.model_validate(payload["repair_workspace"])
-        except Exception:
-            pass
-
-        try:
             if WorkflowStage.VERIFICATION.value in raw_map and raw_map[WorkflowStage.VERIFICATION.value]:
                 target.verification_result = VerificationResult.model_validate(raw_map[WorkflowStage.VERIFICATION.value])
-        except Exception:
-            pass
-
-        try:
             if WorkflowStage.QUALITY.value in raw_map and raw_map[WorkflowStage.QUALITY.value]:
                 target.quality_result = RepairQualityResult.model_validate(raw_map[WorkflowStage.QUALITY.value])
-        except Exception:
-            pass
+        except Exception as exc:
+            raise CorruptedStateError(f"Corrupted persisted stage output payload: {exc}") from exc

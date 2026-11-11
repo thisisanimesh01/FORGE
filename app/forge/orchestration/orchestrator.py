@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from forge.causality.schemas import CausalStatus, RootCauseReport
 from forge.diagnosis.schemas import DiagnosisInput, DiagnosisResult, DiagnosisStatus
 from forge.repair_execution.approval import compute_plan_digest
+from forge.repair_execution.ledger import ApprovalLedger
 from forge.repair_execution.schemas import (
     ExecutionStatus,
     RepairApproval,
@@ -120,10 +121,15 @@ class EngineeringOrchestrator:
 
         # Components
         self.event_recorder = event_recorder or OrchestrationEventRecorder()
-        self.approval_manager = approval_manager or OrchestrationApprovalManager(
-            trusted_approvers=context.trusted_approvers
-        )
         self.state_store = state_store
+        if approval_manager is not None:
+            self.approval_manager = approval_manager
+        else:
+            default_ledger = ApprovalLedger(db_path=state_store.db_path) if state_store else ApprovalLedger()
+            self.approval_manager = OrchestrationApprovalManager(
+                ledger=default_ledger,
+                trusted_approvers=context.trusted_approvers,
+            )
         self.retry_policy = retry_policy or RetryPolicy()
         self.idempotency_ledger = idempotency_ledger or (
             IdempotencyLedger(db_path=state_store.db_path) if state_store else None
@@ -587,8 +593,16 @@ class EngineeringOrchestrator:
             started_at = datetime.now(timezone.utc)
 
             if outcome.is_valid:
-                self.approval_manager._approved_plans[plan.plan_id] = approval
-                self.approval_manager._approved_workflows[approval.approval_id] = self.workflow_id
+                try:
+                    self.approval_manager.validate_and_record_approval(
+                        approval=approval,
+                        plan=plan,
+                        workflow_id=self.workflow_id,
+                    )
+                except (OrchestrationApprovalError, ValueError) as rec_err:
+                    outcome = ApprovalVerificationOutcome(False, [str(rec_err)])
+
+            if outcome.is_valid:
                 self.stage_outputs.approval = approval
                 self.stage_records[WorkflowStage.APPROVAL.value] = StageExecutionRecord(
                     stage=WorkflowStage.APPROVAL,
@@ -698,9 +712,14 @@ class EngineeringOrchestrator:
                 self._transition(WorkflowState.BLOCKED, err_msg, stage=WorkflowStage.EXECUTION)
                 raise OrchestrationApprovalError(err_msg)
 
-            # Ensure fake execution adapters share the approval manager ledger for durable replay protection
+            # Ensure execution adapters share the approval manager ledger and trusted approvers for durable replay protection
             if isinstance(self.execution_adapter, FakeExecutionAdapter) and self.execution_adapter.ledger is None:
                 self.execution_adapter.ledger = self.approval_manager.ledger
+            elif isinstance(self.execution_adapter, DefaultExecutionAdapter):
+                if self.execution_adapter.ledger is None:
+                    self.execution_adapter.ledger = self.approval_manager.ledger
+                if self.execution_adapter.trusted_approvers is None:
+                    self.execution_adapter.trusted_approvers = self.approval_manager.trusted_approvers
 
             if self.idempotency_ledger:
                 existing = self.idempotency_ledger.register_start(
@@ -739,6 +758,11 @@ class EngineeringOrchestrator:
                 self.stage_outputs.repair_workspace = workspace
 
                 if exec_result.execution_status == ExecutionStatus.APPLIED:
+                    if not self.approval_manager.ledger.is_consumed(approval.approval_id):
+                        self.approval_manager.ledger.record_consumed(
+                            approval.approval_id,
+                            exec_result.execution_id,
+                        )
                     if self.idempotency_ledger:
                         self.idempotency_ledger.mark_completed(
                             idempotency_key=idemp_key,
@@ -851,6 +875,8 @@ class EngineeringOrchestrator:
                 if (
                     verif_result.verification_status == VerificationStatus.PASSED
                     and verif_result.gate_decision == "PASSED"
+                    and verif_result.regression_classification
+                    in (RegressionClassification.NO_REGRESSION_OBSERVED, RegressionClassification.IMPROVED)
                 ):
                     self.stage_records[WorkflowStage.VERIFICATION.value] = StageExecutionRecord(
                         stage=WorkflowStage.VERIFICATION,

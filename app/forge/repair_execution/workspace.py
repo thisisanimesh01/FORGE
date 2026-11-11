@@ -50,17 +50,9 @@ def _safe_copy_tree(src_dir: Path, dst_dir: Path) -> None:
             except OSError:
                 continue
 
-            # Check symlinks: reject if target escapes src_dir or points to protected path
-            if src_file.is_symlink():
-                try:
-                    resolved = src_file.resolve()
-                    if not resolved.is_relative_to(src_dir):
-                        continue
-                    rel_resolved = str(resolved.relative_to(src_dir)).replace("\\", "/")
-                    if is_protected_path(rel_resolved, base_dir=src_dir):
-                        continue
-                except (ValueError, RuntimeError, OSError):
-                    continue
+            # Reject all symlinks cleanly inside isolated repair workspaces (prevents symlink chains/TOCTOU)
+            if stat.S_ISLNK(st.st_mode) or src_file.is_symlink():
+                continue
 
             rel_path = str((rel_root / file_name)).replace("\\", "/")
             if is_protected_path(rel_path, base_dir=src_dir):
@@ -68,7 +60,7 @@ def _safe_copy_tree(src_dir: Path, dst_dir: Path) -> None:
 
             dst_file = target_dir / file_name
             try:
-                if src_file.is_file():
+                if stat.S_ISREG(st.st_mode):
                     shutil.copy2(src_file, dst_file, follow_symlinks=False)
             except Exception:
                 continue

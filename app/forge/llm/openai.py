@@ -3,9 +3,11 @@
 import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 import httpx
 
 from forge.config import redact_secrets, get_settings
+from forge.llm.url_safety import URLSecurityError, is_canonical_loopback_url, validate_url_target
 from forge.llm.models import (
     ChatMessage,
     LLMRequest,
@@ -237,12 +239,16 @@ class OpenAICompatibleProvider:
         self._custom_client = http_client
 
     def is_available(self) -> bool:
-        """Return True if API key or local/loopback endpoint is configured."""
+        """Return True if API key (on a safe URL) or canonical local loopback endpoint is configured."""
+        if not self.api_base:
+            return False
         if self.api_key and self.api_key.strip():
-            return True
-        if self.api_base and ("localhost" in self.api_base or "127.0.0.1" in self.api_base):
-            return True
-        return False
+            try:
+                validate_url_target(self.api_base, allow_loopback=True, resolve_dns=False)
+                return True
+            except URLSecurityError:
+                return False
+        return is_canonical_loopback_url(self.api_base)
 
     def _get_client(self) -> httpx.Client:
         if self._custom_client:
@@ -321,6 +327,20 @@ class OpenAICompatibleProvider:
             )
 
         endpoint = f"{self.api_base}/chat/completions"
+        client = self._get_client()
+        resolve_live_dns = (
+            isinstance(client, httpx.Client)
+            and type(getattr(client, "_transport", None)) is httpx.HTTPTransport
+        )
+        try:
+            pinned = validate_url_target(
+                endpoint,
+                allow_loopback=True,
+                resolve_dns=resolve_live_dns,
+            )
+        except URLSecurityError as exc:
+            raise LLMUnavailableError(f"LLM endpoint blocked by SSRF policy: {exc}") from exc
+
         headers = {
             "Content-Type": "application/json",
             "User-Agent": "FORGE-Security-Auditor/1.0",
@@ -328,18 +348,31 @@ class OpenAICompatibleProvider:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
+        target_url = endpoint
+        post_kwargs: Dict[str, Any] = {}
+        if resolve_live_dns:
+            target_url = pinned.build_pinned_url()
+            headers["Host"] = pinned.host_header
+            if pinned.scheme == "https":
+                post_kwargs["extensions"] = {"sni_hostname": pinned.host}
+
         payload = self._build_payload(request)
-        client = self._get_client()
 
         total_attempts = 1 + self.max_retries
         resp: Optional[httpx.Response] = None
 
         for attempt in range(total_attempts):
             try:
-                resp = client.post(endpoint, json=payload, headers=headers)
+                resp = client.post(target_url, json=payload, headers=headers, **post_kwargs)
+                if 300 <= resp.status_code < 400:
+                    raise LLMUnavailableError(
+                        f"HTTP redirect (status {resp.status_code}) from LLM endpoint rejected by SSRF policy."
+                    )
                 if resp.status_code >= 500 and attempt < total_attempts - 1:
                     continue
                 break
+            except LLMUnavailableError:
+                raise
             except httpx.TimeoutException as exc:
                 if attempt == total_attempts - 1:
                     raise LLMTimeoutError(f"LLM request timed out after {self.timeout_seconds}s: {exc}")
@@ -373,22 +406,32 @@ class OpenAICompatibleProvider:
                 if isinstance(rf, dict) and rf.get("type") == "json_schema":
                     payload["response_format"] = {"type": "json_object"}
                     try:
-                        fallback_resp = client.post(endpoint, json=payload, headers=headers)
+                        fallback_resp = client.post(target_url, json=payload, headers=headers, **post_kwargs)
+                        if 300 <= fallback_resp.status_code < 400:
+                            raise LLMUnavailableError("HTTP redirect from LLM endpoint rejected by SSRF policy.")
                         if fallback_resp.status_code == 200:
                             resp = fallback_resp
                         elif fallback_resp.status_code == 400 and "response_format" in fallback_resp.text.lower():
                             del payload["response_format"]
-                            no_rf_resp = client.post(endpoint, json=payload, headers=headers)
+                            no_rf_resp = client.post(target_url, json=payload, headers=headers, **post_kwargs)
+                            if 300 <= no_rf_resp.status_code < 400:
+                                raise LLMUnavailableError("HTTP redirect from LLM endpoint rejected by SSRF policy.")
                             if no_rf_resp.status_code == 200:
                                 resp = no_rf_resp
+                    except LLMUnavailableError:
+                        raise
                     except Exception:
                         pass
                 elif "response_format" in payload:
                     del payload["response_format"]
                     try:
-                        no_rf_resp = client.post(endpoint, json=payload, headers=headers)
+                        no_rf_resp = client.post(target_url, json=payload, headers=headers, **post_kwargs)
+                        if 300 <= no_rf_resp.status_code < 400:
+                            raise LLMUnavailableError("HTTP redirect from LLM endpoint rejected by SSRF policy.")
                         if no_rf_resp.status_code == 200:
                             resp = no_rf_resp
+                    except LLMUnavailableError:
+                        raise
                     except Exception:
                         pass
 

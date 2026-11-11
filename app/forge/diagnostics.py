@@ -400,13 +400,38 @@ def check_llm_provider(settings: Optional[ForgeSettings] = None, timeout_seconds
 
     # 3. Local Ollama Provider
     if provider == "ollama":
+        from forge.llm.url_safety import URLSecurityError, validate_url_target
+
         base_url = cfg.ollama_base_url.rstrip("/")
         req_model = cfg.llm_model or "llama3"
         tags_url = f"{base_url}/api/tags"
 
+        class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                raise urllib.error.URLError(
+                    f"HTTP redirect (HTTP {code}) blocked by SSRF security policy."
+                )
+
         try:
-            req = urllib.request.Request(tags_url, headers={"User-Agent": "FORGE-Doctor/0.1.0b1"})
-            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            pinned = validate_url_target(tags_url, allow_loopback=True, resolve_dns=True)
+            is_mocked = getattr(urllib.request.urlopen, "__module__", "") != "urllib.request"
+            req_url = tags_url if is_mocked else pinned.build_pinned_url()
+            req_headers = {"User-Agent": "FORGE-Doctor/0.1.0b1"}
+            if not is_mocked:
+                req_headers["Host"] = pinned.host_header
+
+            req = urllib.request.Request(req_url, headers=req_headers)
+            if is_mocked:
+                ctx_mgr = urllib.request.urlopen(req, timeout=timeout_seconds)
+            else:
+                opener = urllib.request.build_opener(_NoRedirectHandler())
+                ctx_mgr = opener.open(req, timeout=timeout_seconds)
+
+            with ctx_mgr as resp:
+                if 300 <= resp.status < 400:
+                    raise urllib.error.URLError(
+                        f"HTTP redirect (HTTP {resp.status}) blocked by SSRF security policy."
+                    )
                 if resp.status != 200:
                     return DiagnosticCheck(
                         name="LLM Provider (ollama)",
@@ -419,7 +444,6 @@ def check_llm_provider(settings: Optional[ForgeSettings] = None, timeout_seconds
                 data = json.loads(resp.read().decode("utf-8"))
                 models = data.get("models", [])
                 available_names = [m.get("name", "") for m in models if isinstance(m, dict)]
-                available_tags = {n.split(":")[0] for n in available_names}
 
                 # Check if requested model or tag matches
                 model_found = any(
@@ -444,6 +468,15 @@ def check_llm_provider(settings: Optional[ForgeSettings] = None, timeout_seconds
                     message=f"Ollama server reachable at {base_url} (Model '{req_model}' verified in local inventory).",
                     details={"base_url": base_url, "model": req_model, "installed_models": available_names},
                 )
+        except URLSecurityError as e:
+            return DiagnosticCheck(
+                name="LLM Provider (ollama)",
+                category=DiagnosticCategory.MISCONFIGURED_ENV,
+                is_healthy=False,
+                message=f"Unsafe Ollama URL rejected by SSRF policy: {e}",
+                details={"base_url": base_url, "error": str(e)},
+                actionable_remediation="Configure OLLAMA_BASE_URL to a canonical local loopback URL (e.g. http://localhost:11434).",
+            )
         except urllib.error.URLError as e:
             return DiagnosticCheck(
                 name="LLM Provider (ollama)",

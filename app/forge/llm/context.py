@@ -170,7 +170,7 @@ class RepositoryContextBuilder:
                 start_line=s.start_line,
                 end_line=s.end_line,
                 parent_name=s.parent_class,
-                docstring_preview=(s.docstring.splitlines()[0][:100] if s.docstring else None),
+                docstring_preview=(redact_secrets(s.docstring.splitlines()[0][:100]) if s.docstring else None),
             )
             for s in selected_symbols
         ]
@@ -493,7 +493,8 @@ class RepositoryContextBuilder:
             lines.append("| Symbol | Type | Location | Docstring Preview |")
             lines.append("|---|---|---|---|")
             for s in selected_symbols:
-                doc = (s.docstring.splitlines()[0][:60] + "...") if s.docstring else "—"
+                raw_doc = (s.docstring.splitlines()[0][:60] + "...") if s.docstring else "—"
+                doc = redact_secrets(raw_doc).replace("|", "\\|").replace("```", "'''")
                 lines.append(f"| `{s.name}` | {s.symbol_type} | `{s.file_path}:{s.start_line}-{s.end_line}` | {doc} |")
             lines.append("")
 
@@ -538,9 +539,9 @@ class RepositoryContextBuilder:
                 trunc_note = " *(truncated)*" if exc.was_truncated else ""
                 lines.append(f"#### Excerpt {idx}: `{exc.file_path}` (lines {exc.start_line}–{exc.end_line} of {exc.total_lines}){trunc_note}")
                 lines.append(f"*(SHA-256: `{exc.content_sha256[:16]}...`)*")
-                lines.append("```python")
-                lines.append(exc.content)
-                lines.append("```")
+                lines.append("~~~~python")
+                lines.append(exc.content.replace("~~~~", "~ ~ ~ ~").replace("```", "'''"))
+                lines.append("~~~~")
                 lines.append("")
 
         full_text = "\n".join(lines)

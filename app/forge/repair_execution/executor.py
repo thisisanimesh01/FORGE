@@ -54,6 +54,7 @@ class ControlledRepairExecutor:
         event_recorder: Optional[RepairEventRecorder] = None,
         db_path: Optional[Path] = None,
         trusted_approver_identities: Optional[Set[str]] = None,
+        approval_ledger: Optional[ApprovalLedger] = None,
     ) -> None:
         self.repo_path = repo_path.resolve() if repo_path else None
         if workspace_manager:
@@ -71,7 +72,7 @@ class ControlledRepairExecutor:
         self.rollback_manager = WorkspaceRollbackManager()
         self.integrity_checker = WorkspaceIntegrityChecker()
 
-        self.ledger = ApprovalLedger(db_path=db_path)
+        self.ledger = approval_ledger or ApprovalLedger(db_path=db_path)
         self.trusted_approver_identities = trusted_approver_identities
         self._lock = threading.Lock()
         self._executions: Dict[str, RepairExecutionResult] = {}
@@ -102,6 +103,32 @@ class ControlledRepairExecutor:
         if extra:
             res.extend(extra)
         return res
+
+    def _check_live_evidence_freshness(self, plan: RepairPlan) -> List[str]:
+        """Re-verify supporting evidence source hashes against current repository disk state."""
+        if not self.repo_path or not self.repo_path.exists() or not plan.supporting_evidence:
+            return []
+        from forge.repair_planning.evidence import RepairEvidenceCollector
+
+        collector = RepairEvidenceCollector(workspace_path=self.repo_path)
+        stale_errors: List[str] = []
+        for ev in plan.supporting_evidence:
+            if not ev.file_path or not ev.source_hash:
+                continue
+            is_valid, current_hash, err = collector.verify_file_location(
+                file_path=ev.file_path,
+                start_line=ev.start_line,
+                end_line=ev.end_line,
+            )
+            if not is_valid:
+                stale_errors.append(
+                    f"Stale evidence '{ev.evidence_id}': file '{ev.file_path}' failed live verification ({err})."
+                )
+            elif current_hash != ev.source_hash:
+                stale_errors.append(
+                    f"Stale evidence '{ev.evidence_id}': '{ev.file_path}' modified on disk since plan synthesis."
+                )
+        return stale_errors
 
     def execute_repair(
         self,
@@ -139,22 +166,24 @@ class ControlledRepairExecutor:
                 consumed_approvals=consumed_map,
                 trusted_approver_identities=self.trusted_approver_identities,
             )
-            if not approval_check.is_valid:
+            live_stale_errors = self._check_live_evidence_freshness(plan)
+            all_auth_errors = list(approval_check.errors) + live_stale_errors
+            if not approval_check.is_valid or live_stale_errors:
                 self.event_recorder.record_event(
                     execution_id=execution_id,
                     event_type=RepairEventType.APPROVAL_REJECTED,
-                    action_description=f"Approval rejected: {', '.join(approval_check.errors)}",
+                    action_description=f"Approval rejected: {', '.join(all_auth_errors)}",
                     outcome="failure",
                 )
 
                 failure_class = FailureClassification.UNAUTHORIZED_EXECUTION
                 if approval.approval_status == ApprovalStatus.EXPIRED or approval.is_expired():
                     failure_class = FailureClassification.APPROVAL_EXPIRED
-                elif approval.approval_status == ApprovalStatus.REVOKED or any("has been revoked" in err for err in approval_check.errors):
+                elif approval.approval_status == ApprovalStatus.REVOKED or any("has been revoked" in err for err in all_auth_errors):
                     failure_class = FailureClassification.APPROVAL_REVOKED
-                elif any("outside approved" in err for err in approval_check.errors):
+                elif any("outside approved" in err for err in all_auth_errors):
                     failure_class = FailureClassification.SCOPE_BREACH
-                elif any("already been consumed" in err for err in approval_check.errors):
+                elif any("already been consumed" in err for err in all_auth_errors):
                     failure_class = FailureClassification.UNAUTHORIZED_EXECUTION
 
                 result = RepairExecutionResult(
@@ -162,11 +191,11 @@ class ControlledRepairExecutor:
                     repair_plan_id=plan.plan_id,
                     execution_status=ExecutionStatus.BLOCKED,
                     workspace_id=workspace.workspace_id if workspace else "none",
-                    diff_summary=f"Execution blocked: Authorization failed: {'; '.join(approval_check.errors)}",
+                    diff_summary=f"Execution blocked: Authorization failed: {'; '.join(all_auth_errors)}",
                     execution_events=self.event_recorder.get_events(execution_id),
                     rollback_status=RollbackStatus.NOT_TRIGGERED,
                     failure_classification=failure_class,
-                    limitations=self._format_limitations(plan.limitations, ["Repair execution was blocked due to failed approval validation."]),
+                    limitations=self._format_limitations(plan.limitations, ["Repair execution was blocked due to failed approval or stale evidence validation."]),
                     verification_pending=True,
                     approval_reference=approval.approval_id,
                 )
@@ -316,6 +345,31 @@ class ControlledRepairExecutor:
             action_description=f"Applying patch {patch.patch_id} to isolated workspace",
             outcome="started",
         )
+
+        # Re-verify live evidence freshness immediately before workspace mutation (TOCTOU guard)
+        live_stale_pre_apply = self._check_live_evidence_freshness(plan)
+        if live_stale_pre_apply:
+            self.event_recorder.record_event(
+                execution_id=execution_id,
+                event_type=RepairEventType.APPROVAL_REJECTED,
+                action_description=f"Pre-apply freshness violation: {', '.join(live_stale_pre_apply)}",
+                outcome="failure",
+            )
+            result = RepairExecutionResult(
+                execution_id=execution_id,
+                repair_plan_id=plan.plan_id,
+                execution_status=ExecutionStatus.BLOCKED,
+                workspace_id=ws.workspace_id,
+                diff_summary=f"Execution blocked: Pre-apply freshness check failed: {'; '.join(live_stale_pre_apply)}",
+                execution_events=self.event_recorder.get_events(execution_id),
+                rollback_status=RollbackStatus.NOT_TRIGGERED,
+                failure_classification=FailureClassification.UNAUTHORIZED_EXECUTION,
+                limitations=self._format_limitations(plan.limitations, ["Target repository modified between validation and patch application."]),
+                verification_pending=True,
+                approval_reference=approval.approval_id,
+            )
+            self._executions[execution_id] = result
+            return result
 
         app_outcome = self.patch_applier.apply_patch(
             workspace_path=Path(ws.isolated_workspace_path),

@@ -184,13 +184,31 @@ class OrchestrationApprovalManager:
                 f"in the configured trusted approver allowlist."
             )
 
-        # 7b. Authentication Channel & Principal Verification (Reject Untrusted / Autonomous Callers)
+        # 7b. Authentication Channel & Principal Verification (Strict Allowlist)
+        allowed_auth_channels = {"interactive_cli", "trusted_operator", "cli"}
         auth_chan = getattr(approval, "auth_channel", "interactive_cli")
-        if auth_chan in {"autonomous_tool", "untrusted_caller", "synthetic"}:
+        if not auth_chan or auth_chan not in allowed_auth_channels:
             errors.append(
                 f"Untrusted approval channel '{auth_chan}': Autonomous tool callers or untrusted processes "
                 "cannot manufacture human approval. Approval must originate from an authenticated human operator."
             )
+
+        op_principal = getattr(approval, "operator_principal", None)
+        if op_principal is not None:
+            op_clean = str(op_principal).strip()
+            op_lower = op_clean.lower()
+            if (
+                not op_clean
+                or op_lower in prohibited_identities
+                or any(term in op_lower for term in ("llm", "subagent", "synthetic", "auto"))
+            ):
+                errors.append(
+                    f"Invalid operator principal '{op_principal}': AI, model, agent, or synthetic principals are strictly forbidden."
+                )
+            elif op_clean not in self.trusted_approvers:
+                errors.append(
+                    f"Unauthorized operator principal: '{op_clean}' is not in the configured trusted approver allowlist."
+                )
 
         # 8. Cross-workflow approval substitution check (durable across restarts)
         bound_wf = self._approved_workflows.get(approval.approval_id) or self.ledger.get_workflow_for_approval(approval.approval_id)
@@ -231,6 +249,7 @@ class OrchestrationApprovalManager:
 
         # Persist to durable ledger (survives process restart)
         auth_chan = getattr(approval, "auth_channel", "interactive_cli")
+        op_principal = getattr(approval, "operator_principal", None)
         self.ledger.record_approval(
             approval_id=approval.approval_id,
             workflow_id=wf_id,
@@ -242,17 +261,26 @@ class OrchestrationApprovalManager:
             approval_expiry=approval.approval_expiry,
             approver_reference=approval.approver_reference,
             auth_channel=auth_chan,
+            operator_principal=op_principal,
         )
 
     def is_approved(self, plan_id: str) -> bool:
-        """Check if a plan has an active validated approval."""
+        """Check if a plan has an active, unconsumed, unrevoked, unexpired approval."""
         if plan_id in self._approved_plans:
-            return True
+            appr = self._approved_plans[plan_id]
+            if (
+                not appr.is_expired()
+                and not self.ledger.is_revoked(appr.approval_id)
+                and not self.ledger.is_consumed(appr.approval_id)
+            ):
+                return True
         persisted = self.ledger.get_approval_for_plan(plan_id)
         if persisted:
             appr_id = persisted["approval_id"]
             if not self.ledger.is_revoked(appr_id) and not self.ledger.is_consumed(appr_id):
-                return True
+                hydrated = self.get_approval(plan_id)
+                if hydrated and not hydrated.is_expired():
+                    return True
         return False
 
     def get_approval(self, plan_id: str) -> Optional[RepairApproval]:
@@ -273,6 +301,7 @@ class OrchestrationApprovalManager:
                 approver_reference=persisted["approver_reference"],
                 approval_status=ApprovalStatus(persisted.get("status", "approved")),
                 auth_channel=persisted.get("auth_channel", "interactive_cli"),
+                operator_principal=persisted.get("operator_principal"),
             )
         return None
 

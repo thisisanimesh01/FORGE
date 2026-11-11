@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Set, Tuple, Union
 
 from forge.config import redact_secrets
 from forge.repository.protection import is_protected_name, is_protected_path
+from forge.repository.validation import SecurityError, assert_contained_path
 
 
 class GitMediatorError(Exception):
@@ -159,6 +160,10 @@ class GitMediator:
             "git",
             "-C", str(target_cwd),
             "-c", "core.hooksPath=/dev/null",
+            "-c", "protocol.ext.allow=never",
+            "-c", "core.fsmonitor=false",
+            "-c", "core.symlinks=false",
+            "-c", "submodule.recurse=false",
             "-c", "diff.external=",
             "-c", f"safe.directory={target_cwd}",
         ] + args
@@ -603,34 +608,137 @@ class GitMediator:
             env=self._get_sanitized_git_env(self._trusted_git_path),
         )
 
+        import os
         import tarfile
 
+        MAX_EXPORT_MEMBERS = 50_000
+        MAX_EXPORT_FILE_BYTES = 20 * 1024 * 1024  # 20 MiB per file
+        MAX_EXPORT_TOTAL_BYTES = 250 * 1024 * 1024  # 250 MiB total
+
         exported_count = 0
+        total_bytes = 0
+        seen_paths: set[str] = set()
         if tar_proc.stdout is None:
             raise GitMediatorError("Failed to open pipe from git archive")
 
-        with tarfile.open(fileobj=tar_proc.stdout, mode="r|") as tar:
-            for member in tar:
-                m_path = Path(member.name)
-                # Disallow path traversal
-                if member.name.startswith("/") or ".." in m_path.parts:
-                    continue
-                # Disallow .git entries
-                if ".git" in m_path.parts:
-                    continue
-                # Disallow protected files
-                if is_protected_name(m_path.name) or is_protected_path(member.name, base_dir=dest_path):
-                    continue
+        def _assert_no_symlink_ancestors(target: Path, root: Path) -> None:
+            rel = target.relative_to(root)
+            cur = root
+            for part in rel.parts:
+                cur = cur / part
+                if cur.is_symlink():
+                    raise GitMediatorSecurityError(
+                        f"Security violation: symlink encountered along extraction path '{cur}'"
+                    )
 
-                if hasattr(tarfile, "data_filter"):
-                    tar.extract(member, path=dest_path, filter="data")
-                else:
-                    tar.extract(member, path=dest_path)
-                exported_count += 1
+        try:
+            with tarfile.open(fileobj=tar_proc.stdout, mode="r|") as tar:
+                for member in tar:
+                    if exported_count >= MAX_EXPORT_MEMBERS:
+                        raise GitMediatorSecurityError(
+                            f"Security violation: archive member limit ({MAX_EXPORT_MEMBERS}) exceeded."
+                        )
 
-        tar_proc.wait()
+                    raw_name = member.name or ""
+                    # Reject PAX/GNU extended headers, sparse, symlinks, hard links, devices, FIFOs
+                    if not (member.isdir() or member.isreg()):
+                        continue
+                    is_sparse = getattr(member, "issparse", None)
+                    if callable(is_sparse) and is_sparse():
+                        continue
+                    if member.pax_headers and ("GNU.sparse.major" in member.pax_headers or "GNU.sparse.size" in member.pax_headers):
+                        continue
+
+                    # Reject backslashes, NUL bytes, leading slashes, Windows drive letters, empty segments
+                    if "\x00" in raw_name or "\\" in raw_name or raw_name.startswith("/"):
+                        continue
+                    if len(raw_name) >= 2 and raw_name[1] == ":" and raw_name[0].isalpha():
+                        continue
+
+                    norm_rel = raw_name
+                    while norm_rel.startswith("./"):
+                        norm_rel = norm_rel[2:]
+                    if not norm_rel or norm_rel in {".", ".."}:
+                        continue
+                    parts = [p for p in norm_rel.split("/") if p != ""]
+                    if not parts or any(p in {".", ".."} for p in parts):
+                        continue
+
+                    # Case-insensitive .git and protected path rejection (defends case-insensitive FS)
+                    parts_lower = [p.lower() for p in parts]
+                    if ".git" in parts_lower:
+                        continue
+                    rel_posix = "/".join(parts)
+                    # Reject pre-existing symlinked ancestors at destination loudly before protection check
+                    cur_check = dest_path
+                    for part in parts[:-1]:
+                        cur_check = cur_check / part
+                        if cur_check.is_symlink():
+                            raise GitMediatorSecurityError(
+                                f"Security violation: symlink encountered along extraction path '{cur_check}'"
+                            )
+                    if any(is_protected_name(p) for p in parts) or is_protected_path(rel_posix, base_dir=dest_path):
+                        continue
+
+                    # Reject duplicate or case-colliding entries
+                    collision_key = rel_posix.lower()
+                    if collision_key in seen_paths:
+                        raise GitMediatorSecurityError(
+                            f"Security violation: duplicate or case-colliding archive entry '{rel_posix}'"
+                        )
+                    seen_paths.add(collision_key)
+
+                    target_dest = assert_contained_path(dest_path / rel_posix, dest_path)
+
+                    if member.isdir():
+                        _assert_no_symlink_ancestors(target_dest, dest_path)
+                        target_dest.mkdir(parents=True, exist_ok=True)
+                        continue
+
+                    if member.size < 0 or member.size > MAX_EXPORT_FILE_BYTES:
+                        raise GitMediatorSecurityError(
+                            f"Security violation: archive entry '{rel_posix}' exceeds max size ({member.size} bytes)."
+                        )
+                    if total_bytes + member.size > MAX_EXPORT_TOTAL_BYTES:
+                        raise GitMediatorSecurityError(
+                            f"Security violation: archive total extracted size exceeds limit ({MAX_EXPORT_TOTAL_BYTES} bytes)."
+                        )
+
+                    target_dest.parent.mkdir(parents=True, exist_ok=True)
+                    _assert_no_symlink_ancestors(target_dest, dest_path)
+
+                    extracted = tar.extractfile(member)
+                    if extracted is None:
+                        continue
+                    payload = extracted.read(MAX_EXPORT_FILE_BYTES + 1)
+                    if len(payload) > MAX_EXPORT_FILE_BYTES or total_bytes + len(payload) > MAX_EXPORT_TOTAL_BYTES:
+                        raise GitMediatorSecurityError(
+                            f"Security violation: archive payload size overflow in '{rel_posix}'."
+                        )
+                    total_bytes += len(payload)
+
+                    oflags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                    fd = os.open(str(target_dest), oflags, 0o644)
+                    try:
+                        with os.fdopen(fd, "wb") as out_f:
+                            out_f.write(payload)
+                    except Exception:
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+                        raise
+                    exported_count += 1
+        finally:
+            if tar_proc.poll() is None:
+                try:
+                    tar_proc.terminate()
+                except Exception:
+                    pass
+
+        _, stderr_bytes = tar_proc.communicate(timeout=30)
         if tar_proc.returncode != 0:
-            err = tar_proc.stderr.read().decode("utf-8", errors="replace") if tar_proc.stderr else ""
+            err = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
             raise GitMediatorError(f"git archive failed during workspace export: {redact_secrets(err)}")
 
         return exported_count
