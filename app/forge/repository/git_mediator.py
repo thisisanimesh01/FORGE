@@ -588,6 +588,11 @@ class GitMediator:
 
     def export_sanitized_workspace(self, dest_dir: Path, ref: str = "HEAD") -> int:
         """Export clean source files at ref into dest_dir, ensuring zero protected files or .git enter dest_dir."""
+        import tarfile
+
+        if not ref or ref.startswith("-") or "\x00" in ref:
+            raise GitMediatorSecurityError(f"Security violation: invalid git ref for archive export: '{ref}'")
+
         dest_path = Path(dest_dir).resolve()
         dest_path.mkdir(parents=True, exist_ok=True)
 
@@ -597,6 +602,7 @@ class GitMediator:
             "-c", "core.hooksPath=/dev/null",
             "-c", f"safe.directory={self._trusted_git_path}",
             "archive",
+            "--format=tar",
             ref,
         ]
 
@@ -608,9 +614,6 @@ class GitMediator:
             env=self._get_sanitized_git_env(self._trusted_git_path),
         )
 
-        import os
-        import tarfile
-
         MAX_EXPORT_MEMBERS = 50_000
         MAX_EXPORT_FILE_BYTES = 20 * 1024 * 1024  # 20 MiB per file
         MAX_EXPORT_TOTAL_BYTES = 250 * 1024 * 1024  # 250 MiB total
@@ -618,7 +621,57 @@ class GitMediator:
         exported_count = 0
         total_bytes = 0
         seen_paths: set[str] = set()
+        created_files: List[Path] = []
+
+        def _terminate_and_reap(proc: "subprocess.Popen[bytes]") -> bytes:
+            stderr_collected = b""
+            if proc.poll() is None:
+                try:
+                    if hasattr(proc, "terminate"):
+                        proc.terminate()
+                except Exception:
+                    pass
+                try:
+                    if hasattr(proc, "wait"):
+                        proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(proc, "wait"):
+                            proc.wait(timeout=5)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            if proc.stderr is not None:
+                try:
+                    stderr_collected = proc.stderr.read() or b""
+                except Exception:
+                    pass
+                try:
+                    proc.stderr.close()
+                except Exception:
+                    pass
+            if proc.stdout is not None:
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+            return stderr_collected
+
+        def _cleanup_created_files() -> None:
+            for created in reversed(created_files):
+                try:
+                    if created.exists() and not created.is_symlink():
+                        created.unlink()
+                except OSError:
+                    pass
+
         if tar_proc.stdout is None:
+            _terminate_and_reap(tar_proc)
             raise GitMediatorError("Failed to open pipe from git archive")
 
         def _assert_no_symlink_ancestors(target: Path, root: Path) -> None:
@@ -720,25 +773,48 @@ class GitMediator:
                     oflags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
                     fd = os.open(str(target_dest), oflags, 0o644)
                     try:
-                        with os.fdopen(fd, "wb") as out_f:
-                            out_f.write(payload)
+                        out_f = os.fdopen(fd, "wb")
                     except Exception:
                         try:
                             os.close(fd)
                         except OSError:
                             pass
                         raise
+                    created_files.append(target_dest)
+                    with out_f:
+                        out_f.write(payload)
                     exported_count += 1
-        finally:
-            if tar_proc.poll() is None:
-                try:
-                    tar_proc.terminate()
-                except Exception:
-                    pass
+        except tarfile.TarError as tar_err:
+            _cleanup_created_files()
+            try:
+                _, stderr_bytes = tar_proc.communicate(timeout=5)
+            except Exception:
+                stderr_bytes = _terminate_and_reap(tar_proc)
+            rc = tar_proc.returncode
+            err = stderr_bytes.decode("utf-8", errors="replace").strip() if stderr_bytes else ""
+            if rc is not None and rc != 0:
+                detail = redact_secrets(err) if err else f"exit code {rc}"
+                raise GitMediatorError(f"git archive failed during workspace export: {detail}") from tar_err
+            raise GitMediatorError(f"Invalid archive stream from git archive: {tar_err}") from tar_err
+        except Exception:
+            _cleanup_created_files()
+            _terminate_and_reap(tar_proc)
+            raise
 
-        _, stderr_bytes = tar_proc.communicate(timeout=30)
+        # Wait for git archive to finish flushing/exiting normally before checking returncode
+        try:
+            _, stderr_bytes = tar_proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired as timeout_err:
+            _cleanup_created_files()
+            stderr_bytes = _terminate_and_reap(tar_proc)
+            err = stderr_bytes.decode("utf-8", errors="replace").strip() if stderr_bytes else ""
+            detail = redact_secrets(err) if err else "process timed out after archive stream read"
+            raise GitMediatorError(f"git archive failed during workspace export: {detail}") from timeout_err
+
         if tar_proc.returncode != 0:
-            err = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
-            raise GitMediatorError(f"git archive failed during workspace export: {redact_secrets(err)}")
+            _cleanup_created_files()
+            err = stderr_bytes.decode("utf-8", errors="replace").strip() if stderr_bytes else ""
+            detail = redact_secrets(err) if err else f"exit code {tar_proc.returncode}"
+            raise GitMediatorError(f"git archive failed during workspace export: {detail}")
 
         return exported_count

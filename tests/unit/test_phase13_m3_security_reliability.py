@@ -1504,3 +1504,228 @@ def test_docker_sandbox_isolation_arguments_timeout_cleanup_and_fail_closed(
     res_to = sbx_fake.run(req)
     assert res_to.status == SbxStatus.TIMED_OUT
     assert any(c[:3] == ["/usr/bin/docker", "rm", "-f"] and "forge_req_iso" in c for c in cleanup_calls)
+
+
+def test_git_mediator_export_waits_for_slow_exit_and_surfaces_git_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Regression: export_sanitized_workspace must not SIGTERM a healthy git archive process before communicate()."""
+    import sys
+    from forge.repository.acquisition import acquire_repository, cleanup_repository, run_git_command
+    from forge.repository.git_mediator import GitMediatorError, GitMediatorSecurityError
+
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    (repo / "app.py").write_text("y = 2\n", encoding="utf-8")
+    (repo / ".env").write_text("SECRET_KEY=must_never_leak\n", encoding="utf-8")
+    (repo / "src").mkdir(exist_ok=True)
+    (repo / "src" / ".keep").write_text("ok\n", encoding="utf-8")
+    run_git_command(["add", "."], cwd=repo)
+    run_git_command(["commit", "-m", "add protected and dotfile"], cwd=repo)
+
+    # Real archive bytes with both ./ dotfile prefix and regular/protected members
+    tar_buf = io.BytesIO()
+    with tarfile.open(fileobj=tar_buf, mode="w") as tf:
+        for rel_name, content in [("./.env", b"SECRET=1\n"), ("./src/.hidden.py", b"x = 1\n"), ("app.py", b"y = 2\n")]:
+            ti = tarfile.TarInfo(rel_name)
+            ti.size = len(content)
+            tf.addfile(ti, io.BytesIO(content))
+    tar_bytes = tar_buf.getvalue()
+
+    terminated = {"called": False}
+
+    class _SlowExitProc:
+        """Simulates OS/Python 3.12 timing where poll() is None immediately after tarfile exits."""
+
+        def __init__(self) -> None:
+            self.stdout = io.BytesIO(tar_bytes)
+            self.stderr = io.BytesIO(b"")
+            self.returncode: int | None = None
+            self._communicated = False
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self) -> None:
+            terminated["called"] = True
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        def wait(self, timeout: int | None = None) -> int:
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+        def communicate(self, timeout: int = 30):
+            self._communicated = True
+            if self.returncode is None:
+                self.returncode = 0
+            return b"", self.stderr.getvalue()
+
+    trusted_git = tmp_path / "trusted.git"
+    subprocess.run(["git", "clone", "--bare", str(repo), str(trusted_git)], check=True, capture_output=True)
+    ws_repo = tmp_path / "ws_repo"
+    ws_repo.mkdir()
+    mediator = GitMediator(trusted_git_path=trusted_git, workspace_path=ws_repo)
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _SlowExitProc())
+    dest = tmp_path / "slow_exit_export"
+    count = mediator.export_sanitized_workspace(dest)
+
+    assert not terminated["called"], "Healthy archive subprocess must never receive SIGTERM before communicate()"
+    assert count == 2
+    assert (dest / "app.py").read_text(encoding="utf-8") == "y = 2\n"
+    assert (dest / "src" / ".hidden.py").read_text(encoding="utf-8") == "x = 1\n"
+    assert not (dest / ".env").exists()
+
+    # Restore real Popen and verify acquire_repository with slow exit subprocess for git archive only
+    monkeypatch.undo()
+    real_popen = subprocess.Popen
+
+    def _delayed_archive_popen(cmd, *a, **kw):
+        if isinstance(cmd, (list, tuple)) and "archive" in cmd:
+            real = real_popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=kw.get("env"), cwd=kw.get("cwd"))
+            raw_tar, _ = real.communicate(timeout=10)
+            delayed = real_popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys, time; data = sys.stdin.buffer.read(); sys.stdout.buffer.write(data); sys.stdout.buffer.flush(); time.sleep(0.05)",
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            assert delayed.stdin is not None
+            delayed.stdin.write(raw_tar)
+            delayed.stdin.close()
+            delayed.stdin = None
+            return delayed
+        return real_popen(cmd, *a, **kw)
+
+    monkeypatch.setattr(subprocess, "Popen", _delayed_archive_popen)
+    ws_parent = tmp_path / "acq_ws"
+    acquired = acquire_repository(str(repo), custom_workspace=ws_parent, allow_local=True)
+    try:
+        assert acquired.workspace_path.exists()
+        assert (acquired.workspace_path / "app.py").exists()
+        assert not (acquired.workspace_path / ".env").exists()
+        assert acquired.trusted_git_path is not None
+        assert not acquired.workspace_path.is_relative_to(acquired.trusted_git_path)
+    finally:
+        cleanup_repository(acquired, allowed_base=ws_parent)
+
+    # Restore real Popen: verify bad ref surfaces git stderr and flag-like ref is rejected
+    monkeypatch.undo()
+    dest_err = tmp_path / "bad_ref_export"
+    with pytest.raises(GitMediatorError, match="not a valid object name"):
+        mediator.export_sanitized_workspace(dest_err, ref="nonexistent_ref_xyz")
+    with pytest.raises(GitMediatorSecurityError, match="invalid git ref"):
+        mediator.export_sanitized_workspace(dest_err, ref="--upload-pack=evil")
+
+
+def test_git_mediator_export_cleans_up_partial_files_and_reaps_aborted_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Aborted or failing tar exports clean up newly written files and reap subprocesses/FDs cleanly."""
+    from forge.repository.acquisition import AcquisitionError, acquire_repository, run_git_command
+    from forge.repository.git_mediator import GitMediatorSecurityError
+
+    repo = tmp_path / "repo_cleanup"
+    _init_git_repo(repo)
+    (repo / "first.py").write_text("x = 1\n", encoding="utf-8")
+    run_git_command(["add", "."], cwd=repo)
+    run_git_command(["commit", "-m", "initial"], cwd=repo)
+
+    trusted_git = tmp_path / "trusted_cleanup.git"
+    subprocess.run(["git", "clone", "--bare", str(repo), str(trusted_git)], check=True, capture_output=True)
+    ws_repo = tmp_path / "ws_cleanup"
+    ws_repo.mkdir()
+    mediator = GitMediator(trusted_git_path=trusted_git, workspace_path=ws_repo)
+
+    # Write first.py, then trigger GitMediatorSecurityError on case collision
+    tar_buf = io.BytesIO()
+    with tarfile.open(fileobj=tar_buf, mode="w") as tf:
+        for name, data in [("first.py", b"first\n"), ("src/Dup.py", b"a\n"), ("src/dup.py", b"b\n")]:
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+    tar_bytes = tar_buf.getvalue()
+
+    lifecycle = {"terminated": False, "waited": False}
+
+    class _AbortableProc:
+        def __init__(self) -> None:
+            self.stdout = io.BytesIO(tar_bytes)
+            self.stderr = io.BytesIO(b"")
+            self.returncode: int | None = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self) -> None:
+            lifecycle["terminated"] = True
+            self.returncode = -15
+
+        def wait(self, timeout: int | None = None) -> int:
+            lifecycle["waited"] = True
+            if self.returncode is None:
+                self.returncode = -15
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        def communicate(self, timeout: int = 30):
+            return b"", b""
+
+    proc_instance = _AbortableProc()
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: proc_instance)
+    partial_dest = tmp_path / "partial_dest"
+    partial_dest.mkdir()
+    preexisting = partial_dest / "keep_existing.txt"
+    preexisting.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(GitMediatorSecurityError, match="duplicate or case-colliding"):
+        mediator.export_sanitized_workspace(partial_dest)
+
+    assert lifecycle["terminated"] and lifecycle["waited"]
+    assert proc_instance.stdout.closed and proc_instance.stderr.closed
+    assert not (partial_dest / "first.py").exists()
+    assert not (partial_dest / "src" / "Dup.py").exists()
+    assert preexisting.exists()
+
+    # Non-zero git archive exit cleans up partially created files AND acquire_repository cleans workspace/mirror
+    monkeypatch.undo()
+    tar_ok = io.BytesIO()
+    with tarfile.open(fileobj=tar_ok, mode="w") as tf:
+        ti = tarfile.TarInfo("partial.py")
+        ti.size = 4
+        tf.addfile(ti, io.BytesIO(b"ok\n\n"))
+    tar_ok_bytes = tar_ok.getvalue()
+
+    class _FailAfterStreamProc:
+        def __init__(self) -> None:
+            self.stdout = io.BytesIO(tar_ok_bytes)
+            self.stderr = io.BytesIO(b"fatal: simulated archive error\n")
+            self.returncode = 128
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self, timeout: int = 30):
+            return b"", self.stderr.getvalue()
+
+    real_popen = subprocess.Popen
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        lambda cmd, *a, **kw: _FailAfterStreamProc() if "archive" in cmd else real_popen(cmd, *a, **kw),
+    )
+    ws_acq = tmp_path / "acq_cleanup"
+    with pytest.raises(AcquisitionError, match="fatal: simulated archive error"):
+        acquire_repository(str(repo), custom_workspace=ws_acq, allow_local=True)
+    assert not any(ws_acq.glob("repo_*"))
+    assert not any(ws_acq.glob("trusted_*"))

@@ -120,8 +120,8 @@ All confirmed findings within scope have been remediated cleanly with regression
 
 ## 7. Regression Results & Diff Hygiene
 
-- `./.venv/bin/pytest tests/unit/test_phase13_m3_security_reliability.py -v`: **25 passed**.
-- `./.venv/bin/pytest tests/unit/ tests/security/ -q`: **2,132 passed, 2 skipped** (pre-existing host-conditional skips in `test_phase12_m5_repair_verification.py` and `test_repair_generalization.py`).
+- `./.venv/bin/pytest tests/unit/test_phase13_m3_security_reliability.py -v`: **27 passed** (includes 2 post-merge archive lifecycle & partial cleanup regression tests).
+- `./.venv/bin/pytest tests/unit/ tests/security/ -q`: **2,134 passed, 2 skipped** (pre-existing host-conditional skips in `test_phase12_m5_repair_verification.py` and `test_repair_generalization.py`).
 - `./.venv/bin/pytest tests/integration/ -v`: **6 skipped** (opt-in live Docker `FORGE_DOCKER_TESTS=1` and live Ollama `FORGE_RUN_OLLAMA_TESTS=1` not enabled/available on host).
 - `git diff --check`: **clean (0 whitespace/patch issues)**; zero modifications to `.env`, `.gitignore`, `.github/workflows/`, or Docker configs.
 
@@ -137,4 +137,20 @@ All confirmed findings within scope have been remediated cleanly with regression
 
 ## 9. Final Phase 13 M3 Verdict
 
-**APPROVED FOR HUMAN REVIEW** — Zero unresolved critical or high-severity findings remain, every confirmed defect from both adversarial audit passes has been remediated and backed by dedicated regression tests, all feasible offline/unit/security checks (2,132 passed, 2 skipped) and GitHub Actions Python 3.11/3.12/3.13 checks pass cleanly, and the live Docker integration runtime limitation is explicitly documented for operator sign-off on PR #17.
+**APPROVED FOR HUMAN REVIEW** — Zero unresolved critical or high-severity findings remain, every confirmed defect from both adversarial audit passes has been remediated and backed by dedicated regression tests, all feasible offline/unit/security checks (2,134 passed, 2 skipped) and GitHub Actions Python 3.11/3.12/3.13 checks pass cleanly, and the live Docker integration runtime limitation is explicitly documented for operator sign-off.
+
+---
+
+## 10. Post-Merge Hotfix Addendum: Git Archive Subprocess Termination Race (`hotfix/python312-sanitized-archive-export`)
+
+- **Triggering CI Failure**: Post-merge CI run `42943495650` on `main` (`3d6267d5163f30805ba173e4d817bdacd637b4a6`) failed on Python 3.12 in `tests/security/test_phase10_security_boundary_audit.py::test_docker_sandbox_mount_never_includes_trusted_mirror` (`app/forge/repository/acquisition.py:337`) with:
+  `AcquisitionError: Failed to export sanitized repository workspace: git archive failed during workspace export:` (empty stderr).
+- **Root Cause**: In `GitMediator.export_sanitized_workspace()` (`app/forge/repository/git_mediator.py`), exiting the `with tarfile.open(fileobj=tar_proc.stdout, mode="r|") as tar:` context entered a `finally:` block that immediately checked `if tar_proc.poll() is None: tar_proc.terminate()` *before* calling `tar_proc.communicate(timeout=30)`. Because `tarfile` stops iterating once it consumes the tar EOF zero-block inside its read buffer while the child `git archive` process may still be flushing trailing padding blocks or finishing `exit(0)`, `tar_proc.poll()` intermittently returned `None` (reproduced `8/50` times on local Python 3.13.6 and `37/50` times on local Python 3.11; exposed under GitHub Actions Ubuntu Python 3.12 scheduling). Sending premature `SIGTERM` killed a healthy `git archive` (`returncode = -15`) with empty `stderr`.
+- **Correction**:
+  - Removed the unconditional `finally: terminate()` on normal stream completion; `export_sanitized_workspace()` now runs `tar_proc.communicate(timeout=30)` on normal completion so `git archive` drains and exits cleanly before checking `returncode`.
+  - Restricted `_terminate_and_reap(tar_proc)` exclusively to aborted streams (`except Exception`, `subprocess.TimeoutExpired`, or missing `stdout` pipe), properly calling `terminate()` / `wait(timeout=5)` / `kill()` and closing both `stdout` and `stderr` pipes without FD leaks.
+  - Caught `tarfile.TarError` to inspect `tar_proc` status and stderr so failing `git archive` invocations (e.g., invalid `ref`) surface redacted Git stderr rather than hiding behind `tarfile.ReadError('empty file')`, added `ref` option-injection check + `--format=tar`, fixed `os.fdopen` single-close ownership, and unlinked any partially created files on aborted/failed exports.
+- **Preserved Invariants**: All M3 tar validation, traversal/backslash/drive-letter checks, `.git`/protected-path filtering, sparse/symlink/hardlink/device rejection, duplicate/case-collision detection, ancestor `is_symlink()` checks, `assert_contained_path()`, byte/member quotas, `O_EXCL`/`O_NOFOLLOW` extraction, and trusted mirror isolation remain unchanged.
+- **New Regression Tests (`tests/unit/test_phase13_m3_security_reliability.py`)**:
+  - `test_git_mediator_export_waits_for_slow_exit_and_surfaces_git_stderr`
+  - `test_git_mediator_export_cleans_up_partial_files_and_reaps_aborted_process`
